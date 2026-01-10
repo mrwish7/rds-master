@@ -1,7 +1,7 @@
 
 # RDS Master Pro (Python)
 
-  
+  ![Overview of the User Interface](http://uploads.mpbnl.nl/u/LeTzSM.png)
 
 A work-in-progress open-source webUI based RDS encoder. Ships with a lightweight Flask + Socket.IO server, Tailwind-styled UI, and session-gated access for secure usage.
 
