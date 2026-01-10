@@ -81,7 +81,9 @@ python app.py
 
 - Support for RBDS
 
-  
+- Support for UECP Input / output (planned)
+
+- Support for MRDS1322 RDS encoder chip (planned)
 
 ## Development Status
 
