@@ -92,7 +92,7 @@ default_state = {
     
     # Expert
     "ecc": "E3", "lic": "09", "tz_offset": 0.0, "en_ct": 1, "en_id": 1,
-    "ps_long_32": "RDS MASTER PRO v10.14", "en_lps": 1, "lps_centered": False,
+    "ps_long_32": "RDS MASTER PRO v10.14", "en_lps": 1, "lps_centered": False, "lps_cr": False,
     "ptyn": "PYTHON", "en_ptyn": 1, "ptyn_centered": False,
     "en_dab": 0, "dab_channel": "12B", "dab_eid": "CE15", "dab_mode": 1, "dab_es_flag": 0,
     "dab_sid": "0000", "dab_variant": 0,
@@ -210,6 +210,31 @@ def sig_abort(sig, frame):
 signal.signal(signal.SIGINT, sig_abort)
 
 # --- WORKERS ---
+
+# EBU Latin character mapping for encoding conversion
+EBU_LATIN_MAP = {
+    # Common Windows-1252 / UTF-8 to EBU Latin conversions
+    'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+    'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'å': 'a',
+    'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i',
+    'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
+    'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u',
+    'ç': 'c', 'ñ': 'n',
+    'ß': 'ss', '€': 'E',
+    'æ': 'ae', 'œ': 'oe',
+    '°': ' ', '™': ' ', '®': ' ',  # Replace symbols with space
+}
+
+def convert_to_ebu_latin(text):
+    """Convert UTF-8 or Windows-1252 text to RDS/EBU Latin compatible characters."""
+    result = []
+    for char in text:
+        if ord(char) > 127:  # Non-ASCII
+            result.append(EBU_LATIN_MAP.get(char, '?'))
+        else:
+            result.append(char)
+    return ''.join(result)
+
 def parse_text_source(text):
     if not text: return ""
     try:
@@ -219,14 +244,19 @@ def parse_text_source(text):
             def file_repl(m):
                 nonlocal failed
                 try: 
-                    with open(m.group(1), 'r', encoding='utf-8') as f: return f.read().strip()
+                    # Use utf-8-sig to automatically strip BOM, then convert special chars
+                    with open(m.group(1), 'r', encoding='utf-8-sig') as f: 
+                        content = f.read().strip()
+                        return convert_to_ebu_latin(content)
                 except: 
                     failed = True
                     return ""  # Return empty on error
             def url_repl(m):
                 nonlocal failed
                 try:
-                    with urllib.request.urlopen(m.group(1), timeout=2) as r: return r.read().decode('utf-8').strip()
+                    with urllib.request.urlopen(m.group(1), timeout=2) as r: 
+                        content = r.read().decode('utf-8').strip()
+                        return convert_to_ebu_latin(content)
                 except: 
                     failed = True
                     return ""  # Return empty on error
@@ -444,7 +474,7 @@ class RDSScheduler:
     def generate_auto_schedule(self):
         # 70% 0A, 30% 2A (increased 2A by 5% from 25%, decreased 0A by 5% from 75%)
         seq = [(0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0)]
-        if state["en_lps"]: seq.append((15,0))
+        if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +10% increase
         if state["en_ptyn"]: seq.append((10,0))
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
@@ -684,13 +714,19 @@ class RDSScheduler:
                 self.lps_sequence = self.parse_smart(raw, 32, state['lps_centered'])
             dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
             
-            monitor_data["lps"] = txt
+            monitor_data["lps"] = txt + ('\r' if state['lps_cr'] else '')
 
             if (time.time() - self.lps_seq_start_time) >= dur:
                 self.lps_seq_idx += 1
                 self.lps_seq_start_time, self.lps_ptr = time.time(), 0
                 dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
-            lps_txt = txt.encode('utf-8').ljust(32)[:32]
+            if state['lps_cr']:
+                # Strip padding and append CR instead
+                txt_stripped = txt.rstrip()
+                lps_txt = (txt_stripped + '\r').encode('utf-8')[:32]
+                lps_txt = lps_txt.ljust(32, b'\x00')[:32]  # pad with nulls
+            else:
+                lps_txt = txt.encode('utf-8').ljust(32)[:32]
             seg = self.lps_ptr % 8
             self.lps_ptr += 1
             return RDSHelper.get_group_bits(15, g_ver, seg, (lps_txt[seg*4]<<8)|lps_txt[seg*4+1], (lps_txt[seg*4+2]<<8)|lps_txt[seg*4+3])
@@ -1262,6 +1298,7 @@ UI_HTML = r"""
                          <div class="flex justify-between">
                              <label>Enable</label>
                              <div class="flex gap-2 items-center"><label>Centre Text</label><input type="checkbox" class="toggle-checkbox" id="lps_centered" {% if state.lps_centered %}checked{% endif %} onchange="sync()"></div>
+                             <div class="flex gap-2 items-center"><label>Append CR</label><input type="checkbox" class="toggle-checkbox" id="lps_cr" {% if state.lps_cr %}checked{% endif %} onchange="sync()"></div>
                              <input type="checkbox" class="toggle-checkbox" id="en_lps" {% if state.en_lps %}checked{% endif %} onchange="sync()">
                          </div>
                          <input type="text" id="ps_long_32" value="{{state.ps_long_32}}" onchange="sync()">
@@ -1610,7 +1647,7 @@ UI_HTML = r"""
                 
                 ptyn: getVal('ptyn'), en_ptyn: getVal('en_ptyn'), ptyn_centered: getVal('ptyn_centered'),
                 ecc: getVal('ecc'), lic: getVal('lic'), tz_offset: getVal('tz_offset'), en_ct: getVal('en_ct'), en_id: getVal('en_id'),
-                ps_long_32: getVal('ps_long_32'), en_lps: getVal('en_lps'), lps_centered: getVal('lps_centered'),
+                ps_long_32: getVal('ps_long_32'), en_lps: getVal('en_lps'), lps_centered: getVal('lps_centered'), lps_cr: getVal('lps_cr'),
                 en_dab: getVal('en_dab'), dab_channel: getVal('dab_channel'),
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
                 dab_sid: getVal('dab_sid'), dab_variant: getVal('dab_variant'),
