@@ -565,9 +565,8 @@ class RDSScheduler:
                 # Check if we need to rebuild the sequence (without centering for now)
                 # Compare against the original input, not the first sequence item
                 if not self.rt_sequence or raw_input != self.last_rt_text_content:
-                    # For RT in auto mode, truncate to limit instead of cycling
-                    raw_truncated = raw_input[:limit] if raw_input else ""
-                    self.rt_sequence = [(10, raw_truncated)]  # Single frame, no cycling
+                    # Parse timing syntax to get messages with durations, but stripped of timing prefixes
+                    self.rt_sequence = self.parse_smart(raw_input, limit, False)
                     self.rt_seq_idx = 0
                     self.rt_seq_start_time = time.time()
                     self.last_rt_text_content = raw_input
