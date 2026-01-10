@@ -347,6 +347,7 @@ class RDSScheduler:
         
         self.dab_last_sent = time.time()
         self.group_3a_toggle = 0  # Toggle between DAB ODA and RT+ ODA on Group 3A
+        self.schedule_gen_counter = 0  # Counter to half 3A frequency
 
     def get_text(self, key):
         val = state.get(key, "")
@@ -441,15 +442,17 @@ class RDSScheduler:
         return out if out else [(0,0)]
 
     def generate_auto_schedule(self):
-        seq = [(0,0), (0,0), (2,0), (0,0)] 
+        # 70% 0A, 30% 2A (increased 2A by 5% from 25%, decreased 0A by 5% from 75%)
+        seq = [(0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0)]
         if state["en_lps"]: seq.append((15,0))
         if state["en_ptyn"]: seq.append((10,0))
         if state["en_id"]: seq.append((1,0))
-        if state.get("en_dab"): seq.append((3,0))
+        # Half 3A frequency: only add on even counter cycles
+        if state.get("en_dab") and (self.schedule_gen_counter % 2 == 0): seq.append((3,0))
         if state["en_rt_plus"]: 
-            seq.append((3,0)) 
+            if self.schedule_gen_counter % 2 == 0: seq.append((3,0))
             seq.append((11,0)) 
-        seq.extend([(0,0), (2,0)])
+        self.schedule_gen_counter += 1
         return seq
 
     def next(self):
@@ -532,8 +535,9 @@ class RDSScheduler:
                 # Check if we need to rebuild the sequence (without centering for now)
                 # Compare against the original input, not the first sequence item
                 if not self.rt_sequence or raw_input != self.last_rt_text_content:
-                    # Parse without centering - we'll apply it later with CR
-                    self.rt_sequence = self.parse_smart(raw_input, limit, False)
+                    # For RT in auto mode, truncate to limit instead of cycling
+                    raw_truncated = raw_input[:limit] if raw_input else ""
+                    self.rt_sequence = [(10, raw_truncated)]  # Single frame, no cycling
                     self.rt_seq_idx = 0
                     self.rt_seq_start_time = time.time()
                     self.last_rt_text_content = raw_input
