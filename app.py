@@ -565,8 +565,22 @@ class RDSScheduler:
                 # Check if we need to rebuild the sequence (without centering for now)
                 # Compare against the original input, not the first sequence item
                 if not self.rt_sequence or raw_input != self.last_rt_text_content:
-                    # Parse timing syntax to get messages with durations, but stripped of timing prefixes
-                    self.rt_sequence = self.parse_smart(raw_input, limit, False)
+                    # Check if input has explicit timing/message separators (/)
+                    if "/" in raw_input:
+                        # Multiple explicit messages: parse with parse_smart to get durations
+                        self.rt_sequence = self.parse_smart(raw_input, limit, False)
+                    else:
+                        # Single message: just truncate to limit, no cycling
+                        # But still respect explicit timing like "5s:text"
+                        m = re.match(r"\s*(\d+)s:(.*)", raw_input.strip())
+                        if m:
+                            duration = int(m.group(1))
+                            text = m.group(2).strip()[:limit]
+                        else:
+                            duration = 10
+                            text = raw_input.strip()[:limit]
+                        self.rt_sequence = [(duration, text)]
+                    
                     self.rt_seq_idx = 0
                     self.rt_seq_start_time = time.time()
                     self.last_rt_text_content = raw_input
