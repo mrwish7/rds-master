@@ -82,6 +82,8 @@ default_state = {
     "rt_a": "RDS MASTER PRO", "rt_b": "Simple & Open Source RDS Encoder",
     "rt_cr": True, "rt_centered": False,
     "rt_mode": "2A", "rt_cycle": True, "rt_cycle_time": 5, "rt_active_buffer": 0,
+    "rt_ab_cycle_count": 2,
+    "rt_ab_cycle_count": 2,
     
     # RT+
     "rt_plus_format_a": "{artist} - {title}", 
@@ -97,6 +99,7 @@ default_state = {
 
     # Settings
     "auto_start": True,
+    "rds_freq": 57000,
     
     # Scheduler
     "group_sequence": "0A 0A 2A 0A", 
@@ -322,6 +325,8 @@ class RDSScheduler:
         self.last_rt_content = ""
         self.last_rt_text_content = ""
         self.rt_ab_flag = 0
+        self.rt_ab_cycles = 0  # number of full RT transmissions before toggling in cycle-ab mode
+        self.last_rt_buf = 0   # track last A/B buffer used to reset pointer on change
         self.rt_sequence, self.rt_seq_idx = [], 0
         self.rt_seq_start_time = 0
         self.last_ps_content = ""
@@ -352,19 +357,51 @@ class RDSScheduler:
         except: return 205
 
     def split(self, text, width=8, center=False):
-        words, frames, curr = text.split(), [], ""
         pad = lambda s: s.center(width) if center else s.ljust(width)
+        # PS case (width<=8): preserve exact single short frame; otherwise word-wrap without splitting words
+        if width <= 8:
+            if text is None: return [pad("")]
+            if len(text) <= width:
+                return [pad(text)]
+            # Word-wrap for readability, avoid splitting words; split overlong words only
+            words, frames, curr = text.split(), [], ""
+            for w in words:
+                if len(w) > width:
+                    if curr:
+                        frames.append(pad(curr)); curr = ""
+                    chunks = [w[i:i+width] for i in range(0, len(w), width)]
+                    for c in chunks[:-1]:
+                        frames.append(pad(c))
+                    curr = chunks[-1]
+                else:
+                    test = (curr + " " + w).strip() if curr else w
+                    if len(test) <= width:
+                        curr = test
+                    else:
+                        # Optional heuristic: if current is very short (<4), keep it alone
+                        frames.append(pad(curr)); curr = w
+            if curr:
+                frames.append(pad(curr))
+            return frames
+
+        # Wider fields (e.g., RT): keep existing word-wrap behavior
+        words, frames, curr = text.split(), [], ""
         for w in words:
             if len(w) > width:
-                if curr: frames.append(pad(curr)); curr = ""
+                if curr:
+                    frames.append(pad(curr)); curr = ""
                 chunks = [w[i:i+width] for i in range(0, len(w), width)]
-                for c in chunks[:-1]: frames.append(pad(c))
+                for c in chunks[:-1]:
+                    frames.append(pad(c))
                 curr = chunks[-1]
             else:
                 test = (curr + " " + w).strip() if curr else w
-                if len(test) <= width: curr = test
-                else: frames.append(pad(curr)); curr = w
-        if curr: frames.append(pad(curr))
+                if len(test) <= width:
+                    curr = test
+                else:
+                    frames.append(pad(curr)); curr = w
+        if curr:
+            frames.append(pad(curr))
         return frames
 
     def parse_smart(self, raw, width, center):
@@ -373,15 +410,23 @@ class RDSScheduler:
             # Only treat timed syntax when the string starts with Ns: tokens.
             # Split on whitespace-delimited slashes so literal slashes remain intact.
             for p in re.split(r"\s*/\s*", raw):
-                m = re.match(r"(\d+)s:(.*)", p.strip())
+                # Preserve trailing spaces in content; allow leading spaces before the number
+                m = re.match(r"\s*(\d+)s:(.*)", p)
                 if m:
                     for sf in self.split(m.group(2), width, center): seq.append((int(m.group(1)), sf))
                 else:
                     for sf in self.split(p.strip(), width, center): seq.append((2.5, sf))
         else:
-            if not raw.strip(): return [(10, " "*width)]
-            if len(raw.strip()) <= width: return [(10, self.split(raw, width, center)[0])]
-            for sf in self.split(raw.strip(), width, center): seq.append((2.5, sf))
+            if width <= 8:
+                # Preserve spaces for PS width
+                if raw == "" or raw is None: return [(10, " "*width)]
+                if len(raw) <= width: return [(10, self.split(raw, width, center)[0])]
+                for sf in self.split(raw, width, center): seq.append((2.5, sf))
+            else:
+                # Trim for RT/others
+                if not raw.strip(): return [(10, " "*width)]
+                if len(raw.strip()) <= width: return [(10, self.split(raw, width, center)[0])]
+                for sf in self.split(raw.strip(), width, center): seq.append((2.5, sf))
         return seq
 
     def parse_schedule_string(self, seq_str):
@@ -446,6 +491,7 @@ class RDSScheduler:
             if not self.ps_sequence: self.ps_sequence = [(10, "RDS_PRO ")]
             dur, txt = self.ps_sequence[self.ps_seq_idx % len(self.ps_sequence)]
             
+            txt = (txt or "").ljust(8)[:8]
             monitor_data["ps"] = txt
 
             if (time.time() - self.ps_seq_start_time) >= dur:
@@ -506,12 +552,17 @@ class RDSScheduler:
                 
                 # Handle rt_cycle_ab toggle (cycle same message on A/B)
                 if state["rt_cycle_ab"]:
-                    buf = int((time.time()-self.start_time)/state["rt_cycle_time"])%2
+                    buf = self.rt_ab_flag
                 else:
                     buf = self.rt_ab_flag
                 
                 # Use the text from sequence (strip it to get raw content)
                 raw = txt.strip()
+
+            # If A/B buffer changed, restart RT from the beginning
+            if buf != self.last_rt_buf:
+                self.rt_ptr = 0
+                self.last_rt_buf = buf
             
             sig = f"{raw}_{state['rt_centered']}_{state['rt_cr']}"
             limit = 32 if state["rt_mode"] == "2B" else 64
@@ -537,7 +588,19 @@ class RDSScheduler:
 
             v = g_ver 
             bpg = 2 if v==1 else 4
-            if self.rt_ptr * bpg >= len(clean) or (clean.find('\r') != -1 and self.rt_ptr*bpg > clean.find('\r')): self.rt_ptr = 0
+            if self.rt_ptr * bpg >= len(clean) or (clean.find('\r') != -1 and self.rt_ptr*bpg > clean.find('\r')):
+                # Completed one full RT transmission cycle
+                if state.get("rt_cycle_ab"):
+                    self.rt_ab_cycles += 1
+                    try:
+                        cycle_target = int(state.get("rt_ab_cycle_count", 2))
+                    except:
+                        cycle_target = 2
+                    if cycle_target < 1: cycle_target = 1
+                    if self.rt_ab_cycles >= cycle_target:
+                        self.rt_ab_flag = 1 - self.rt_ab_flag
+                        self.rt_ab_cycles = 0
+                self.rt_ptr = 0
             pad = clean.ljust(64)
             a = self.rt_ptr % 16
             self.rt_ptr += 1
@@ -746,8 +809,13 @@ class RDSDSP:
 
     def process_frame(self, outdata, frames, indata=None):
         lvl_pilot, lvl_rds = (state["pilot_level"]/100.0), (state["rds_level"]/100.0)
+        rds_freq = float(state.get("rds_freq", 57000))
+        # Clamp to sensible range
+        if rds_freq < 1000: rds_freq = 1000
+        if rds_freq > 120000: rds_freq = 120000
         
-        use_genlock = state["genlock"] and indata is not None and len(indata) == frames
+        # Genlock only valid when RDS is 3x pilot (57kHz)
+        use_genlock = state["genlock"] and indata is not None and len(indata) == frames and abs(rds_freq - 3*PILOT_FREQ) < 1e-3
         if use_genlock:
              try:
                  mpx_in = indata[:, 0]
@@ -771,13 +839,13 @@ class RDSDSP:
         shaped, self.zi = dsp_signal.lfilter(self.taps, 1.0, bb, zi=self.zi)
         t = np.arange(frames) / SAMPLE_RATE
         
-        rds_sig = shaped * np.sin(2 * np.pi * RDS_FREQ * t + self.p_rds) * lvl_rds
+        rds_sig = shaped * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
              self.p_pilot = (self.p_pilot + 2 * np.pi * PILOT_FREQ * frames / SAMPLE_RATE) % (2 * np.pi)
 
-        self.p_rds = (self.p_rds + 2 * np.pi * RDS_FREQ * frames / SAMPLE_RATE) % (2 * np.pi)
+        self.p_rds = (self.p_rds + 2 * np.pi * rds_freq * frames / SAMPLE_RATE) % (2 * np.pi)
         mixed = rds_sig + pilot_sig
         
         if indata is not None and state["passthrough"] and indata.shape[1] == 2:
@@ -1074,7 +1142,7 @@ UI_HTML = r"""
                                     <label>Cycle same message on A/B</label>
                                     <div class="text-[9px] text-gray-500">Toggle A/B at interval (ignores message-based toggle)</div>
                                 </div>
-                                <input type="checkbox" class="toggle-checkbox" id="rt_cycle_ab" {% if state.rt_cycle_ab %}checked{% endif %} onchange="sync()">
+                                <input type="checkbox" class="toggle-checkbox" id="rt_cycle_ab" {% if state.rt_cycle_ab %}checked{% endif %} onchange="sync(); updateCycleControls()">
                             </div>
                         </div>
                         
@@ -1096,9 +1164,19 @@ UI_HTML = r"""
                         </div>
                         
                         <div class="flex justify-between items-center bg-[#111] p-2 rounded">
-                             <div class="flex gap-4">
-                                 <div><label>Mode</label><select id="rt_mode" onchange="sync()"><option value="2A">2A (64)</option><option value="2B">2B (32)</option></select></div>
-                                 <div><label>Time</label><input type="number" id="rt_cycle_time" value="{{state.rt_cycle_time}}" class="w-12" onchange="sync()"></div>
+                             <div class="flex gap-4 items-end">
+                                 <div>
+                                     <label>Mode</label>
+                                     <select id="rt_mode" onchange="sync()"><option value="2A">2A (64)</option><option value="2B">2B (32)</option></select>
+                                 </div>
+                                 <div id="time_seconds_wrap">
+                                     <label>Time (seconds)</label>
+                                     <input type="number" id="rt_cycle_time" value="{{state.rt_cycle_time}}" class="w-16" min="1" onchange="sync()">
+                                 </div>
+                                 <div id="rt_cycles_wrap" style="display:none">
+                                     <label>RT cycles</label>
+                                     <input type="number" id="rt_ab_cycle_count" value="{{state.rt_ab_cycle_count}}" class="w-16" min="1" onchange="sync()">
+                                 </div>
                              </div>
                              <div class="flex gap-4">
                                  <div class="flex flex-col items-center"><label>RT+ Enable</label><input type="checkbox" class="toggle-checkbox" id="en_rt_plus" {% if state.en_rt_plus %}checked{% endif %} onchange="sync()"></div>
@@ -1333,6 +1411,16 @@ UI_HTML = r"""
                             </div>
                         </div>
 
+                        <div class="mt-2">
+                            <label>RDS Carrier Frequency (Hz)</label>
+                            <div class="grid grid-cols-2 gap-4 items-center">
+                                <input type="number" id="rds_freq" value="{{state.rds_freq}}" min="1000" max="120000" step="1" class="w-32" onchange="sync()">
+                                <div class="text-[11px] {{ 'text-red-400' if state.rds_freq != 57000 else 'text-gray-400' }}">
+                                    ⚠ Non-compliant if not 57000 Hz. Use at your own risk.
+                                </div>
+                            </div>
+                        </div>
+
                         <div class="grid grid-cols-2 gap-4 mt-2">
                             <div>
                                 <label>19kHz Pilot Level (%)</label>
@@ -1434,6 +1522,17 @@ UI_HTML = r"""
             document.getElementById('rt_dual_mode').style.display = manual ? 'block' : 'none';
         }
 
+        function updateCycleControls() {
+            const cycleEl = document.getElementById('rt_cycle_ab');
+            const cycleAB = cycleEl ? cycleEl.checked : false;
+            const timeWrap = document.getElementById('time_seconds_wrap');
+            const cyclesWrap = document.getElementById('rt_cycles_wrap');
+            if (timeWrap && cyclesWrap) {
+                timeWrap.style.display = cycleAB ? 'none' : 'block';
+                cyclesWrap.style.display = cycleAB ? 'block' : 'none';
+            }
+        }
+
         async function saveSettings() {
             const statusEl = document.getElementById('settings_status');
             if (statusEl) statusEl.innerText = 'Saving...';
@@ -1496,6 +1595,7 @@ UI_HTML = r"""
                 rt_a: getVal('rt_a'), rt_b: getVal('rt_b'), rt_mode: getVal('rt_mode'),
                 rt_cycle: getVal('rt_cycle'), rt_centered: getVal('rt_centered'), rt_cr: getVal('rt_cr'),
                 rt_cycle_time: getVal('rt_cycle_time'),
+                rt_ab_cycle_count: getVal('rt_ab_cycle_count'),
                 
                 // New RT+
                 rt_plus_format_a: getVal('rt_plus_format_a'),
@@ -1508,6 +1608,7 @@ UI_HTML = r"""
                 en_dab: getVal('en_dab'), dab_channel: getVal('dab_channel'),
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
                 dab_sid: getVal('dab_sid'), dab_variant: getVal('dab_variant'),
+                rds_freq: getVal('rds_freq'),
                 group_sequence: getVal('group_sequence'), scheduler_auto: getVal('scheduler_auto')
             };
             socket.emit('update', data);
@@ -1527,6 +1628,9 @@ UI_HTML = r"""
             }
         }
         
+        // Initialize cycle controls on load
+        updateCycleControls();
+
         setInterval(() => {
              let hasInput = document.getElementById('dev_in').value != "-1";
              let gl = document.getElementById('genlock');
@@ -1548,6 +1652,9 @@ UI_HTML = r"""
                      if (pilotSlider.disabled) { pilotSlider.disabled = false; pilotSlider.parentElement.classList.remove('opacity-50'); if (pilotStatus) pilotStatus.innerText = 'Enabled'; }
                  }
              }
+
+               // Update cycle controls visibility regularly
+               updateCycleControls();
         }, 1000);
     </script>
 </body>
