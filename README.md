@@ -79,6 +79,8 @@ python app.py
 
 - No packaged EXE release yet; restart-on-crash not managed.
 
+- Support for RBDS
+
   
 
 ## Development Status
