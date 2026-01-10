@@ -472,10 +472,10 @@ class RDSScheduler:
         return out if out else [(0,0)]
 
     def generate_auto_schedule(self):
-        # 70% 0A, 30% 2A (increased 2A by 5% from 25%, decreased 0A by 5% from 75%)
-        seq = [(0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0)]
+        # 60% 0A, 40% 2A (reduced 0A by 10%, gave 5% to PTYN and 5% to LPS)
+        seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0)]
         if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +10% increase
-        if state["en_ptyn"]: seq.append((10,0))
+        if state["en_ptyn"]: seq.append((10,0)); seq.append((10,0))  # +5% increase (was +5%, now +10%)
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
         if state.get("en_dab") and (self.schedule_gen_counter % 2 == 0): seq.append((3,0))
@@ -721,14 +721,24 @@ class RDSScheduler:
                 self.lps_seq_start_time, self.lps_ptr = time.time(), 0
                 dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
             if state['lps_cr']:
-                # Strip padding and append CR instead
+                # Strip padding and append CR, no null padding
                 txt_stripped = txt.rstrip()
-                lps_txt = (txt_stripped + '\r').encode('utf-8')[:32]
-                lps_txt = lps_txt.ljust(32, b'\x00')[:32]  # pad with nulls
+                lps_txt = (txt_stripped + '\r').encode('utf-8')
+                # Pad to at least 4 bytes for segment transmission, but stop at CR
+                if len(lps_txt) < 4:
+                    lps_txt = lps_txt.ljust(4, b'\x00')
             else:
                 lps_txt = txt.encode('utf-8').ljust(32)[:32]
             seg = self.lps_ptr % 8
             self.lps_ptr += 1
+            # For CR mode, only send up to the actual length; for normal mode send all 8 segments
+            if state['lps_cr'] and (seg * 4) >= len(lps_txt):
+                # Skip this segment and move to next group
+                self.schedule_ptr += 1
+                return self.next()
+            # Pad segment data if needed
+            while len(lps_txt) < (seg + 1) * 4:
+                lps_txt += b'\x00'
             return RDSHelper.get_group_bits(15, g_ver, seg, (lps_txt[seg*4]<<8)|lps_txt[seg*4+1], (lps_txt[seg*4+2]<<8)|lps_txt[seg*4+3])
 
         elif g_type == 10 and state["en_ptyn"]:
