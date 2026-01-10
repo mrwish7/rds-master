@@ -537,8 +537,10 @@ class RDSScheduler:
                     self.rt_seq_idx = 0
                     self.rt_seq_start_time = time.time()
                     self.last_rt_text_content = raw_input
-                    if not state["rt_cycle_ab"]:
-                        self.rt_ab_flag = 1 - self.rt_ab_flag  # Toggle A/B on content change
+                    # Always flip A/B on content change to avoid overwriting current buffer
+                    self.rt_ab_flag = 1 - self.rt_ab_flag
+                    self.rt_ab_cycles = 0
+                    self.rt_ptr = 0
                 
                 dur, txt = self.rt_sequence[self.rt_seq_idx % len(self.rt_sequence)]
                 
