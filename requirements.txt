@@ -1,0 +1,5 @@
+numpy
+scipy
+sounddevice
+flask
+flask-socketio
