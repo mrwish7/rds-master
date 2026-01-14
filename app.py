@@ -16,7 +16,7 @@ from scipy import signal as dsp_signal
 from scipy.fft import fft
 
 # --- SETTINGS ---
-REQUIRE_MME = True 
+REQUIRE_MME = (sys.platform == 'win32')
 
 # --- RDS STANDARDS ---
 BITRATE = 1187.5
@@ -59,7 +59,7 @@ def get_or_create_secret():
     return secret
 
 app.secret_key = os.environ.get("RDS_SECRET", get_or_create_secret())
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, async_mode='threading')
 
 auth_config = {"user": "admin", "pass": "pass"}
 
@@ -213,6 +213,19 @@ signal.signal(signal.SIGINT, sig_abort)
 
 # EBU Latin character mapping for encoding conversion
 EBU_LATIN_MAP = {
+    'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'å': 'a',
+    'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
+    'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n', 'ß': 'ss', '€': 'E',
+    'æ': 'ae', 'œ': 'oe', '°': ' ', '™': ' ', '®': ' ', '©': 'c'
+}
+
+def convert_to_ebu_latin(text):
+    """Convert UTF-8 text to RDS/EBU Latin compatible characters."""
+    if not text: return ""
+    return ''.join(EBU_LATIN_MAP.get(c, c) if ord(c) > 127 else c for c in text)
+
+# EBU Latin character mapping for encoding conversion
+EBU_LATIN_MAP = {
     # Common Windows-1252 / UTF-8 to EBU Latin conversions
     'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
     'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'å': 'a',
@@ -309,16 +322,25 @@ threading.Thread(target=monitor_pusher_loop, daemon=True).start()
 
 class Sanitize:
     @staticmethod
+    def parse_bool(v):
+        if isinstance(v, bool): return v
+        if isinstance(v, str): return v.lower() in ('true', '1', 'yes', 'on')
+        if isinstance(v, int): return v != 0
+        return False
+
+    @staticmethod
     def to_state(data):
         global state
         changed = False
         for k, v in data.items():
             if k in state:
                 try:
-                    if isinstance(state[k], bool): state[k] = bool(v)
+                    if isinstance(state[k], bool): state[k] = Sanitize.parse_bool(v)
                     elif isinstance(state[k], float): state[k] = float(v)
                     elif isinstance(state[k], int): state[k] = int(v)
-                    else: state[k] = v
+                    else: 
+                        # Enforce EBU Latin for text fields to ensure spec compliance
+                        state[k] = convert_to_ebu_latin(str(v))
                     changed = True
                 except: pass
         if changed: save_config()
@@ -653,7 +675,8 @@ class RDSScheduler:
             pad = clean.ljust(64)
             a = self.rt_ptr % 16
             self.rt_ptr += 1
-            b3_val = (ord(pad[a*4])<<8)|ord(pad[a*4+1]) if v==0 else 0
+            # Group 2B Fix: Block 3 is PI, Block 4 is 2 chars of RT
+            b3_val = (ord(pad[a*4])<<8)|ord(pad[a*4+1]) if v==0 else int(state["pi"], 16)
             b4_val = (ord(pad[a*4+2])<<8)|ord(pad[a*4+3]) if v==0 else (ord(pad[a*2])<<8)|ord(pad[a*2+1])
             return RDSHelper.get_group_bits(2, v, (buf<<4)|a, b3_val, b4_val)
 
@@ -869,15 +892,16 @@ class RDSDSP:
         self.sched = RDSScheduler()
         self.p_rds, self.p_pilot, self.bit_clock, self.last_bit = 0.0, 0.0, 0.0, 0
         self.bit_queue = []
-        self.taps = dsp_signal.firwin(301, BITRATE * 1.5, fs=SAMPLE_RATE, window=('kaiser', 8.0))
+        # Tighten filter cutoff to BITRATE (1.1875 kHz) to better approximate spec shaping
+        self.taps = dsp_signal.firwin(301, BITRATE * 1.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
         self.zi = np.zeros(300)
 
     def process_frame(self, outdata, frames, indata=None):
         lvl_pilot, lvl_rds = (state["pilot_level"]/100.0), (state["rds_level"]/100.0)
         rds_freq = float(state.get("rds_freq", 57000))
         # Clamp to sensible range
-        if rds_freq < 1000: rds_freq = 1000
-        if rds_freq > 120000: rds_freq = 120000
+        if rds_freq < 56000: rds_freq = 57000
+        if rds_freq > 58000: rds_freq = 57000
         
         # Genlock only valid when RDS is 3x pilot (57kHz)
         use_genlock = state["genlock"] and indata is not None and len(indata) == frames and abs(rds_freq - 3*PILOT_FREQ) < 1e-3
@@ -908,6 +932,11 @@ class RDSDSP:
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
+             
+             # Phase Lock: If pilot is active, lock RDS phase to pilot (RDS = 3 * Pilot)
+             if lvl_pilot > 0:
+                 self.p_rds = (self.p_pilot * 3.0) % (2 * np.pi)
+                 
              self.p_pilot = (self.p_pilot + 2 * np.pi * PILOT_FREQ * frames / SAMPLE_RATE) % (2 * np.pi)
 
         self.p_rds = (self.p_rds + 2 * np.pi * rds_freq * frames / SAMPLE_RATE) % (2 * np.pi)
@@ -989,10 +1018,13 @@ def update_settings():
     return {"ok": True}
 
 @socketio.on('update')
-def handle_update(data): Sanitize.to_state(data)
+def handle_update(data): 
+    if not session.get('auth'): return
+    Sanitize.to_state(data)
 
 @socketio.on('control')
 def handle_control(data):
+    if not session.get('auth'): return
     if data['action'] == 'start':
         state["device_out_idx"] = int(data["dev_out"])
         state["device_in_idx"] = int(data["dev_in"])
