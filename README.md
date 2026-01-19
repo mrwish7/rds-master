@@ -69,17 +69,17 @@ python app.py
 
 - Not production-ready; use only for lab/bench testing until a formal release.
 
-- RT+ tagging is basic (simple artist/title extraction only).
+- RT+ tagging is basic (simple artist/title extraction only). ✅
 
 - EON (Enhanced Other Networks) not implemented (planned).
 
 - AF Method B not implemented (planned; only AF Method A available).
 
-- DAB cross-reference is experimental and unverified on-air.
+- DAB cross-reference is experimental and unverified on-air. ✅
 
 - No packaged EXE release yet; restart-on-crash not managed.
 
-- Support for RBDS
+- Support for RBDS ✅
 
 - Support for UECP Input / output (planned)
 
