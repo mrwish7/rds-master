@@ -16,7 +16,18 @@ from scipy import signal as dsp_signal
 from scipy.fft import fft
 
 # --- SETTINGS ---
-REQUIRE_MME = (sys.platform == 'win32')
+# Host API filtering: auto-detect based on OS, can be overridden via RDS_HOSTAPI env var
+# On Windows, defaults to MME. On other platforms, no filtering.
+# Set RDS_HOSTAPI=none to disable filtering, or RDS_HOSTAPI=CoreAudio/ALSA/etc to filter for specific API
+_hostapi_env = os.environ.get("RDS_HOSTAPI", "").strip()
+if _hostapi_env.lower() == "none":
+    REQUIRE_HOSTAPI = None
+elif _hostapi_env:
+    REQUIRE_HOSTAPI = _hostapi_env
+elif sys.platform == 'win32':
+    REQUIRE_HOSTAPI = "MME"
+else:
+    REQUIRE_HOSTAPI = None  # No filtering on macOS/Linux by default
 
 # --- RDS STANDARDS ---
 BITRATE = 1187.5
@@ -41,7 +52,82 @@ DAB_CHANNELS = {
 }
 
 
-PTY_LIST = ["None", "News", "Current Affairs", "Information", "Sport", "Education", "Drama", "Culture", "Science", "Varied", "Pop Music", "Rock Music", "Easy Music", "Light Classical", "Serious Classical", "Other Music", "Weather", "Finance", "Children's", "Social Affairs", "Religion", "Phone-In", "Travel", "Leisure", "Jazz", "Country", "National Music", "Oldies", "Folk Music", "Documentary", "Alarm Test", "Alarm"]
+# RDS PTY List (Europe/Rest of World)
+PTY_LIST_RDS = ["None", "News", "Current Affairs", "Information", "Sport", "Education", "Drama", "Culture", "Science", "Varied", "Pop Music", "Rock Music", "Easy Music", "Light Classical", "Serious Classical", "Other Music", "Weather", "Finance", "Children's", "Social Affairs", "Religion", "Phone-In", "Travel", "Leisure", "Jazz", "Country", "National Music", "Oldies", "Folk Music", "Documentary", "Alarm Test", "Alarm"]
+
+# RBDS PTY List (North America)
+PTY_LIST_RBDS = ["None", "News", "Information", "Sport", "Talk", "Rock", "Classic Rock", "Adult Hits", "Soft Rock", "Top 40", "Country", "Oldies", "Soft", "Nostalgia", "Jazz", "Classical", "R&B", "Soft R&B", "Language", "Religious Music", "Religious Talk", "Personality", "Public", "College", "Unassigned", "Unassigned", "Unassigned", "Unassigned", "Unassigned", "Weather", "Emergency Test", "Emergency"]
+
+# Legacy alias for backwards compatibility
+PTY_LIST = PTY_LIST_RDS
+
+# --- RT+ CONTENT TYPES (EN 62106 / IEC 62106) ---
+RTPLUS_CONTENT_TYPES = {
+    0: ("Dummy", "No content type"),
+    1: ("Title", "Item title"),
+    2: ("Album", "Album/CD name"),
+    3: ("Track", "Track number"),
+    4: ("Artist", "Artist name"),
+    5: ("Composition", "Composition name"),
+    6: ("Movement", "Movement name"),
+    7: ("Conductor", "Conductor"),
+    8: ("Composer", "Composer"),
+    9: ("Band", "Band/Orchestra"),
+    10: ("Comment", "Free text comment"),
+    11: ("Genre", "Genre"),
+    12: ("News", "News headlines"),
+    13: ("News.Local", "Local news"),
+    14: ("Stock", "Stock market"),
+    15: ("Sport", "Sport news"),
+    16: ("Lottery", "Lottery numbers"),
+    17: ("Horoscope", "Horoscope"),
+    18: ("Daily", "Daily diversion"),
+    19: ("Health", "Health tips"),
+    20: ("Event", "Event info"),
+    21: ("Scene", "Scene/Film info"),
+    22: ("Cinema", "Cinema info"),
+    23: ("TV", "TV info"),
+    24: ("DateTime", "Date/Time"),
+    25: ("Weather", "Weather info"),
+    26: ("Traffic", "Traffic info"),
+    27: ("Alarm", "Alarm/Emergency"),
+    28: ("Advert", "Advertisement"),
+    29: ("URL", "Website URL"),
+    30: ("Other", "Other info"),
+    31: ("Stn.Short", "Station name short"),
+    32: ("Stn.Long", "Station name long"),
+    33: ("Prog.Now", "Current program"),
+    34: ("Prog.Next", "Next program"),
+    35: ("Prog.Part", "Program part"),
+    36: ("Host", "Host name"),
+    37: ("Editorial", "Editorial staff"),
+    38: ("Frequency", "Frequency info"),
+    39: ("Homepage", "Homepage URL"),
+    40: ("Subchannel", "Sub-channel"),
+    41: ("Phone.Hotline", "Hotline phone"),
+    42: ("Phone.Studio", "Studio phone"),
+    43: ("Phone.Other", "Other phone"),
+    44: ("SMS.Studio", "Studio SMS"),
+    45: ("SMS.Other", "Other SMS"),
+    46: ("Email.Hotline", "Hotline email"),
+    47: ("Email.Studio", "Studio email"),
+    48: ("Email.Other", "Other email"),
+    49: ("MMS.Phone", "MMS number"),
+    50: ("Chat", "Chat"),
+    51: ("Chat.Centre", "Chat centre"),
+    52: ("Vote.Question", "Vote question"),
+    53: ("Vote.Centre", "Vote centre"),
+    54: ("RFU", "Reserved"),
+    55: ("RFU", "Reserved"),
+    56: ("RFU", "Reserved"),
+    57: ("RFU", "Reserved"),
+    58: ("RFU", "Reserved"),
+    59: ("Place", "Place/Location"),
+    60: ("Appointment", "Appointment"),
+    61: ("Identifier", "Identifier"),
+    62: ("Purchase", "Purchase info"),
+    63: ("GetData", "Get Data"),
+}
 
 app = Flask(__name__)
 CONFIG_FILE = 'config.ini'
@@ -59,7 +145,8 @@ def get_or_create_secret():
     return secret
 
 app.secret_key = os.environ.get("RDS_SECRET", get_or_create_secret())
-socketio = SocketIO(app, async_mode='threading')
+# Restrict CORS to same origin only for security (prevents cross-site WebSocket attacks)
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins=[])
 
 auth_config = {"user": "admin", "pass": "pass"}
 
@@ -72,7 +159,7 @@ default_state = {
     "pilot_level": 0.0, "rds_level": 4.5, "genlock_offset": 0.0,
     
     # Basic
-    "pi": "2FFF", "pty": 0, "tp": 1, "ta": 0, "ms": 1,
+    "pi": "2FFF", "pty": 0, "rbds": False, "tp": 1, "ta": 0, "ms": 1,
     "di_stereo": 1, "di_head": 0, "di_comp": 1, "di_dyn": 0,
     "en_af": 1, "af_list": "87.6, 87.7", "af_method": "A",
     
@@ -86,9 +173,15 @@ default_state = {
     "rt_ab_cycle_count": 2,
     
     # RT+
-    "rt_plus_format_a": "{artist} - {title}", 
+    "rt_plus_format_a": "{artist} - {title}",
     "rt_plus_format_b": "{artist} - {title}",
     "en_rt_plus": False,
+    "rt_plus_mode": "format",  # "format" (legacy) or "builder" (new modal)
+    "rt_plus_builder_a": "",   # JSON string with builder config
+    "rt_plus_builder_b": "",   # JSON string with builder config
+
+    # RT Messages (unified message list - replaces individual RT fields when used)
+    "rt_messages": "[]",  # JSON array of message objects
     
     # Expert
     "ecc": "E3", "lic": "09", "tz_offset": 0.0, "en_ct": 1, "en_id": 1,
@@ -124,36 +217,145 @@ monitor_data = {
 }
 
 # --- RT+ PARSER ---
+import json
+
 class RTPlusParser:
     @staticmethod
-    def parse(text, fmt_str, centered=False, limit=64):
+    def parse(text, fmt_str, centered=False, limit=64, builder_state=None):
+        """
+        Parse RT+ tags from text.
+
+        Supports two modes:
+        1. Format string mode (legacy): Uses {artist}/{title} placeholders
+        2. Builder mode (new): Uses explicit builder_state with tag positions
+        """
         tags = []
-        if not text or not fmt_str: return tags
-        
+        if not text:
+            return tags
+
+        # Calculate centering offset
         offset = 0
         if centered and len(text) < limit:
             offset = (limit - len(text)) // 2
-            
+
+        # Builder mode: use explicit positions from builder state
+        if builder_state:
+            return RTPlusParser._parse_builder_mode(text, builder_state, offset, limit)
+
+        # Legacy format string mode
+        if not fmt_str:
+            return tags
+        return RTPlusParser._parse_format_mode(text, fmt_str, offset, limit)
+
+    @staticmethod
+    def _parse_format_mode(text, fmt_str, offset, limit):
+        """Parse using format string pattern matching (legacy mode)."""
+        tags = []
+
         pattern = re.escape(fmt_str)
         pattern = pattern.replace(r"\{artist\}", r"(?P<artist>.+)")
         pattern = pattern.replace(r"\{title\}", r"(?P<title>.+)")
-        
+
         match = re.search(pattern, text)
         if match:
-            for name, group_idx in match.groupdict().items():
+            for name, _ in match.groupdict().items():
                 raw_start = match.start(name)
                 length = len(match.group(name))
-                
+
                 real_start = raw_start + offset
-                # 1=Title, 4=Artist
-                c_type = 1 if name == "title" else 4
-                
-                # Length Marker is (len - 1). 
-                # Bounds check: RT max 64.
-                if real_start < 64 and length > 0:
-                    if real_start + length > 64: length = 64 - real_start
+                c_type = 1 if name == "title" else 4  # 1=Title, 4=Artist
+
+                if real_start < limit and length > 0:
+                    if real_start + length > limit:
+                        length = limit - real_start
                     tags.append((c_type, real_start, length))
+
         return tags
+
+    @staticmethod
+    def _resolve_dynamic(text):
+        r"""Resolve dynamic source patterns (\\r, \\R, \\w) in text."""
+        if not text or "\\" not in text:
+            return text
+        result = parse_text_source(text)
+        return result if result is not None else text
+
+    @staticmethod
+    def _parse_builder_mode(text, builder_state, offset, limit):
+        """Parse using explicit builder state with position calculation."""
+        tags = []
+
+        try:
+            if isinstance(builder_state, str):
+                if not builder_state.strip():
+                    return tags
+                builder_state = json.loads(builder_state)
+        except:
+            return tags
+
+        # Resolve dynamic sources in all text fields
+        prefix = RTPlusParser._resolve_dynamic(builder_state.get('prefix', ''))
+        tag1_type = int(builder_state.get('tag1_type', -1))
+        tag1_text = RTPlusParser._resolve_dynamic(builder_state.get('tag1_text', ''))
+        middle = RTPlusParser._resolve_dynamic(builder_state.get('middle', ''))
+        tag2_type = int(builder_state.get('tag2_type', -1))
+        tag2_text = RTPlusParser._resolve_dynamic(builder_state.get('tag2_text', ''))
+
+        # Calculate Tag 1 position based on resolved text
+        if tag1_text and tag1_type >= 0:
+            tag1_start = len(prefix) + offset
+            tag1_len = len(tag1_text)
+
+            if tag1_start < limit and tag1_len > 0:
+                if tag1_start + tag1_len > limit:
+                    tag1_len = limit - tag1_start
+                tags.append((tag1_type, tag1_start, tag1_len))
+
+        # Calculate Tag 2 position based on resolved text
+        if tag2_text and tag2_type >= 0:
+            tag2_start = len(prefix) + len(tag1_text) + len(middle) + offset
+            tag2_len = len(tag2_text)
+
+            if tag2_start < limit and tag2_len > 0:
+                if tag2_start + tag2_len > limit:
+                    tag2_len = limit - tag2_start
+                tags.append((tag2_type, tag2_start, tag2_len))
+
+        return tags
+
+    @staticmethod
+    def build_rt_from_builder(builder_state, resolve=True):
+        """Construct RadioText string from builder state."""
+        try:
+            if isinstance(builder_state, str):
+                if not builder_state.strip():
+                    return ""
+                builder_state = json.loads(builder_state)
+        except:
+            return ""
+
+        # Resolve dynamic sources if requested
+        if resolve:
+            prefix = RTPlusParser._resolve_dynamic(builder_state.get('prefix', ''))
+            tag1_text = RTPlusParser._resolve_dynamic(builder_state.get('tag1_text', ''))
+            middle = RTPlusParser._resolve_dynamic(builder_state.get('middle', ''))
+            tag2_text = RTPlusParser._resolve_dynamic(builder_state.get('tag2_text', ''))
+            suffix = RTPlusParser._resolve_dynamic(builder_state.get('suffix', ''))
+        else:
+            prefix = builder_state.get('prefix', '')
+            tag1_text = builder_state.get('tag1_text', '')
+            middle = builder_state.get('middle', '')
+            tag2_text = builder_state.get('tag2_text', '')
+            suffix = builder_state.get('suffix', '')
+
+        tag2_type = int(builder_state.get('tag2_type', -1))
+
+        msg = prefix + tag1_text
+        if tag2_type >= 0 and tag2_text:
+            msg += middle + tag2_text
+        msg += suffix
+
+        return msg
 
 # --- DEVICE DISCOVERY ---
 def get_valid_devices():
@@ -164,7 +366,7 @@ def get_valid_devices():
         apis = sd.query_hostapis()
         for i, d in enumerate(devs):
             api_name = apis[d['hostapi']]['name']
-            if REQUIRE_MME and "MME" not in api_name: continue
+            if REQUIRE_HOSTAPI and REQUIRE_HOSTAPI not in api_name: continue
             try:
                 if d['max_output_channels'] > 0:
                     sd.check_output_settings(device=i, samplerate=SAMPLE_RATE)
@@ -194,6 +396,87 @@ def load_config():
             auth_config['user'] = config['AUTH'].get('user', auth_config['user'])
             auth_config['pass'] = config['AUTH'].get('pass', auth_config['pass'])
     print("Config loaded.")
+    migrate_rt_messages()
+
+    # Initialize monitor_data from loaded state to prevent blank display on startup
+    global monitor_data
+    monitor_data["pi"] = state.get("pi", "0000")
+    monitor_data["pty_idx"] = state.get("pty", 0)
+    monitor_data["af"] = state.get("af_list", "")
+    monitor_data["ps"] = state.get("ps_dynamic", "RDS PRO")
+    monitor_data["rt"] = state.get("rt_text", "")
+
+def migrate_rt_messages():
+    """Migrate old RT config fields to new unified rt_messages structure."""
+    global state
+    try:
+        existing = json.loads(state.get("rt_messages", "[]"))
+        if existing:
+            return  # Already has messages, don't migrate
+    except:
+        pass
+
+    messages = []
+    msg_id = 1
+
+    def parse_legacy_text(text, buffer):
+        """Parse legacy RT text with timing syntax into message entries."""
+        nonlocal msg_id
+        entries = []
+        if not text:
+            return entries
+
+        # Check for timed syntax: "5s:Msg1 / 10s:Msg2"
+        if re.match(r"\s*\d+s:", text):
+            for part in re.split(r"\s*/\s*", text):
+                m = re.match(r"\s*(\d+)s:(.*)", part)
+                if m:
+                    cycles = int(m.group(1))
+                    content = m.group(2).strip()
+                    if content:
+                        entries.append({
+                            "id": f"msg_{msg_id}",
+                            "buffer": buffer,
+                            "cycles": cycles,
+                            "source_type": "manual",
+                            "content": content,
+                            "split_delimiter": " - ",
+                            "rt_plus_enabled": False,
+                            "rt_plus_tags": {"tag1_type": 4, "tag2_type": 1},
+                            "enabled": True
+                        })
+                        msg_id += 1
+        else:
+            # Single message
+            entries.append({
+                "id": f"msg_{msg_id}",
+                "buffer": buffer,
+                "cycles": 2,
+                "source_type": "manual",
+                "content": text.strip(),
+                "split_delimiter": " - ",
+                "rt_plus_enabled": False,
+                "rt_plus_tags": {"tag1_type": 4, "tag2_type": 1},
+                "enabled": True
+            })
+            msg_id += 1
+        return entries
+
+    # Migrate based on mode
+    if state.get("rt_manual_buffers"):
+        # Manual buffer mode: migrate rt_a and rt_b
+        if state.get("rt_a"):
+            messages.extend(parse_legacy_text(state["rt_a"], "A"))
+        if state.get("rt_b"):
+            messages.extend(parse_legacy_text(state["rt_b"], "B"))
+    else:
+        # Auto mode: migrate rt_text
+        if state.get("rt_text"):
+            messages.extend(parse_legacy_text(state["rt_text"], "AB"))
+
+    if messages:
+        state["rt_messages"] = json.dumps(messages)
+        print(f"Migrated {len(messages)} RT message(s) from legacy config.")
 
 def save_config():
     config = configparser.ConfigParser()
@@ -332,13 +615,18 @@ class Sanitize:
     def to_state(data):
         global state
         changed = False
+        # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages'}
         for k, v in data.items():
             if k in state:
                 try:
                     if isinstance(state[k], bool): state[k] = Sanitize.parse_bool(v)
                     elif isinstance(state[k], float): state[k] = float(v)
                     elif isinstance(state[k], int): state[k] = int(v)
-                    else: 
+                    elif k in skip_ebu_fields:
+                        # Store as-is without EBU Latin conversion
+                        state[k] = str(v)
+                    else:
                         # Enforce EBU Latin for text fields to ensure spec compliance
                         state[k] = convert_to_ebu_latin(str(v))
                     changed = True
@@ -392,18 +680,210 @@ class RDSScheduler:
         self.ptyn_sequence, self.ptyn_seq_idx = [], 0
         self.ptyn_seq_start_time = 0
         self.schedule_ptr = 0
-        
+
         self.rt_plus_toggle = 0
         self.rt_plus_tags = []
         self.last_rt_clean = ""
-        
+
         self.dab_last_sent = time.time()
         self.group_3a_toggle = 0  # Toggle between DAB ODA and RT+ ODA on Group 3A
         self.schedule_gen_counter = 0  # Counter to half 3A frequency
 
+        # New unified RT message system
+        self.rt_msg_idx = 0
+        self.rt_msg_cycle_count = 0  # Track completed cycles for current message
+        self.rt_msg_cache = {}  # Cache resolved content per message id
+        self.last_rt_messages_sig = ""  # Track changes to message list
+
     def get_text(self, key):
         val = state.get(key, "")
         return resolved_cache.get(key, val) if "\\" in val else val
+
+    def get_rt_messages(self):
+        """Get enabled RT messages from the unified message list."""
+        try:
+            messages = json.loads(state.get("rt_messages", "[]"))
+            return [m for m in messages if m.get("enabled", True)]
+        except:
+            return []
+
+    def resolve_msg_content(self, msg):
+        """Resolve dynamic content for a message (file/URL sources)."""
+        content = msg.get("content", "")
+        source_type = msg.get("source_type", "manual")
+        prefix = msg.get("prefix", "")
+        suffix = msg.get("suffix", "")
+
+        resolved = ""
+        if source_type == "manual":
+            # Check for inline dynamic patterns
+            if "\\" in content:
+                resolved = parse_text_source(content) or content
+            else:
+                resolved = content
+        elif source_type == "file":
+            # File path - read content
+            try:
+                with open(content, 'r', encoding='utf-8-sig', errors='replace') as f:
+                    resolved = f.read().strip()
+            except:
+                resolved = ""
+        elif source_type == "url":
+            # URL - fetch content
+            try:
+                req = urllib.request.Request(content, headers={'User-Agent': 'RDS-Encoder/1.0'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    resolved = resp.read().decode('utf-8', errors='replace').strip()
+            except:
+                resolved = ""
+        else:
+            resolved = content
+
+        # Apply prefix/suffix for file/URL sources
+        if source_type in ("file", "url") and resolved:
+            resolved = prefix + resolved + suffix
+
+        return resolved
+
+    def get_current_rt_message(self):
+        """Get the current RT message based on cycle count and buffer state."""
+        messages = self.get_rt_messages()
+        if not messages:
+            return None, 0, ""
+
+        # Check if message list changed
+        msg_sig = state.get("rt_messages", "[]")
+        if msg_sig != self.last_rt_messages_sig:
+            self.last_rt_messages_sig = msg_sig
+            self.rt_msg_idx = 0
+            self.rt_msg_cycle_count = 0
+            self.rt_msg_cache = {}
+            self.rt_ab_flag = 1 - self.rt_ab_flag  # Toggle on change
+
+        # Get current message
+        current_msg = messages[self.rt_msg_idx % len(messages)]
+
+        # Determine buffer
+        buffer_setting = current_msg.get("buffer", "AB")
+        if buffer_setting == "A":
+            buf = 0
+        elif buffer_setting == "B":
+            buf = 1
+        else:  # "AB"
+            buf = self.rt_ab_flag
+
+        # Resolve content (with caching for performance during message duration)
+        msg_id = current_msg.get("id", "")
+        if msg_id not in self.rt_msg_cache:
+            self.rt_msg_cache[msg_id] = self.resolve_msg_content(current_msg)
+        resolved_content = self.rt_msg_cache[msg_id]
+
+        # If content is empty, skip to next message immediately
+        if not resolved_content or not resolved_content.strip():
+            self.advance_to_next_rt_message()
+            # Retry with next message (limit recursion to prevent infinite loop)
+            if len(messages) > 1:
+                return self.get_current_rt_message()
+            else:
+                # Only one message and it's empty - return empty
+                return current_msg, buf, ""
+
+        return current_msg, buf, resolved_content
+
+    def advance_to_next_rt_message(self, toggle_buffer=True):
+        """Advance to the next RT message and reset cycle count."""
+        messages = self.get_rt_messages()
+        if not messages:
+            return
+
+        self.rt_msg_idx = (self.rt_msg_idx + 1) % len(messages)
+        self.rt_msg_cycle_count = 0
+
+        # Clear cache for new message to refresh file/URL content
+        current_msg = messages[self.rt_msg_idx % len(messages)]
+        msg_id = current_msg.get("id", "")
+        if msg_id in self.rt_msg_cache:
+            del self.rt_msg_cache[msg_id]
+
+        # Toggle buffer when advancing to next message to prevent overwriting
+        # Controlled by toggle_buffer parameter - AB messages don't toggle here since they already toggled
+        if toggle_buffer:
+            self.rt_ab_flag = 1 - self.rt_ab_flag
+
+    def get_rt_plus_tags_for_message(self, msg, resolved_content, limit):
+        """Calculate RT+ tags for a message based on its configuration."""
+        if not msg.get("rt_plus_enabled"):
+            return []
+
+        tags = []
+        tag_config = msg.get("rt_plus_tags", {})
+        tag1_type = int(tag_config.get("tag1_type", -1))
+        tag2_type = int(tag_config.get("tag2_type", -1))
+
+        # Calculate centering offset
+        offset = 0
+        if state.get("rt_centered") and len(resolved_content) < limit:
+            offset = (limit - len(resolved_content)) // 2
+
+        # Check if manual builder mode (has tag1_text field)
+        if msg.get("tag1_text"):
+            # Manual builder mode: use explicit positions
+            prefix = msg.get("prefix", "")
+            tag1_text = msg.get("tag1_text", "")
+            middle = msg.get("middle", " - ")
+            tag2_text = msg.get("tag2_text", "")
+
+            # Tag 1 position
+            if tag1_text and tag1_type >= 0:
+                tag1_start = offset + len(prefix)
+                tag1_len = min(len(tag1_text), limit - tag1_start)
+                if tag1_start < limit and tag1_len > 0:
+                    tags.append((tag1_type, tag1_start, tag1_len))
+
+            # Tag 2 position
+            if tag2_text and tag2_type >= 0:
+                tag2_start = offset + len(prefix) + len(tag1_text) + len(middle)
+                tag2_len = min(len(tag2_text), limit - tag2_start)
+                if tag2_start < limit and tag2_len > 0:
+                    tags.append((tag2_type, tag2_start, tag2_len))
+        else:
+            # Auto mode: split by delimiter (file/URL sources)
+            # For file/URL, we need to account for prefix and suffix in the resolved_content
+            prefix = msg.get("prefix", "")
+            suffix = msg.get("suffix", "")
+            delimiter = msg.get("split_delimiter", " - ")
+
+            # Find where the actual content starts (after prefix) and ends (before suffix)
+            content_without_prefix = resolved_content[len(prefix):] if prefix and resolved_content.startswith(prefix) else resolved_content
+            # Remove suffix from the end if present
+            if suffix and content_without_prefix.endswith(suffix):
+                content_without_prefix_or_suffix = content_without_prefix[:-len(suffix)]
+            else:
+                content_without_prefix_or_suffix = content_without_prefix
+
+            if delimiter and delimiter in content_without_prefix_or_suffix:
+                parts = content_without_prefix_or_suffix.split(delimiter, 1)
+                # Tag positions include the prefix offset
+                tag1_start = offset + len(prefix)
+                if len(parts) >= 1 and tag1_type >= 0:
+                    tag1_len = min(len(parts[0]), limit - tag1_start)
+                    if tag1_start < limit and tag1_len > 0:
+                        tags.append((tag1_type, tag1_start, tag1_len))
+                if len(parts) >= 2 and tag2_type >= 0:
+                    tag2_start = offset + len(prefix) + len(parts[0]) + len(delimiter)
+                    # Tag2 length excludes the suffix
+                    tag2_len = min(len(parts[1]), limit - tag2_start)
+                    if tag2_start < limit and tag2_len > 0:
+                        tags.append((tag2_type, tag2_start, tag2_len))
+            else:
+                # No delimiter found - treat content (without prefix/suffix) as tag1
+                if tag1_type >= 0 and content_without_prefix_or_suffix:
+                    tag1_start = offset + len(prefix)
+                    tag1_len = min(len(content_without_prefix_or_suffix), limit - tag1_start)
+                    if tag1_start < limit and tag1_len > 0:
+                        tags.append((tag1_type, tag1_start, tag1_len))
+
+        return tags
 
     def freq_code(self, f):
         try: return round((float(f) - 87.5) / 0.1) if 87.6 <= float(f) <= 107.9 else 205
@@ -466,8 +946,14 @@ class RDSScheduler:
                 # Preserve trailing spaces in content; allow leading spaces before the number
                 m = re.match(r"\s*(\d+)s:(.*)", p)
                 if m:
-                    for sf in self.split(m.group(2), width, center): seq.append((int(m.group(1)), sf))
+                    content = m.group(2)
+                    # Skip entries with blank/empty content (e.g., from empty file reads)
+                    if not content.strip():
+                        continue
+                    for sf in self.split(content, width, center): seq.append((int(m.group(1)), sf))
                 else:
+                    if not p.strip():
+                        continue
                     for sf in self.split(p.strip(), width, center): seq.append((2.5, sf))
         else:
             if width <= 8:
@@ -480,6 +966,9 @@ class RDSScheduler:
                 if not raw.strip(): return [(10, " "*width)]
                 if len(raw.strip()) <= width: return [(10, self.split(raw, width, center)[0])]
                 for sf in self.split(raw.strip(), width, center): seq.append((2.5, sf))
+        # If all entries were skipped (all blank), return a fallback to avoid empty sequence
+        if not seq:
+            return [(10, " "*width)]
         return seq
 
     def parse_schedule_string(self, seq_str):
@@ -574,26 +1063,33 @@ class RDSScheduler:
             return RDSHelper.get_group_bits(0, g_ver, tail, b3, (ord(txt[seg*2])<<8)|ord(txt[seg*2+1]))
 
         elif g_type == 2:
-            # Determine buffer selection
-            if state["rt_manual_buffers"]:
-                # Manual mode: use traditional cycling
+            limit = 32 if state["rt_mode"] == "2B" else 64
+            current_msg = None
+
+            # Check for new unified message system first
+            rt_messages = self.get_rt_messages()
+            if rt_messages:
+                # New unified message system
+                current_msg, buf, raw = self.get_current_rt_message()
+                if not raw:
+                    raw = " " * limit  # Fallback to blank
+
+                # Truncate to limit
+                raw = raw[:limit]
+
+            elif state["rt_manual_buffers"]:
+                # Legacy manual mode: use traditional cycling
                 buf = int((time.time()-self.start_time)/state["rt_cycle_time"])%2 if state["rt_cycle"] else state["rt_active_buffer"]
                 raw = self.get_text("rt_a" if buf==0 else "rt_b")
             else:
-                # Auto mode: single buffer with sequence support
+                # Legacy auto mode: single buffer with sequence support
                 raw_input = self.get_text("rt_text")
-                limit = 32 if state["rt_mode"] == "2B" else 64
-                
-                # Check if we need to rebuild the sequence (without centering for now)
-                # Compare against the original input, not the first sequence item
+
+                # Check if we need to rebuild the sequence
                 if not self.rt_sequence or raw_input != self.last_rt_text_content:
-                    # Check if input has explicit timing/message separators (/)
                     if "/" in raw_input:
-                        # Multiple explicit messages: parse with parse_smart to get durations
                         self.rt_sequence = self.parse_smart(raw_input, limit, False)
                     else:
-                        # Single message: just truncate to limit, no cycling
-                        # But still respect explicit timing like "5s:text"
                         m = re.match(r"\s*(\d+)s:(.*)", raw_input.strip())
                         if m:
                             duration = int(m.group(1))
@@ -602,66 +1098,109 @@ class RDSScheduler:
                             duration = 10
                             text = raw_input.strip()[:limit]
                         self.rt_sequence = [(duration, text)]
-                    
+
                     self.rt_seq_idx = 0
                     self.rt_seq_start_time = time.time()
                     self.last_rt_text_content = raw_input
-                    # Always flip A/B on content change to avoid overwriting current buffer
                     self.rt_ab_flag = 1 - self.rt_ab_flag
                     self.rt_ab_cycles = 0
                     self.rt_ptr = 0
-                
+
                 dur, txt = self.rt_sequence[self.rt_seq_idx % len(self.rt_sequence)]
-                
-                # Only advance sequence if there are multiple messages AND time has elapsed
+
                 if len(self.rt_sequence) > 1 and time.time() - self.rt_seq_start_time >= dur:
                     self.rt_seq_idx += 1
                     self.rt_seq_start_time = time.time()
                     dur, txt = self.rt_sequence[self.rt_seq_idx % len(self.rt_sequence)]
                     if not state["rt_cycle_ab"]:
-                        self.rt_ab_flag = 1 - self.rt_ab_flag  # Toggle A/B when changing messages
-                
-                # Handle rt_cycle_ab toggle (cycle same message on A/B)
-                if state["rt_cycle_ab"]:
-                    buf = self.rt_ab_flag
-                else:
-                    buf = self.rt_ab_flag
-                
-                # Use the text from sequence (strip it to get raw content)
+                        self.rt_ab_flag = 1 - self.rt_ab_flag
+
+                buf = self.rt_ab_flag
                 raw = txt.strip()
 
             # If A/B buffer changed, restart RT from the beginning
             if buf != self.last_rt_buf:
                 self.rt_ptr = 0
                 self.last_rt_buf = buf
-            
+
             sig = f"{raw}_{state['rt_centered']}_{state['rt_cr']}"
-            limit = 32 if state["rt_mode"] == "2B" else 64
-            
-            if raw != self.last_rt_clean:
-                self.last_rt_clean = raw
-                self.rt_plus_toggle = 1 - self.rt_plus_toggle
-                fmt = state["rt_plus_format_a"] if buf==0 else state["rt_plus_format_b"]
-                self.rt_plus_tags = RTPlusParser.parse(raw, fmt, centered=state['rt_centered'], limit=limit)
-                
-                tag_str = []
-                display_clean = (raw + '\r') if state["rt_cr"] else raw.center(limit) if state["rt_centered"] else raw.ljust(limit)
-                for t in self.rt_plus_tags:
-                    t_name = "Title" if t[0]==1 else "Artist"
-                    content = display_clean[t[1]:t[1]+t[2]]
-                    tag_str.append(f"{t_name}: {content}")
-                monitor_data["rt_plus_info"] = " | ".join(tag_str)
-                
+
+            # Calculate RT+ tags
+            if current_msg:
+                # New message system: use per-message RT+ config
+                rt_plus_sig = f"{raw}_{current_msg.get('id')}_{current_msg.get('rt_plus_enabled')}_{current_msg.get('split_delimiter')}"
+                if raw != self.last_rt_clean or rt_plus_sig != getattr(self, 'last_rtplus_sig', ''):
+                    self.last_rt_clean = raw
+                    self.last_rtplus_sig = rt_plus_sig
+                    self.rt_plus_toggle = 1 - self.rt_plus_toggle
+                    self.rt_plus_tags = self.get_rt_plus_tags_for_message(current_msg, raw, limit)
+
+                    tag_str = []
+                    display_clean = (raw + '\r') if state["rt_cr"] else raw.center(limit) if state["rt_centered"] else raw.ljust(limit)
+                    for t in self.rt_plus_tags:
+                        t_name = RTPLUS_CONTENT_TYPES.get(t[0], ("Unknown", ""))[0]
+                        content = display_clean[t[1]:t[1]+t[2]]
+                        tag_str.append(f"{t_name}: {content}")
+                    monitor_data["rt_plus_info"] = " | ".join(tag_str) if tag_str else "(no tags)"
+            else:
+                # Legacy RT+ handling
+                builder_key = "rt_plus_builder_a" if buf == 0 else "rt_plus_builder_b"
+                builder_state = state.get(builder_key, "")
+                rt_plus_sig = f"{raw}_{state.get('rt_plus_mode')}_{builder_state}_{state.get('rt_plus_format_a')}_{state.get('rt_plus_format_b')}"
+
+                if raw != self.last_rt_clean or rt_plus_sig != getattr(self, 'last_rtplus_sig', ''):
+                    self.last_rt_clean = raw
+                    self.last_rtplus_sig = rt_plus_sig
+                    self.rt_plus_toggle = 1 - self.rt_plus_toggle
+
+                    if state.get('rt_plus_mode') == 'builder' and builder_state:
+                        self.rt_plus_tags = RTPlusParser.parse(raw, None, centered=state['rt_centered'], limit=limit, builder_state=builder_state)
+                    else:
+                        fmt = state["rt_plus_format_a"] if buf == 0 else state["rt_plus_format_b"]
+                        self.rt_plus_tags = RTPlusParser.parse(raw, fmt, centered=state['rt_centered'], limit=limit)
+
+                    tag_str = []
+                    display_clean = (raw + '\r') if state["rt_cr"] else raw.center(limit) if state["rt_centered"] else raw.ljust(limit)
+                    for t in self.rt_plus_tags:
+                        t_name = RTPLUS_CONTENT_TYPES.get(t[0], ("Unknown", ""))[0]
+                        content = display_clean[t[1]:t[1]+t[2]]
+                        tag_str.append(f"{t_name}: {content}")
+                    monitor_data["rt_plus_info"] = " | ".join(tag_str) if tag_str else "(no tags)"
+
             if sig != self.last_rt_content: self.rt_ptr, self.last_rt_content = 0, sig
             clean = (raw + '\r') if state["rt_cr"] else raw.center(limit) if state["rt_centered"] else raw.ljust(limit)
-            
+
             monitor_data["rt"] = clean
 
-            v = g_ver 
+            v = g_ver
             bpg = 2 if v==1 else 4
             if self.rt_ptr * bpg >= len(clean) or (clean.find('\r') != -1 and self.rt_ptr*bpg > clean.find('\r')):
                 # Completed one full RT transmission cycle
-                if state.get("rt_cycle_ab"):
+                if current_msg:
+                    # New message system: cycle-based advancement
+                    self.rt_msg_cycle_count += 1
+                    cycle_limit = current_msg.get("cycles", 2)
+                    if cycle_limit < 1:
+                        cycle_limit = 1
+
+                    buffer_setting = current_msg.get("buffer", "AB")
+                    if buffer_setting == "AB":
+                        # For AB messages: do N cycles on buffer A, then N cycles on buffer B
+                        # Check if we've completed N cycles on current buffer
+                        if self.rt_msg_cycle_count == cycle_limit:
+                            # Completed N cycles on buffer A, switch to buffer B
+                            self.rt_ab_flag = 1 - self.rt_ab_flag
+                        elif self.rt_msg_cycle_count >= cycle_limit * 2:
+                            # Completed N cycles on both A and B, advance to next message
+                            # Toggle buffer so next message starts on opposite buffer
+                            self.advance_to_next_rt_message(toggle_buffer=True)
+                    else:
+                        # For A or B only messages: just count cycles
+                        if self.rt_msg_cycle_count >= cycle_limit:
+                            # Toggle buffer so next message doesn't overwrite
+                            self.advance_to_next_rt_message(toggle_buffer=True)
+                elif not current_msg and state.get("rt_cycle_ab"):
+                    # Legacy cycle_ab handling
                     self.rt_ab_cycles += 1
                     try:
                         cycle_target = int(state.get("rt_ab_cycle_count", 2))
@@ -974,7 +1513,7 @@ def run_audio():
 def index():
     if not session.get('auth'): return redirect(url_for('login'))
     inputs, outputs = get_valid_devices()
-    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, pty_list=PTY_LIST, auth_config=auth_config)
+    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config)
 
 @app.route('/login', methods=['GET','POST'])
 def login():
@@ -1017,6 +1556,37 @@ def update_settings():
     if changed: save_config()
     return {"ok": True}
 
+@app.route('/resolve-content', methods=['POST'])
+def resolve_content():
+    """Resolve content from file path or URL for preview."""
+    if not session.get('auth'): return {"ok": False, "error": "unauthorized"}, 401
+    data = request.get_json(silent=True) or {}
+    source_type = data.get('source_type', 'manual')
+    content = data.get('content', '')
+
+    if not content:
+        return {"ok": True, "resolved": ""}
+
+    resolved = ""
+    try:
+        if source_type == 'file':
+            with open(content, 'r', encoding='utf-8-sig', errors='replace') as f:
+                resolved = f.read().strip()
+        elif source_type == 'url':
+            req = urllib.request.Request(content, headers={'User-Agent': 'RDS-Encoder/1.0'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resolved = resp.read().decode('utf-8', errors='replace').strip()
+        elif source_type == 'manual':
+            # Check for inline dynamic patterns
+            if "\\" in content:
+                resolved = parse_text_source(content) or content
+            else:
+                resolved = content
+    except Exception as e:
+        return {"ok": False, "error": str(e), "resolved": ""}
+
+    return {"ok": True, "resolved": resolved}
+
 @socketio.on('update')
 def handle_update(data): 
     if not session.get('auth'): return
@@ -1039,10 +1609,21 @@ load_config()
 
 def auto_start_if_enabled():
     if state.get("auto_start") and not state.get("running"):
+        # Ensure device indices are set from state
+        if "device_out_idx" not in state or state["device_out_idx"] is None:
+            print("Auto-start: No output device configured, skipping auto-start")
+            return
         state["running"] = True
+        print(f"Auto-start: Starting RDS encoder (out={state['device_out_idx']}, in={state.get('device_in_idx', -1)})")
         threading.Thread(target=run_audio, daemon=True).start()
 
-auto_start_if_enabled()
+# Delay auto-start slightly to ensure Flask/SocketIO is ready
+def delayed_auto_start():
+    import time
+    time.sleep(0.5)  # Wait for server to initialize
+    auto_start_if_enabled()
+
+threading.Thread(target=delayed_auto_start, daemon=True).start()
 
 LOGIN_HTML = r"""
 <!DOCTYPE html>
@@ -1127,6 +1708,35 @@ UI_HTML = r"""
         .live-display { background: #000; border: 1px solid #333; color: #0f0; font-family: 'Courier New', monospace; padding: 8px; font-size: 14px; font-weight: bold; border-radius: 2px; letter-spacing: 1px; min-height: 20px; }
         .live-display.lg { font-size: 24px; color: #d946ef; text-align: center; letter-spacing: 4px; background: #110011; border-color: #550055; text-transform: uppercase; }
         .live-display.sub { color: #00ffcc; font-size: 12px; }
+
+        /* RT+ Builder Modal */
+        .rtplus-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 100; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .rtplus-modal { background: #1a1a1a; border: 1px solid #444; border-radius: 8px; max-width: 700px; width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+        .rtplus-modal-header { background: #2d1b4e; border-bottom: 2px solid #d946ef; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+        .rtplus-modal-body { padding: 16px; overflow-y: auto; flex: 1; }
+        .rtplus-modal-footer { background: #252525; border-top: 1px solid #333; padding: 12px 16px; display: flex; justify-content: space-between; }
+        .rtplus-tag-1 { background: rgba(251, 146, 60, 0.25); border-bottom: 2px solid #f97316; color: #fdba74; padding: 0 2px; }
+        .rtplus-tag-2 { background: rgba(34, 211, 238, 0.25); border-bottom: 2px solid #06b6d4; color: #67e8f9; padding: 0 2px; }
+        .rtplus-preview { font-family: 'Courier New', monospace; font-size: 16px; letter-spacing: 1px; background: #0a0a0a; border: 1px solid #333; padding: 12px; border-radius: 4px; min-height: 40px; }
+
+        /* RT Message Cards */
+        .rt-msg-card { background: #252525; border: 1px solid #333; border-radius: 4px; overflow: hidden; cursor: move; transition: all 0.2s; }
+        .rt-msg-card.disabled { opacity: 0.5; }
+        .rt-msg-card.dragging { opacity: 0.5; transform: scale(0.95); }
+        .rt-msg-card.drag-over { border-color: #7c3aed; border-width: 2px; margin-top: 4px; }
+        .rt-msg-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
+        .rt-msg-header:hover { background: #2a2a2a; }
+        .rt-msg-buffer { padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: bold; }
+        .buffer-a { background: #dc2626; color: white; }
+        .buffer-b { background: #2563eb; color: white; }
+        .buffer-ab { background: #7c3aed; color: white; }
+        .rt-msg-duration { color: #888; font-size: 11px; min-width: 30px; }
+        .rt-msg-source { font-size: 12px; }
+        .rt-msg-preview { flex: 1; color: #ccc; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: monospace; }
+        .rt-msg-rtplus { color: #f97316; font-size: 10px; font-weight: bold; }
+        .rt-msg-actions { display: flex; gap: 4px; }
+        .rt-msg-actions button { background: transparent; border: none; color: #666; cursor: pointer; padding: 2px 6px; font-size: 14px; }
+        .rt-msg-actions button:hover { color: #fff; }
     </style>
 </head>
 <body>
@@ -1212,67 +1822,43 @@ UI_HTML = r"""
                     <div class="section-header">Station Identification</div>
                     <div class="section-body grid-cols-2">
                         <div><label>PI Code (Hex)</label><input type="text" id="pi" value="{{state.pi}}" maxlength="4" class="font-mono text-center tracking-widest" onchange="sync()"></div>
-                        <div><label>Program Type (PTY)</label><select id="pty" onchange="sync()">{% for p in pty_list %}<option value="{{loop.index0}}" {% if loop.index0 == state.pty %}selected{% endif %}>{{p}}</option>{% endfor %}</select></div>
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <label>Program Type (PTY)</label>
+                                <label class="flex items-center gap-1 text-xs cursor-pointer">
+                                    <input type="checkbox" id="rbds" class="toggle-checkbox" {% if state.rbds %}checked{% endif %} onchange="updatePTYList()">
+                                    <span>RBDS</span>
+                                </label>
+                            </div>
+                            <select id="pty" onchange="sync()">
+                                {% for p in pty_list_rds %}<option value="{{loop.index0}}" {% if loop.index0 == state.pty %}selected{% endif %} data-rds="{{p}}" data-rbds="{{pty_list_rbds[loop.index0]}}">{{p}}</option>{% endfor %}
+                            </select>
+                        </div>
                     </div>
                 </div>
             
                 <div class="section">
-                    <div class="section-header">RadioText (64-Char)</div>
+                    <div class="section-header flex justify-between items-center">
+                        <span>RadioText Messages</span>
+                        <button onclick="addRTMessage()" class="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs text-white font-bold">+ Add Message</button>
+                    </div>
                     <div class="section-body">
-                        <div class="flex justify-between items-center mb-2">
-                             <label>Manually specify buffers</label>
-                             <input type="checkbox" class="toggle-checkbox" id="rt_manual_buffers" {% if state.rt_manual_buffers %}checked{% endif %} onchange="sync(); setTimeout(updateRTVisibility, 100)">
+                        <!-- Message List -->
+                        <div id="rt_messages_list" class="space-y-2 mb-3">
+                            <!-- Messages rendered by JavaScript -->
                         </div>
-                        
-                        <div id="rt_single_mode" style="display: {% if state.rt_manual_buffers %}none{% else %}block{% endif %}">
-                            <div class="mb-1">
-                                <label>RadioText</label>
-                                <div class="text-[9px] text-gray-500 mb-1">Supports timing: 5s:Message1/10s:Message2. A/B flag toggles on message change.</div>
-                                <input type="text" id="rt_text" value="{{state.rt_text}}" onchange="sync()">
-                            </div>
-                            <div class="mb-2">
-                                <label class="text-orange-400">RT+ Format</label>
-                                <input type="text" id="rt_plus_format_a" value="{{state.rt_plus_format_a}}" placeholder="{artist} - {title}" onchange="sync()" class="border-orange-900 bg-[#221]">
-                            </div>
-                            <div class="flex justify-between items-center bg-[#111] p-2 rounded mb-2">
-                                <div>
-                                    <label>Cycle same message on A/B</label>
-                                    <div class="text-[9px] text-gray-500">Toggle A/B at interval (ignores message-based toggle)</div>
-                                </div>
-                                <input type="checkbox" class="toggle-checkbox" id="rt_cycle_ab" {% if state.rt_cycle_ab %}checked{% endif %} onchange="sync(); updateCycleControls()">
-                            </div>
+
+                        <!-- Empty state -->
+                        <div id="rt_messages_empty" class="text-center py-4 text-gray-500 text-sm" style="display:none">
+                            No messages configured. Click "+ Add Message" to create one.
                         </div>
-                        
-                        <div id="rt_dual_mode" style="display: {% if state.rt_manual_buffers %}block{% else %}none{% endif %}">
-                            <div class="flex gap-2 mb-1">
-                                 <div class="flex-1"><label>Buffer A</label><input type="text" id="rt_a" value="{{state.rt_a}}" onchange="sync()"></div>
-                                 <div class="flex-1"><label>Buffer B</label><input type="text" id="rt_b" value="{{state.rt_b}}" onchange="sync()"></div>
-                            </div>
-                            <div class="flex gap-2 mb-2">
-                                 <div class="flex-1">
-                                     <label class="text-orange-400">RT+ Format A</label>
-                                     <input type="text" id="rt_plus_format_a" value="{{state.rt_plus_format_a}}" placeholder="{artist} - {title}" onchange="sync()" class="border-orange-900 bg-[#221]">
-                                 </div>
-                                 <div class="flex-1">
-                                     <label class="text-orange-400">RT+ Format B</label>
-                                     <input type="text" id="rt_plus_format_b" value="{{state.rt_plus_format_b}}" placeholder="{artist} - {title}" onchange="sync()" class="border-orange-900 bg-[#221]">
-                                 </div>
-                            </div>
-                        </div>
-                        
-                        <div class="flex justify-between items-center bg-[#111] p-2 rounded">
+
+                        <!-- Global RT Settings -->
+                        <div class="flex justify-between items-center bg-[#111] p-2 rounded mt-3">
                              <div class="flex gap-4 items-end">
                                  <div>
                                      <label>Mode</label>
-                                     <select id="rt_mode" onchange="sync()"><option value="2A">2A (64)</option><option value="2B">2B (32)</option></select>
-                                 </div>
-                                 <div id="time_seconds_wrap">
-                                     <label>Time (seconds)</label>
-                                     <input type="number" id="rt_cycle_time" value="{{state.rt_cycle_time}}" class="w-16" min="1" onchange="sync()">
-                                 </div>
-                                 <div id="rt_cycles_wrap" style="display:none">
-                                     <label>RT cycles</label>
-                                     <input type="number" id="rt_ab_cycle_count" value="{{state.rt_ab_cycle_count}}" class="w-16" min="1" onchange="sync()">
+                                     <select id="rt_mode" onchange="sync()"><option value="2A" {% if state.rt_mode == '2A' %}selected{% endif %}>2A (64)</option><option value="2B" {% if state.rt_mode == '2B' %}selected{% endif %}>2B (32)</option></select>
                                  </div>
                              </div>
                              <div class="flex gap-4">
@@ -1280,6 +1866,185 @@ UI_HTML = r"""
                                  <div class="flex flex-col items-center"><label>Centre</label><input type="checkbox" class="toggle-checkbox" id="rt_centered" {% if state.rt_centered %}checked{% endif %} onchange="if(this.checked) document.getElementById('rt_cr').checked = false; sync()"></div>
                                  <div class="flex flex-col items-center"><label>Append CR</label><input type="checkbox" class="toggle-checkbox" id="rt_cr" {% if state.rt_cr %}checked{% endif %} onchange="sync()"></div>
                              </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RT Message Edit Modal -->
+                <div id="rt_msg_modal" class="rtplus-modal-overlay" style="display: none;">
+                    <div class="rtplus-modal" style="max-width: 500px;">
+                        <div class="rtplus-modal-header">
+                            <div>
+                                <div class="text-lg font-bold text-white" id="rt_msg_modal_title">Edit Message</div>
+                                <div class="text-xs text-gray-400">Configure RT message content and RT+ tags</div>
+                            </div>
+                            <button onclick="closeRTMsgModal()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+                        </div>
+
+                        <div class="rtplus-modal-body space-y-4">
+                            <input type="hidden" id="rt_msg_edit_id">
+
+                            <!-- Buffer Selection -->
+                            <div>
+                                <label class="text-xs text-gray-400 mb-1 block">Buffer</label>
+                                <div class="flex gap-2">
+                                    <button type="button" id="rt_msg_buf_a" onclick="setMsgBuffer('A')" class="px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]">A</button>
+                                    <button type="button" id="rt_msg_buf_b" onclick="setMsgBuffer('B')" class="px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]">B</button>
+                                    <button type="button" id="rt_msg_buf_ab" onclick="setMsgBuffer('AB')" class="px-4 py-2 rounded font-bold text-sm bg-[#7c3aed] text-white">A+B</button>
+                                </div>
+                            </div>
+
+                            <!-- Cycles -->
+                            <div>
+                                <label class="text-xs text-gray-400 mb-1 block">Cycles</label>
+                                <input type="number" id="rt_msg_cycles" value="2" min="1" max="50" class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1">
+                            </div>
+
+                            <!-- Source Type -->
+                            <div>
+                                <label class="text-xs text-gray-400 mb-1 block">Source Type</label>
+                                <div class="flex gap-4">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="rt_msg_source" value="manual" checked class="accent-[#d946ef]" onchange="updateSourceUI()">
+                                        <span class="text-sm text-gray-300">Manual</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="rt_msg_source" value="file" class="accent-[#d946ef]" onchange="updateSourceUI()">
+                                        <span class="text-sm text-gray-300">File</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="rt_msg_source" value="url" class="accent-[#d946ef]" onchange="updateSourceUI()">
+                                        <span class="text-sm text-gray-300">URL</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <!-- Content for File/URL -->
+                            <div id="rt_msg_content_wrap" style="display:none">
+                                <div class="space-y-2">
+                                    <div>
+                                        <label class="text-xs text-gray-400 mb-1 block" id="rt_msg_content_label">Content Source</label>
+                                        <input type="text" id="rt_msg_content" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="Enter file path or URL" oninput="updateMsgPreview()">
+                                        <div class="text-[10px] text-gray-500 mt-1" id="rt_msg_content_hint">Full path to file or URL</div>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label class="text-xs text-gray-400 mb-1 block">Prefix (optional)</label>
+                                            <input type="text" id="rt_msg_prefix_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text before content" oninput="updateMsgPreview()">
+                                        </div>
+                                        <div>
+                                            <label class="text-xs text-gray-400 mb-1 block">Suffix (optional)</label>
+                                            <input type="text" id="rt_msg_suffix_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after content" oninput="updateMsgPreview()">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Manual Mode: Simple Text (when RT+ disabled) -->
+                            <div id="rt_msg_manual_simple" style="display:none">
+                                <div>
+                                    <label class="text-xs text-gray-400 mb-1 block">RadioText Content</label>
+                                    <input type="text" id="rt_msg_simple_text" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="Enter RadioText message (max 64 chars)" maxlength="64" oninput="updateMsgPreview()">
+                                    <div class="text-[10px] text-gray-500 mt-1">Character count: <span id="rt_msg_simple_count">0</span>/64</div>
+                                </div>
+                            </div>
+
+                            <!-- Manual Mode: RT+ Builder (when RT+ enabled) -->
+                            <div id="rt_msg_manual_builder" style="display:none" class="space-y-3">
+                                <div class="flex gap-2 items-center">
+                                    <label class="w-16 text-xs text-gray-500 shrink-0">Prefix:</label>
+                                    <input type="text" id="rt_msg_prefix" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text before tags" oninput="updateMsgPreview()">
+                                </div>
+
+                                <div class="bg-[#1a1a1a] border border-orange-900/50 rounded p-2 space-y-2">
+                                    <div class="flex gap-2 items-center">
+                                        <label class="w-16 text-xs text-orange-400 font-bold shrink-0">Tag 1:</label>
+                                        <select id="rt_msg_tag1_type" class="w-32 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                    </div>
+                                    <div class="flex gap-2 items-center">
+                                        <label class="w-16 text-xs text-gray-500 shrink-0">Content:</label>
+                                        <input type="text" id="rt_msg_tag1_text" class="flex-1 bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-sm text-orange-300" placeholder="Tag 1 text" oninput="updateMsgPreview()">
+                                    </div>
+                                </div>
+
+                                <div class="flex gap-2 items-center">
+                                    <label class="w-16 text-xs text-gray-500 shrink-0">Between:</label>
+                                    <input type="text" id="rt_msg_middle" class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" value=" - " oninput="updateMsgPreview()">
+                                </div>
+
+                                <div class="bg-[#1a1a1a] border border-cyan-900/50 rounded p-2 space-y-2">
+                                    <div class="flex gap-2 items-center">
+                                        <label class="w-16 text-xs text-cyan-400 font-bold shrink-0">Tag 2:</label>
+                                        <select id="rt_msg_tag2_type" class="w-32 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                    </div>
+                                    <div class="flex gap-2 items-center">
+                                        <label class="w-16 text-xs text-gray-500 shrink-0">Content:</label>
+                                        <input type="text" id="rt_msg_tag2_text" class="flex-1 bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-sm text-cyan-300" placeholder="Tag 2 text (optional)" oninput="updateMsgPreview()">
+                                    </div>
+                                </div>
+
+                                <div class="flex gap-2 items-center">
+                                    <label class="w-16 text-xs text-gray-500 shrink-0">Suffix:</label>
+                                    <input type="text" id="rt_msg_suffix" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after tags" oninput="updateMsgPreview()">
+                                </div>
+                            </div>
+
+                            <!-- RT+ Configuration (common for all modes) -->
+                            <div class="bg-[#1a1a1a] border border-[#333] rounded p-3 space-y-3">
+                                <div class="flex justify-between items-center">
+                                    <label class="text-xs text-orange-400 font-bold">RT+ Tags</label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <span class="text-xs text-gray-400">Enable for this message</span>
+                                        <input type="checkbox" id="rt_msg_rtplus_enabled" class="toggle-checkbox" onchange="updateRTPlusUI()">
+                                    </label>
+                                </div>
+
+                                <!-- RT+ Options for File/URL -->
+                                <div id="rt_msg_rtplus_options" style="display:none" class="space-y-3">
+                                    <div class="flex gap-2 items-center">
+                                        <label class="w-20 text-xs text-gray-500 shrink-0">Split at:</label>
+                                        <input type="text" id="rt_msg_split" value=" - " class="w-20 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" oninput="updateMsgPreview()">
+                                        <span class="text-[10px] text-gray-500">Delimiter to split into 2 tags</span>
+                                    </div>
+
+                                    <div class="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label class="text-xs text-orange-400 mb-1 block">Tag 1 Type</label>
+                                            <select id="rt_msg_tag1_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                        </div>
+                                        <div>
+                                            <label class="text-xs text-cyan-400 mb-1 block">Tag 2 Type</label>
+                                            <select id="rt_msg_tag2_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Preview -->
+                            <div class="bg-[#000] border border-[#333] rounded p-3">
+                                <div class="flex justify-between items-center mb-2">
+                                    <label class="text-xs text-gray-400 font-bold">PREVIEW</label>
+                                    <div class="text-xs">
+                                        <span id="rt_msg_char_count" class="text-green-400">0</span>
+                                        <span class="text-gray-500">/</span>
+                                        <span id="rt_msg_char_limit" class="text-gray-400">64</span>
+                                        <span class="text-gray-600 ml-1">chars</span>
+                                    </div>
+                                </div>
+                                <div id="rt_msg_preview" class="font-mono text-sm text-gray-300 min-h-[24px] whitespace-pre"></div>
+                                <div class="mt-2 grid grid-cols-2 gap-2 text-xs" id="rt_msg_tag_info">
+                                    <div class="text-orange-400">Tag 1: <span id="rt_msg_tag1_info" class="text-orange-300">-</span></div>
+                                    <div class="text-cyan-400">Tag 2: <span id="rt_msg_tag2_info" class="text-cyan-300">-</span></div>
+                                </div>
+                                <div class="mt-1 font-mono text-[9px] text-gray-600 overflow-x-auto whitespace-nowrap">
+                                    0----5----10---15---20---25---30---35---40---45---50---55---60---
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="rtplus-modal-footer">
+                            <button onclick="closeRTMsgModal()" class="px-4 py-2 bg-[#333] hover:bg-[#444] rounded text-sm text-gray-300">Cancel</button>
+                            <button onclick="saveRTMessage()" class="px-4 py-2 bg-[#d946ef] hover:bg-[#c026d3] rounded text-sm text-white font-bold">Save</button>
                         </div>
                     </div>
                 </div>
@@ -1572,11 +2337,1041 @@ UI_HTML = r"""
         </div>
     </div>
 
+    <!-- RT+ Builder Modal -->
+    <div id="rtplus_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal">
+            <div class="rtplus-modal-header">
+                <div>
+                    <div class="text-lg font-bold text-white">RT+ Message Builder</div>
+                    <div class="text-xs text-gray-400">Build RadioText with tagged content (supports all 64 RT+ content types)</div>
+                </div>
+                <button onclick="closeRTPlusModal()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+            </div>
+
+            <div class="rtplus-modal-body space-y-4">
+                <!-- Buffer Tabs (only shown in manual buffer mode) -->
+                <div id="builder_buffer_tabs" class="flex gap-2" style="display: none;">
+                    <button id="builder_tab_a" onclick="setBuilderBuffer('a')" class="px-4 py-2 rounded font-bold bg-[#d946ef] text-white">Buffer A</button>
+                    <button id="builder_tab_b" onclick="setBuilderBuffer('b')" class="px-4 py-2 rounded font-bold bg-[#333] text-gray-400 hover:bg-[#444]">Buffer B</button>
+                </div>
+
+                <!-- Split Mode -->
+                <div class="bg-[#252525] border border-[#333] rounded p-3">
+                    <div class="flex items-center justify-between mb-2">
+                        <div>
+                            <label class="text-xs text-gray-400 font-bold">SPLIT MODE</label>
+                            <div class="text-[10px] text-gray-500">Parse existing RT text into tagged segments</div>
+                        </div>
+                        <button onclick="showSplitPanel()" id="btn_show_split" class="px-3 py-1 bg-[#333] hover:bg-[#444] rounded text-xs text-gray-300">Split Text...</button>
+                    </div>
+                    <div id="split_panel" class="hidden mt-3 space-y-2 border-t border-[#444] pt-3">
+                        <div class="flex gap-2 items-center">
+                            <label class="w-20 text-xs text-gray-500 shrink-0">Source:</label>
+                            <input type="text" id="split_source" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Artist Name - Song Title">
+                        </div>
+                        <div class="flex gap-2 items-center">
+                            <label class="w-20 text-xs text-gray-500 shrink-0">Split at:</label>
+                            <input type="text" id="split_delimiter" class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" value=" - ">
+                            <button onclick="performSplit()" class="px-3 py-1 bg-[#d946ef] hover:bg-[#c026d3] rounded text-xs text-white font-bold">Split</button>
+                            <button onclick="hideSplitPanel()" class="px-3 py-1 bg-[#333] hover:bg-[#444] rounded text-xs text-gray-300">Cancel</button>
+                        </div>
+                        <div class="text-[10px] text-gray-500">Tip: Use \r"path" or \w"url" in source for dynamic content</div>
+                    </div>
+                </div>
+
+                <!-- Message Construction -->
+                <div class="bg-[#252525] border border-[#333] rounded p-4 space-y-3">
+                    <div class="text-xs text-gray-400 mb-2">Build your message with up to 2 tagged segments:</div>
+
+                    <!-- Prefix -->
+                    <div class="flex gap-2 items-center">
+                        <label class="w-20 text-xs text-gray-500 shrink-0">Prefix:</label>
+                        <input type="text" id="builder_prefix" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text before first tag" oninput="updateBuilderPreview()">
+                    </div>
+
+                    <!-- Tag 1 -->
+                    <div class="bg-[#1a1a1a] border border-orange-900/50 rounded p-3 space-y-2">
+                        <div class="flex gap-2 items-center">
+                            <label class="w-20 text-xs text-orange-400 font-bold shrink-0">Tag 1:</label>
+                            <select id="builder_tag1_type" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateBuilderPreview()"></select>
+                        </div>
+                        <div class="flex gap-2 items-center">
+                            <label class="w-20 text-xs text-gray-500 shrink-0">Content:</label>
+                            <input type="text" id="builder_tag1_text" class="flex-1 bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-sm text-orange-300" placeholder="Text or \r&quot;path&quot; for file" oninput="updateBuilderPreview()">
+                        </div>
+                        <div class="text-[10px] text-gray-500">Supports: \r"path" (file), \R"path" (file uppercase), \w"url" (web)</div>
+                    </div>
+
+                    <!-- Middle -->
+                    <div class="flex gap-2 items-center">
+                        <label class="w-20 text-xs text-gray-500 shrink-0">Between:</label>
+                        <input type="text" id="builder_middle" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder=" - " value=" - " oninput="updateBuilderPreview()">
+                    </div>
+
+                    <!-- Tag 2 -->
+                    <div class="bg-[#1a1a1a] border border-cyan-900/50 rounded p-3 space-y-2">
+                        <div class="flex gap-2 items-center">
+                            <label class="w-20 text-xs text-cyan-400 font-bold shrink-0">Tag 2:</label>
+                            <select id="builder_tag2_type" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateBuilderPreview()"></select>
+                        </div>
+                        <div class="flex gap-2 items-center">
+                            <label class="w-20 text-xs text-gray-500 shrink-0">Content:</label>
+                            <input type="text" id="builder_tag2_text" class="flex-1 bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-sm text-cyan-300" placeholder="Text or \r&quot;path&quot; for file" oninput="updateBuilderPreview()">
+                        </div>
+                        <div class="text-[10px] text-gray-500">Supports: \r"path" (file), \R"path" (file uppercase), \w"url" (web)</div>
+                    </div>
+
+                    <!-- Suffix -->
+                    <div class="flex gap-2 items-center">
+                        <label class="w-20 text-xs text-gray-500 shrink-0">Suffix:</label>
+                        <input type="text" id="builder_suffix" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after tags" oninput="updateBuilderPreview()">
+                    </div>
+                </div>
+
+                <!-- Preview -->
+                <div class="bg-[#000] border border-[#333] rounded p-4">
+                    <div class="flex justify-between items-center mb-2">
+                        <label class="text-xs text-gray-400 font-bold">PREVIEW</label>
+                        <div class="text-xs">
+                            <span id="builder_char_count" class="text-green-400">0</span>
+                            <span class="text-gray-500">/</span>
+                            <span id="builder_char_limit" class="text-gray-400">64</span>
+                            <span class="text-gray-600 ml-1">chars</span>
+                        </div>
+                    </div>
+                    <div id="builder_preview" class="rtplus-preview text-gray-300"></div>
+                    <div class="mt-3 grid grid-cols-2 gap-2 text-xs">
+                        <div class="text-orange-400">Tag 1: <span id="builder_tag1_info" class="text-orange-300">-</span></div>
+                        <div class="text-orange-400">Type: <span id="builder_tag1_typename" class="text-orange-300">-</span></div>
+                        <div class="text-cyan-400">Tag 2: <span id="builder_tag2_info" class="text-cyan-300">-</span></div>
+                        <div class="text-cyan-400">Type: <span id="builder_tag2_typename" class="text-cyan-300">-</span></div>
+                    </div>
+                    <div class="mt-2 font-mono text-[9px] text-gray-600 overflow-x-auto whitespace-nowrap">
+                        0----5----10---15---20---25---30---35---40---45---50---55---60---
+                    </div>
+                </div>
+
+                <!-- Mode Toggle -->
+                <div class="flex items-center gap-4 bg-[#252525] border border-[#333] rounded p-3">
+                    <span class="text-xs text-gray-400">RT+ Mode:</span>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name="rtplus_mode" value="format" class="accent-[#d946ef]" onchange="updateRTPlusMode()">
+                        <span class="text-sm text-gray-300">Format String</span>
+                        <span class="text-[10px] text-gray-500">(legacy)</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name="rtplus_mode" value="builder" class="accent-[#d946ef]" onchange="updateRTPlusMode()">
+                        <span class="text-sm text-gray-300">Builder</span>
+                        <span class="text-[10px] text-gray-500">(new)</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="rtplus-modal-footer">
+                <button onclick="resetBuilder()" class="px-3 py-2 bg-[#333] hover:bg-[#444] rounded text-sm text-gray-300">Reset</button>
+                <div class="flex gap-2">
+                    <button onclick="closeRTPlusModal()" class="px-4 py-2 bg-[#333] hover:bg-[#444] rounded text-sm text-gray-300">Cancel</button>
+                    <button onclick="applyBuilderConfig()" class="px-4 py-2 bg-[#d946ef] hover:bg-[#c026d3] rounded text-sm text-white font-bold">Apply</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         var socket = io();
         var running = {{ 'true' if state.running else 'false' }};
-        var pty_list = {{ pty_list|tojson }};
-        
+        var pty_list_rds = {{ pty_list_rds|tojson }};
+        var pty_list_rbds = {{ pty_list_rbds|tojson }};
+
+        // RT+ Content Types Dictionary
+        var RTPLUS_TYPES = {
+            0: ["Dummy", "No content type"],
+            1: ["Title", "Item title"],
+            2: ["Album", "Album/CD name"],
+            3: ["Track", "Track number"],
+            4: ["Artist", "Artist name"],
+            5: ["Composition", "Composition name"],
+            6: ["Movement", "Movement name"],
+            7: ["Conductor", "Conductor"],
+            8: ["Composer", "Composer"],
+            9: ["Band", "Band/Orchestra"],
+            10: ["Comment", "Free text comment"],
+            11: ["Genre", "Genre"],
+            12: ["News", "News headlines"],
+            13: ["News.Local", "Local news"],
+            14: ["Stock", "Stock market"],
+            15: ["Sport", "Sport news"],
+            16: ["Lottery", "Lottery numbers"],
+            17: ["Horoscope", "Horoscope"],
+            18: ["Daily", "Daily diversion"],
+            19: ["Health", "Health tips"],
+            20: ["Event", "Event info"],
+            21: ["Scene", "Scene/Film info"],
+            22: ["Cinema", "Cinema info"],
+            23: ["TV", "TV info"],
+            24: ["DateTime", "Date/Time"],
+            25: ["Weather", "Weather info"],
+            26: ["Traffic", "Traffic info"],
+            27: ["Alarm", "Alarm/Emergency"],
+            28: ["Advert", "Advertisement"],
+            29: ["URL", "Website URL"],
+            30: ["Other", "Other info"],
+            31: ["Stn.Short", "Station name short"],
+            32: ["Stn.Long", "Station name long"],
+            33: ["Prog.Now", "Current program"],
+            34: ["Prog.Next", "Next program"],
+            35: ["Prog.Part", "Program part"],
+            36: ["Host", "Host name"],
+            37: ["Editorial", "Editorial staff"],
+            38: ["Frequency", "Frequency info"],
+            39: ["Homepage", "Homepage URL"],
+            40: ["Subchannel", "Sub-channel"],
+            41: ["Phone.Hotline", "Hotline phone"],
+            42: ["Phone.Studio", "Studio phone"],
+            43: ["Phone.Other", "Other phone"],
+            44: ["SMS.Studio", "Studio SMS"],
+            45: ["SMS.Other", "Other SMS"],
+            46: ["Email.Hotline", "Hotline email"],
+            47: ["Email.Studio", "Studio email"],
+            48: ["Email.Other", "Other email"],
+            49: ["MMS.Phone", "MMS number"],
+            50: ["Chat", "Chat"],
+            51: ["Chat.Centre", "Chat centre"],
+            52: ["Vote.Question", "Vote question"],
+            53: ["Vote.Centre", "Vote centre"],
+            54: ["RFU", "Reserved"],
+            55: ["RFU", "Reserved"],
+            56: ["RFU", "Reserved"],
+            57: ["RFU", "Reserved"],
+            58: ["RFU", "Reserved"],
+            59: ["Place", "Place/Location"],
+            60: ["Appointment", "Appointment"],
+            61: ["Identifier", "Identifier"],
+            62: ["Purchase", "Purchase info"],
+            63: ["GetData", "Get Data"]
+        };
+
+        // RT Messages State
+        var rtMessages = [];
+        try {
+            var rtMessagesStr = {{ state.rt_messages|tojson }};
+            rtMessages = JSON.parse(rtMessagesStr) || [];
+        } catch(e) {
+            console.error("Failed to parse rt_messages:", e);
+            rtMessages = [];
+        }
+        var currentMsgBuffer = 'AB';
+
+        // RT+ Builder State (legacy)
+        var currentBuilderBuffer = 'a';
+        var builderState = {
+            a: { prefix: '', tag1_type: 4, tag1_text: '', middle: ' - ', tag2_type: 1, tag2_text: '', suffix: '' },
+            b: { prefix: '', tag1_type: 4, tag1_text: '', middle: ' - ', tag2_type: 1, tag2_text: '', suffix: '' }
+        };
+
+        // === RT MESSAGE FUNCTIONS ===
+        function renderRTMessages() {
+            var container = document.getElementById('rt_messages_list');
+            var emptyState = document.getElementById('rt_messages_empty');
+
+            if (!rtMessages || rtMessages.length === 0) {
+                container.innerHTML = '';
+                emptyState.style.display = 'block';
+                return;
+            }
+
+            emptyState.style.display = 'none';
+            container.innerHTML = rtMessages.map(function(msg, idx) {
+                return renderMessageCard(msg, idx);
+            }).join('');
+
+            // Attach drag-and-drop handlers after rendering
+            attachDragHandlers();
+        }
+
+        var draggedIndex = -1;
+
+        function attachDragHandlers() {
+            var cards = document.querySelectorAll('.rt-msg-card');
+            cards.forEach(function(card, idx) {
+                card.draggable = true;
+
+                card.addEventListener('dragstart', function(e) {
+                    draggedIndex = idx;
+                    card.classList.add('dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+
+                card.addEventListener('dragend', function(e) {
+                    card.classList.remove('dragging');
+                    // Remove all drag-over classes
+                    document.querySelectorAll('.rt-msg-card').forEach(function(c) {
+                        c.classList.remove('drag-over');
+                    });
+                });
+
+                card.addEventListener('dragover', function(e) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+
+                    if (idx !== draggedIndex) {
+                        card.classList.add('drag-over');
+                    }
+                });
+
+                card.addEventListener('dragleave', function(e) {
+                    card.classList.remove('drag-over');
+                });
+
+                card.addEventListener('drop', function(e) {
+                    e.preventDefault();
+                    card.classList.remove('drag-over');
+
+                    if (idx !== draggedIndex && draggedIndex >= 0) {
+                        // Reorder array
+                        var draggedMsg = rtMessages[draggedIndex];
+                        rtMessages.splice(draggedIndex, 1);
+                        rtMessages.splice(idx, 0, draggedMsg);
+
+                        // Re-render and sync
+                        renderRTMessages();
+                        syncRTMessages();
+                    }
+                });
+            });
+        }
+
+        function renderMessageCard(msg, idx) {
+            var bufferClass = 'buffer-' + msg.buffer.toLowerCase();
+            var sourceIcon = {manual: '✏️', file: '📄', url: '🌐'}[msg.source_type] || '✏️';
+            var preview = (msg.content || '').substring(0, 50) + ((msg.content || '').length > 50 ? '...' : '');
+            var enabledClass = msg.enabled ? '' : 'disabled';
+
+            return '<div class="rt-msg-card ' + enabledClass + '" data-id="' + msg.id + '">' +
+                '<div class="rt-msg-header" onclick="editRTMessage(\'' + msg.id + '\')">' +
+                '<span class="rt-msg-buffer ' + bufferClass + '">' + msg.buffer + '</span>' +
+                '<span class="rt-msg-duration">' + (msg.cycles || 2) + ' cycles</span>' +
+                '<span class="rt-msg-source">' + sourceIcon + '</span>' +
+                '<div class="rt-msg-preview">' + escapeHtml(preview) + '</div>' +
+                (msg.rt_plus_enabled ? '<span class="rt-msg-rtplus">RT+</span>' : '') +
+                '<div class="rt-msg-actions">' +
+                '<button onclick="event.stopPropagation(); toggleRTMessage(\'' + msg.id + '\')" title="' + (msg.enabled ? 'Disable' : 'Enable') + '">' + (msg.enabled ? '👁' : '👁‍🗨') + '</button>' +
+                '<button onclick="event.stopPropagation(); deleteRTMessage(\'' + msg.id + '\')" title="Delete">×</button>' +
+                '</div></div></div>';
+        }
+
+        function escapeHtml(text) {
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        var pendingNewMessage = null; // Track message being created
+
+        function addRTMessage() {
+            pendingNewMessage = {
+                id: 'msg_' + Date.now(),
+                buffer: 'AB',
+                cycles: 2,
+                source_type: 'manual',
+                content: '',
+                split_delimiter: ' - ',
+                rt_plus_enabled: false,
+                rt_plus_tags: { tag1_type: 4, tag2_type: 1 },
+                enabled: true,
+                prefix: '',
+                tag1_text: '',
+                middle: ' - ',
+                tag2_text: '',
+                suffix: ''
+            };
+            openMessageModal(pendingNewMessage, true);
+        }
+
+        function openMessageModal(msg, isNew) {
+            document.getElementById('rt_msg_edit_id').value = msg.id;
+            document.getElementById('rt_msg_modal_title').textContent = isNew ? 'Add Message' : 'Edit Message';
+            document.getElementById('rt_msg_cycles').value = msg.cycles || 2;
+
+            // Set source type radio first
+            var sourceRadios = document.querySelectorAll('input[name="rt_msg_source"]');
+            sourceRadios.forEach(function(r) { r.checked = (r.value === (msg.source_type || 'manual')); });
+
+            // Set buffer buttons
+            currentMsgBuffer = msg.buffer || 'AB';
+            updateBufferButtons();
+
+            // Set RT+ enabled toggle
+            document.getElementById('rt_msg_rtplus_enabled').checked = msg.rt_plus_enabled || false;
+
+            // Load fields based on source type
+            if (msg.source_type === 'manual') {
+                if (msg.content && !msg.rt_plus_enabled) {
+                    document.getElementById('rt_msg_simple_text').value = msg.content || '';
+                } else {
+                    document.getElementById('rt_msg_prefix').value = msg.prefix || '';
+                    document.getElementById('rt_msg_tag1_text').value = msg.tag1_text || '';
+                    document.getElementById('rt_msg_middle').value = msg.middle || ' - ';
+                    document.getElementById('rt_msg_tag2_text').value = msg.tag2_text || '';
+                    document.getElementById('rt_msg_suffix').value = msg.suffix || '';
+                    document.getElementById('rt_msg_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
+                    document.getElementById('rt_msg_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                }
+            } else {
+                document.getElementById('rt_msg_content').value = msg.content || '';
+                document.getElementById('rt_msg_prefix_auto').value = msg.prefix || '';
+                document.getElementById('rt_msg_suffix_auto').value = msg.suffix || '';
+                document.getElementById('rt_msg_split').value = msg.split_delimiter || ' - ';
+                document.getElementById('rt_msg_tag1_type_auto').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
+                document.getElementById('rt_msg_tag2_type_auto').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+            }
+
+            updateSourceUI();
+            updateRTPlusUI();
+            updateMsgPreview();
+            document.getElementById('rt_msg_modal').style.display = 'flex';
+        }
+
+        function editRTMessage(id) {
+            var msg = rtMessages.find(function(m) { return m.id === id; });
+            if (!msg) return;
+            pendingNewMessage = null; // Clear any pending new message
+            openMessageModal(msg, false);
+        }
+
+        function closeRTMsgModal() {
+            pendingNewMessage = null; // Clear pending message if modal closed without saving
+            document.getElementById('rt_msg_modal').style.display = 'none';
+        }
+
+        function setMsgBuffer(buf) {
+            currentMsgBuffer = buf;
+            updateBufferButtons();
+        }
+
+        function updateBufferButtons() {
+            ['A', 'B', 'AB'].forEach(function(b) {
+                var btn = document.getElementById('rt_msg_buf_' + b.toLowerCase());
+                if (b === currentMsgBuffer) {
+                    btn.className = 'px-4 py-2 rounded font-bold text-sm ' + (b === 'A' ? 'bg-[#dc2626]' : b === 'B' ? 'bg-[#2563eb]' : 'bg-[#7c3aed]') + ' text-white';
+                } else {
+                    btn.className = 'px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]';
+                }
+            });
+        }
+
+        function updateSourceUI() {
+            var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
+            var contentWrap = document.getElementById('rt_msg_content_wrap');
+            var manualSimple = document.getElementById('rt_msg_manual_simple');
+            var manualBuilder = document.getElementById('rt_msg_manual_builder');
+            var rtplusOptions = document.getElementById('rt_msg_rtplus_options');
+            var tagInfo = document.getElementById('rt_msg_tag_info');
+
+            if (sourceType === 'manual') {
+                // Show manual input (simple or builder depending on RT+ toggle)
+                contentWrap.style.display = 'none';
+                updateRTPlusUI(); // This will handle showing simple vs builder
+                tagInfo.style.display = 'grid';
+            } else {
+                // Show content input, hide manual inputs
+                contentWrap.style.display = 'block';
+                if (manualSimple) manualSimple.style.display = 'none';
+                if (manualBuilder) manualBuilder.style.display = 'none';
+                tagInfo.style.display = 'grid';
+
+                var label = document.getElementById('rt_msg_content_label');
+                var hint = document.getElementById('rt_msg_content_hint');
+
+                if (sourceType === 'file') {
+                    label.textContent = 'Content Source';
+                    hint.textContent = 'Full path to text file (e.g., C:\\nowplaying.txt)';
+                } else if (sourceType === 'url') {
+                    label.textContent = 'Content Source';
+                    hint.textContent = 'URL to fetch text from';
+                }
+            }
+            updateRTPlusUI();
+            updateMsgPreview();
+        }
+
+        function updateRTPlusUI() {
+            var enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+            var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
+            var opts = document.getElementById('rt_msg_rtplus_options');
+            var manualSimple = document.getElementById('rt_msg_manual_simple');
+            var manualBuilder = document.getElementById('rt_msg_manual_builder');
+
+            // For manual mode: show simple text input or RT+ builder based on toggle
+            if (sourceType === 'manual') {
+                if (manualSimple) manualSimple.style.display = enabled ? 'none' : 'block';
+                if (manualBuilder) manualBuilder.style.display = enabled ? 'block' : 'none';
+                if (opts) opts.style.display = 'none';
+            } else {
+                // For file/URL: hide manual inputs, show RT+ options if enabled
+                if (manualSimple) manualSimple.style.display = 'none';
+                if (manualBuilder) manualBuilder.style.display = 'none';
+                if (opts) opts.style.display = enabled ? 'block' : 'none';
+            }
+            updateMsgPreview();
+        }
+
+        // Cache for resolved content
+        var resolvedContentCache = '';
+        var resolveDebounceTimer = null;
+        var lastResolvePath = '';
+        var lastResolveType = '';
+
+        function fetchResolvedContent() {
+            var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
+            var content = document.getElementById('rt_msg_content').value || '';
+
+            if (sourceType === 'manual' || !content) {
+                resolvedContentCache = '';
+                renderPreviewWithContent('');
+                return;
+            }
+
+            if (content === lastResolvePath && sourceType === lastResolveType && resolvedContentCache) {
+                renderPreviewWithContent(resolvedContentCache);
+                return;
+            }
+
+            lastResolvePath = content;
+            lastResolveType = sourceType;
+
+            var previewEl = document.getElementById('rt_msg_preview');
+            previewEl.innerHTML = '<span class="text-gray-500">Loading...</span>';
+
+            fetch('/resolve-content', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_type: sourceType, content: content })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    resolvedContentCache = data.resolved || '';
+                    renderPreviewWithContent(resolvedContentCache);
+                } else {
+                    resolvedContentCache = '';
+                    previewEl.innerHTML = '<span class="text-red-400">Error: ' + escapeHtml(data.error || 'Failed') + '</span>';
+                }
+            })
+            .catch(function(err) {
+                resolvedContentCache = '';
+                previewEl.innerHTML = '<span class="text-red-400">Error loading content</span>';
+            });
+        }
+
+        function updateMsgPreview() {
+            var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
+
+            if (sourceType === 'manual') {
+                renderPreviewWithContent(null);
+            } else {
+                clearTimeout(resolveDebounceTimer);
+                resolveDebounceTimer = setTimeout(fetchResolvedContent, 500);
+            }
+        }
+
+        function renderPreviewWithContent(resolvedContent) {
+            var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
+            var limit = document.getElementById('rt_mode').value === '2B' ? 32 : 64;
+            var preview = '';
+            var tag1Start = -1, tag1Len = 0, tag1Type = 0;
+            var tag2Start = -1, tag2Len = 0, tag2Type = 0;
+            var rtPlusEnabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+
+            if (sourceType === 'manual') {
+                if (!rtPlusEnabled) {
+                    // Simple text mode
+                    preview = document.getElementById('rt_msg_simple_text').value || '';
+                    // Update character count
+                    var countElem = document.getElementById('rt_msg_simple_count');
+                    if (countElem) countElem.textContent = preview.length;
+                } else {
+                    // RT+ builder mode
+                    var prefix = document.getElementById('rt_msg_prefix').value || '';
+                    var tag1Text = document.getElementById('rt_msg_tag1_text').value || '';
+                    var middle = document.getElementById('rt_msg_middle').value || '';
+                    var tag2Text = document.getElementById('rt_msg_tag2_text').value || '';
+                    var suffix = document.getElementById('rt_msg_suffix').value || '';
+                    tag1Type = parseInt(document.getElementById('rt_msg_tag1_type').value) || 0;
+                    tag2Type = parseInt(document.getElementById('rt_msg_tag2_type').value) || 0;
+
+                    preview = prefix + tag1Text;
+                    tag1Start = prefix.length;
+                    tag1Len = tag1Text.length;
+
+                    if (tag2Text) {
+                        preview += middle + tag2Text;
+                        tag2Start = prefix.length + tag1Text.length + middle.length;
+                        tag2Len = tag2Text.length;
+                    }
+                    preview += suffix;
+                }
+            } else {
+                var path = document.getElementById('rt_msg_content').value || '';
+                var delimiter = document.getElementById('rt_msg_split').value || ' - ';
+                tag1Type = parseInt(document.getElementById('rt_msg_tag1_type_auto').value) || 0;
+                tag2Type = parseInt(document.getElementById('rt_msg_tag2_type_auto').value) || 0;
+
+                if (!path) {
+                    preview = '(enter file path or URL)';
+                } else if (resolvedContent) {
+                    // Get prefix/suffix
+                    var prefix = document.getElementById('rt_msg_prefix_auto').value || '';
+                    var suffix = document.getElementById('rt_msg_suffix_auto').value || '';
+
+                    // Calculate RT+ tags BEFORE adding suffix (so suffix isn't included in tag2)
+                    if (document.getElementById('rt_msg_rtplus_enabled').checked && delimiter && resolvedContent.indexOf(delimiter) !== -1) {
+                        var parts = resolvedContent.split(delimiter, 2);
+                        tag1Start = prefix.length;
+                        tag1Len = parts[0].length;
+                        if (parts.length > 1) {
+                            tag2Start = prefix.length + parts[0].length + delimiter.length;
+                            tag2Len = parts[1].length; // This is correct - parts[1] doesn't include suffix yet
+                        }
+                    }
+
+                    // Apply prefix/suffix to preview
+                    preview = prefix + resolvedContent + suffix;
+                } else {
+                    preview = '(no content)';
+                }
+            }
+
+            // Truncate preview
+            if (preview.length > limit) {
+                preview = preview.substring(0, limit);
+            }
+
+            // Update char count
+            var countEl = document.getElementById('rt_msg_char_count');
+            var limitEl = document.getElementById('rt_msg_char_limit');
+            countEl.textContent = preview.length;
+            limitEl.textContent = limit;
+            countEl.className = preview.length > limit ? 'text-red-400' : (preview.length > limit - 5 ? 'text-yellow-400' : 'text-green-400');
+
+            // Build preview HTML with highlighted tags (only if RT+ enabled)
+            var previewEl = document.getElementById('rt_msg_preview');
+            var html = '';
+            if (rtPlusEnabled && (tag1Len > 0 || tag2Len > 0)) {
+                for (var i = 0; i < preview.length; i++) {
+                    var char = escapeHtml(preview[i]);
+                    if (i >= tag1Start && i < tag1Start + tag1Len) {
+                        html += '<span class="rtplus-tag-1">' + char + '</span>';
+                    } else if (i >= tag2Start && i < tag2Start + tag2Len) {
+                        html += '<span class="rtplus-tag-2">' + char + '</span>';
+                    } else {
+                        html += char;
+                    }
+                }
+            } else {
+                // No highlighting when RT+ disabled or no tags
+                html = escapeHtml(preview);
+            }
+            previewEl.innerHTML = html || '<span class="text-gray-600">(empty)</span>';
+
+            // Update tag info (hide if RT+ disabled in manual mode)
+            var tag1Info = document.getElementById('rt_msg_tag1_info');
+            var tag2Info = document.getElementById('rt_msg_tag2_info');
+            var tagInfoContainer = document.getElementById('rt_msg_tag_info');
+
+            if (sourceType === 'manual' && !rtPlusEnabled) {
+                // Hide tag info in manual mode when RT+ is disabled
+                if (tagInfoContainer) tagInfoContainer.style.display = 'none';
+            } else {
+                if (tagInfoContainer) tagInfoContainer.style.display = 'grid';
+                if (tag1Len > 0) {
+                    var t1Name = RTPLUS_TYPES[tag1Type] ? RTPLUS_TYPES[tag1Type][0] : 'Unknown';
+                    tag1Info.textContent = t1Name + ' [' + tag1Start + '-' + (tag1Start + tag1Len - 1) + ']';
+                } else {
+                    tag1Info.textContent = '-';
+                }
+                if (tag2Len > 0) {
+                    var t2Name = RTPLUS_TYPES[tag2Type] ? RTPLUS_TYPES[tag2Type][0] : 'Unknown';
+                    tag2Info.textContent = t2Name + ' [' + tag2Start + '-' + (tag2Start + tag2Len - 1) + ']';
+                } else {
+                    tag2Info.textContent = '-';
+                }
+            }
+        }
+
+        function saveRTMessage() {
+            var id = document.getElementById('rt_msg_edit_id').value;
+            var msg = rtMessages.find(function(m) { return m.id === id; });
+
+            // If msg not found, check if it's a pending new message
+            if (!msg && pendingNewMessage && pendingNewMessage.id === id) {
+                msg = pendingNewMessage;
+                rtMessages.push(msg); // Add to array on save
+                pendingNewMessage = null;
+            }
+
+            if (!msg) return;
+
+            msg.buffer = currentMsgBuffer;
+            msg.cycles = parseInt(document.getElementById('rt_msg_cycles').value) || 2;
+            msg.source_type = document.querySelector('input[name="rt_msg_source"]:checked').value;
+
+            msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+
+            if (msg.source_type === 'manual') {
+                if (!msg.rt_plus_enabled) {
+                    // Simple text mode
+                    msg.content = document.getElementById('rt_msg_simple_text').value;
+                    msg.prefix = '';
+                    msg.tag1_text = '';
+                    msg.middle = '';
+                    msg.tag2_text = '';
+                    msg.suffix = '';
+                    msg.split_delimiter = '';
+                } else {
+                    // RT+ builder mode
+                    msg.prefix = document.getElementById('rt_msg_prefix').value;
+                    msg.tag1_text = document.getElementById('rt_msg_tag1_text').value;
+                    msg.middle = document.getElementById('rt_msg_middle').value;
+                    msg.tag2_text = document.getElementById('rt_msg_tag2_text').value;
+                    msg.suffix = document.getElementById('rt_msg_suffix').value;
+                    msg.rt_plus_tags = {
+                        tag1_type: parseInt(document.getElementById('rt_msg_tag1_type').value),
+                        tag2_type: parseInt(document.getElementById('rt_msg_tag2_type').value)
+                    };
+                    // Build content from parts for backend
+                    msg.content = (msg.prefix || '') + (msg.tag1_text || '') +
+                        (msg.tag2_text ? (msg.middle || '') + msg.tag2_text : '') + (msg.suffix || '');
+                    msg.split_delimiter = msg.middle || ' - ';
+                }
+            } else {
+                // Save file/URL fields
+                msg.content = document.getElementById('rt_msg_content').value;
+                msg.prefix = document.getElementById('rt_msg_prefix_auto').value;
+                msg.suffix = document.getElementById('rt_msg_suffix_auto').value;
+                msg.split_delimiter = document.getElementById('rt_msg_split').value;
+                msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+                msg.rt_plus_tags = {
+                    tag1_type: parseInt(document.getElementById('rt_msg_tag1_type_auto').value),
+                    tag2_type: parseInt(document.getElementById('rt_msg_tag2_type_auto').value)
+                };
+                // Clear manual-only fields
+                msg.tag1_text = '';
+                msg.middle = '';
+                msg.tag2_text = '';
+            }
+
+            closeRTMsgModal();
+            renderRTMessages();
+            syncRTMessages();
+        }
+
+        function toggleRTMessage(id) {
+            var msg = rtMessages.find(function(m) { return m.id === id; });
+            if (msg) {
+                msg.enabled = !msg.enabled;
+                renderRTMessages();
+                syncRTMessages();
+            }
+        }
+
+        function deleteRTMessage(id) {
+            if (!confirm('Delete this message?')) return;
+            rtMessages = rtMessages.filter(function(m) { return m.id !== id; });
+            renderRTMessages();
+            syncRTMessages();
+        }
+
+        function syncRTMessages() {
+            socket.emit('update', { rt_messages: JSON.stringify(rtMessages) });
+        }
+
+        function initRTMsgTagSelects() {
+            // Build options HTML
+            var opts = '';
+            for (var i = 0; i <= 63; i++) {
+                var info = RTPLUS_TYPES[i] || ["Unknown", ""];
+                opts += '<option value="' + i + '">' + i + ': ' + info[0] + '</option>';
+            }
+
+            // Manual mode selects
+            var sel1 = document.getElementById('rt_msg_tag1_type');
+            var sel2 = document.getElementById('rt_msg_tag2_type');
+            if (sel1) { sel1.innerHTML = opts; sel1.value = '4'; }
+            if (sel2) { sel2.innerHTML = opts; sel2.value = '1'; }
+
+            // Auto mode selects (file/URL)
+            var sel1Auto = document.getElementById('rt_msg_tag1_type_auto');
+            var sel2Auto = document.getElementById('rt_msg_tag2_type_auto');
+            if (sel1Auto) { sel1Auto.innerHTML = opts; sel1Auto.value = '4'; }
+            if (sel2Auto) { sel2Auto.innerHTML = opts; sel2Auto.value = '1'; }
+        }
+
+        function initRTPlusBuilder() {
+            var select1 = document.getElementById('builder_tag1_type');
+            var select2 = document.getElementById('builder_tag2_type');
+            if (!select1 || !select2) return;
+
+            select1.innerHTML = '';
+            select2.innerHTML = '<option value="-1">None (single tag)</option>';
+
+            for (var i = 0; i <= 63; i++) {
+                var info = RTPLUS_TYPES[i] || ["Unknown", ""];
+                var opt = '<option value="' + i + '">' + i + ': ' + info[0] + '</option>';
+                select1.innerHTML += opt;
+                select2.innerHTML += opt;
+            }
+
+            select1.value = "4";
+            select2.value = "1";
+        }
+
+        function openRTPlusModal() {
+            initRTPlusBuilder();
+            loadBuilderFromState();
+            document.getElementById('rtplus_modal').style.display = 'flex';
+
+            // Show/hide buffer tabs based on manual buffer mode
+            var manualBuffers = document.getElementById('rt_manual_buffers');
+            var bufferTabs = document.getElementById('builder_buffer_tabs');
+            if (bufferTabs) {
+                bufferTabs.style.display = (manualBuffers && manualBuffers.checked) ? 'flex' : 'none';
+            }
+
+            // Pre-populate split source from current RT text
+            var rtText = document.getElementById('rt_text');
+            if (rtText && rtText.value) {
+                document.getElementById('split_source').value = rtText.value;
+            }
+
+            // Set mode radio based on current state
+            var mode = '{{ state.rt_plus_mode }}' || 'format';
+            var radios = document.querySelectorAll('input[name="rtplus_mode"]');
+            radios.forEach(function(r) { r.checked = (r.value === mode); });
+            updateBuilderPreview();
+        }
+
+        function closeRTPlusModal() {
+            document.getElementById('rtplus_modal').style.display = 'none';
+        }
+
+        function setBuilderBuffer(buf) {
+            saveBuilderToLocalState();
+            currentBuilderBuffer = buf;
+
+            document.getElementById('builder_tab_a').className = buf === 'a'
+                ? 'px-4 py-2 rounded font-bold bg-[#d946ef] text-white'
+                : 'px-4 py-2 rounded font-bold bg-[#333] text-gray-400 hover:bg-[#444]';
+            document.getElementById('builder_tab_b').className = buf === 'b'
+                ? 'px-4 py-2 rounded font-bold bg-[#d946ef] text-white'
+                : 'px-4 py-2 rounded font-bold bg-[#333] text-gray-400 hover:bg-[#444]';
+
+            loadBuilderBufferToUI();
+            updateBuilderPreview();
+        }
+
+        function saveBuilderToLocalState() {
+            var s = builderState[currentBuilderBuffer];
+            s.prefix = document.getElementById('builder_prefix').value;
+            s.tag1_type = parseInt(document.getElementById('builder_tag1_type').value);
+            s.tag1_text = document.getElementById('builder_tag1_text').value;
+            s.middle = document.getElementById('builder_middle').value;
+            s.tag2_type = parseInt(document.getElementById('builder_tag2_type').value);
+            s.tag2_text = document.getElementById('builder_tag2_text').value;
+            s.suffix = document.getElementById('builder_suffix').value;
+        }
+
+        function loadBuilderBufferToUI() {
+            var s = builderState[currentBuilderBuffer];
+            document.getElementById('builder_prefix').value = s.prefix || '';
+            document.getElementById('builder_tag1_type').value = s.tag1_type >= 0 ? s.tag1_type : 4;
+            document.getElementById('builder_tag1_text').value = s.tag1_text || '';
+            document.getElementById('builder_middle').value = s.middle || ' - ';
+            document.getElementById('builder_tag2_type').value = s.tag2_type >= 0 ? s.tag2_type : 1;
+            document.getElementById('builder_tag2_text').value = s.tag2_text || '';
+            document.getElementById('builder_suffix').value = s.suffix || '';
+        }
+
+        function escapeHtml(text) {
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function updateBuilderPreview() {
+            var prefix = document.getElementById('builder_prefix').value;
+            var tag1Type = parseInt(document.getElementById('builder_tag1_type').value);
+            var tag1Text = document.getElementById('builder_tag1_text').value;
+            var middle = document.getElementById('builder_middle').value;
+            var tag2Type = parseInt(document.getElementById('builder_tag2_type').value);
+            var tag2Text = document.getElementById('builder_tag2_text').value;
+            var suffix = document.getElementById('builder_suffix').value;
+
+            var tag1Start = prefix.length;
+            var tag1End = tag1Start + tag1Text.length;
+            var tag2Start = -1, tag2End = -1;
+
+            if (tag2Type >= 0 && tag2Text) {
+                tag2Start = tag1End + middle.length;
+                tag2End = tag2Start + tag2Text.length;
+            }
+
+            // Build preview with highlights
+            var html = escapeHtml(prefix);
+            if (tag1Text) {
+                html += '<span class="rtplus-tag-1">' + escapeHtml(tag1Text) + '</span>';
+            }
+            if (tag2Type >= 0 && tag2Text) {
+                html += escapeHtml(middle);
+                html += '<span class="rtplus-tag-2">' + escapeHtml(tag2Text) + '</span>';
+            }
+            html += escapeHtml(suffix);
+
+            var totalLen = prefix.length + tag1Text.length +
+                (tag2Type >= 0 && tag2Text ? middle.length + tag2Text.length : 0) + suffix.length;
+
+            var rtModeEl = document.getElementById('rt_mode');
+            var limit = (rtModeEl && rtModeEl.value === '2B') ? 32 : 64;
+
+            document.getElementById('builder_preview').innerHTML = html || '<span class="text-gray-600">Empty message</span>';
+
+            var countEl = document.getElementById('builder_char_count');
+            countEl.innerText = totalLen;
+            countEl.className = totalLen > limit ? 'text-red-400' : 'text-green-400';
+            document.getElementById('builder_char_limit').innerText = limit;
+
+            // Tag info
+            document.getElementById('builder_tag1_info').innerText = tag1Text
+                ? 'pos ' + tag1Start + ', len ' + tag1Text.length
+                : 'not set';
+            document.getElementById('builder_tag1_typename').innerText = tag1Type >= 0
+                ? RTPLUS_TYPES[tag1Type][0]
+                : 'None';
+
+            document.getElementById('builder_tag2_info').innerText = (tag2Type >= 0 && tag2Text)
+                ? 'pos ' + tag2Start + ', len ' + tag2Text.length
+                : 'not set';
+            document.getElementById('builder_tag2_typename').innerText = tag2Type >= 0
+                ? RTPLUS_TYPES[tag2Type][0]
+                : 'None';
+        }
+
+        function loadBuilderFromState() {
+            // Load saved builder state from server
+            try {
+                var savedA = '{{ state.rt_plus_builder_a|e }}';
+                var savedB = '{{ state.rt_plus_builder_b|e }}';
+                if (savedA) builderState.a = JSON.parse(savedA);
+                if (savedB) builderState.b = JSON.parse(savedB);
+            } catch (e) {}
+            loadBuilderBufferToUI();
+        }
+
+        function applyBuilderConfig() {
+            saveBuilderToLocalState();
+
+            // Build RT messages from builder state
+            function buildMsg(s) {
+                var msg = s.prefix + s.tag1_text;
+                if (s.tag2_type >= 0 && s.tag2_text) {
+                    msg += s.middle + s.tag2_text;
+                }
+                msg += s.suffix;
+                return msg;
+            }
+
+            var rtA = buildMsg(builderState.a);
+            var rtB = buildMsg(builderState.b);
+
+            // Update RT fields in UI
+            var manualBuffers = document.getElementById('rt_manual_buffers');
+            if (manualBuffers && manualBuffers.checked) {
+                document.getElementById('rt_a').value = rtA;
+                document.getElementById('rt_b').value = rtB;
+            } else {
+                document.getElementById('rt_text').value = rtA;
+            }
+
+            // Send builder state to backend
+            socket.emit('update', {
+                rt_plus_mode: 'builder',
+                rt_plus_builder_a: JSON.stringify(builderState.a),
+                rt_plus_builder_b: JSON.stringify(builderState.b)
+            });
+
+            // Hide legacy format fields since we're using builder mode
+            var formatSingle = document.getElementById('rt_format_single');
+            var formatDual = document.getElementById('rt_format_dual');
+            if (formatSingle) formatSingle.style.display = 'none';
+            if (formatDual) formatDual.style.display = 'none';
+
+            sync();
+            closeRTPlusModal();
+        }
+
+        function resetBuilder() {
+            builderState[currentBuilderBuffer] = {
+                prefix: '', tag1_type: 4, tag1_text: '',
+                middle: ' - ', tag2_type: 1, tag2_text: '', suffix: ''
+            };
+            loadBuilderBufferToUI();
+            updateBuilderPreview();
+        }
+
+        function updateRTPlusMode() {
+            var mode = document.querySelector('input[name="rtplus_mode"]:checked').value;
+            socket.emit('update', { rt_plus_mode: mode });
+
+            // Show/hide legacy format fields based on mode
+            var formatSingle = document.getElementById('rt_format_single');
+            var formatDual = document.getElementById('rt_format_dual');
+            if (formatSingle) formatSingle.style.display = (mode === 'builder') ? 'none' : 'block';
+            if (formatDual) formatDual.style.display = (mode === 'builder') ? 'none' : 'flex';
+        }
+
+        function showSplitPanel() {
+            document.getElementById('split_panel').classList.remove('hidden');
+            document.getElementById('btn_show_split').classList.add('hidden');
+        }
+
+        function hideSplitPanel() {
+            document.getElementById('split_panel').classList.add('hidden');
+            document.getElementById('btn_show_split').classList.remove('hidden');
+        }
+
+        function performSplit() {
+            var source = document.getElementById('split_source').value;
+            var delimiter = document.getElementById('split_delimiter').value;
+
+            if (!source || !delimiter) {
+                alert('Please enter source text and delimiter');
+                return;
+            }
+
+            var parts = source.split(delimiter);
+            if (parts.length >= 2) {
+                // First part goes to Tag 1, second to Tag 2
+                document.getElementById('builder_tag1_text').value = parts[0].trim();
+                document.getElementById('builder_tag2_text').value = parts[1].trim();
+                document.getElementById('builder_middle').value = delimiter;
+                document.getElementById('builder_prefix').value = '';
+                // If there's a third part, put it in suffix
+                if (parts.length > 2) {
+                    document.getElementById('builder_suffix').value = delimiter + parts.slice(2).join(delimiter);
+                } else {
+                    document.getElementById('builder_suffix').value = '';
+                }
+            } else {
+                // Only one part - put it all in Tag 1
+                document.getElementById('builder_tag1_text').value = source.trim();
+                document.getElementById('builder_tag2_text').value = '';
+                document.getElementById('builder_tag2_type').value = '-1';
+            }
+
+            hideSplitPanel();
+            updateBuilderPreview();
+        }
+
         function setTab(id, evt) {
             document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
@@ -1614,21 +3409,13 @@ UI_HTML = r"""
             if (typeof data.pilot_generated !== 'undefined') setText('pilot_status', data.pilot_generated ? 'Generated' : 'Disabled (Pass-through/Genlock)');
         });
 
+        // Legacy functions - kept for backward compatibility but now no-ops
         function updateRTVisibility() {
-            const manual = document.getElementById('rt_manual_buffers').checked;
-            document.getElementById('rt_single_mode').style.display = manual ? 'none' : 'block';
-            document.getElementById('rt_dual_mode').style.display = manual ? 'block' : 'none';
+            // Old RT visibility toggle removed - using new message list UI
         }
 
         function updateCycleControls() {
-            const cycleEl = document.getElementById('rt_cycle_ab');
-            const cycleAB = cycleEl ? cycleEl.checked : false;
-            const timeWrap = document.getElementById('time_seconds_wrap');
-            const cyclesWrap = document.getElementById('rt_cycles_wrap');
-            if (timeWrap && cyclesWrap) {
-                timeWrap.style.display = cycleAB ? 'none' : 'block';
-                cyclesWrap.style.display = cycleAB ? 'block' : 'none';
-            }
+            // Old cycle controls removed - using new message list UI
         }
 
         async function saveSettings() {
@@ -1655,6 +3442,25 @@ UI_HTML = r"""
             } catch (e) {
                 if (statusEl) statusEl.innerText = 'Save failed (network error).';
             }
+        }
+
+        function updatePTYList() {
+            var isRBDS = document.getElementById('rbds').checked;
+            var ptySelect = document.getElementById('pty');
+            var currentValue = ptySelect.value;
+
+            // Update option text based on RDS/RBDS
+            Array.from(ptySelect.options).forEach(function(option) {
+                var rdsText = option.getAttribute('data-rds');
+                var rbdsText = option.getAttribute('data-rbds');
+                option.textContent = isRBDS ? rbdsText : rdsText;
+            });
+
+            // Keep same value selected
+            ptySelect.value = currentValue;
+
+            // Sync the rbds checkbox state
+            sync();
         }
 
         function sync() {
@@ -1686,7 +3492,7 @@ UI_HTML = r"""
                 genlock_offset: getVal('genlock_offset'),
                 rds_level: getVal('rds_level'),
                 pilot_level: getVal('pilot_level'),
-                pi: getVal('pi'), pty: getVal('pty'), tp: getVal('tp'), ta: getVal('ta'), ms: getVal('ms'),
+                pi: getVal('pi'), pty: getVal('pty'), rbds: getVal('rbds'), tp: getVal('tp'), ta: getVal('ta'), ms: getVal('ms'),
                 di_stereo: getVal('di_stereo'), di_head: getVal('di_head'), di_comp: getVal('di_comp'), di_dyn: getVal('di_dyn'), en_af: getVal('en_af'), af_list: getVal('af_list'),
                 ps_dynamic: getVal('ps_dynamic'), ps_centered: getVal('ps_centered'),
                 rt_text: getVal('rt_text'), rt_manual_buffers: getVal('rt_manual_buffers'), rt_cycle_ab: getVal('rt_cycle_ab'),
@@ -1754,6 +3560,11 @@ UI_HTML = r"""
                // Update cycle controls visibility regularly
                updateCycleControls();
         }, 1000);
+
+        // Initialize RT Messages on page load
+        initRTMsgTagSelects();
+        renderRTMessages();
+        updatePTYList(); // Initialize PTY list based on RDS/RBDS setting
     </script>
 </body>
 </html>
