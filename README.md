@@ -71,9 +71,9 @@ python app.py
 
 - RT+ tagging is basic (simple artist/title extraction only). ✅
 
-- EON (Enhanced Other Networks) not implemented (planned).
+- EON (Enhanced Other Networks) not implemented (planned). [ in progress ] 
 
-- AF Method B not implemented (planned; only AF Method A available).
+- AF Method B not implemented (planned; only AF Method A available). ✅
 
 - DAB cross-reference is experimental and unverified on-air. ✅
 
