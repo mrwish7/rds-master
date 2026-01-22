@@ -161,7 +161,7 @@ default_state = {
     # Basic
     "pi": "2FFF", "pty": 0, "rbds": False, "tp": 1, "ta": 0, "ms": 1,
     "di_stereo": 1, "di_head": 0, "di_comp": 1, "di_dyn": 0,
-    "en_af": 1, "af_list": "87.6, 87.7", "af_method": "A",
+    "en_af": 1, "af_list": "87.6, 87.7", "af_method": "A", "af_pairs": "[]",
     
     # Text
     "ps_dynamic": "RDS PRO", "ps_centered": False,
@@ -692,6 +692,10 @@ class RDSScheduler:
         # New unified RT message system
         self.rt_msg_idx = 0
         self.rt_msg_cycle_count = 0  # Track completed cycles for current message
+
+        # AF Method B transmission cache
+        self.af_b_transmissions = []
+        self.last_af_pairs = ""
         self.rt_msg_cache = {}  # Cache resolved content per message id
         self.last_rt_messages_sig = ""  # Track changes to message list
 
@@ -1051,13 +1055,81 @@ class RDSScheduler:
             b3 = 0xE0E0
             
             if state["en_af"] and g_ver == 0:
-                 afs = [x.strip() for x in state["af_list"].split(',') if x.strip()]
-                 if afs:
-                     if self.af_ptr == 0: b3, self.af_ptr = (224+len(afs))<<8 | self.freq_code(afs[0]), 1
-                     else: 
+                 # Split by comma or space, accept both separators
+                 import re
+                 afs = [x.strip() for x in re.split(r'[,\s]+', state["af_list"]) if x.strip()]
+                 af_method = state.get("af_method", "A")
+
+                 if afs and af_method == "A":
+                     # Method A: List all frequencies with count code
+                     if self.af_ptr == 0:
+                         b3, self.af_ptr = (224+len(afs))<<8 | self.freq_code(afs[0]), 1
+                     else:
                          f1 = self.freq_code(afs[self.af_ptr])
                          f2 = self.freq_code(afs[self.af_ptr+1]) if self.af_ptr+1 < len(afs) else 205
                          b3, self.af_ptr = (f1<<8)|f2, (self.af_ptr+2) if self.af_ptr+2 < len(afs) else 0
+
+                 elif afs and af_method == "B":
+                     # Method B: Multiple frequency pairs transmitted sequentially
+                     # Parse af_pairs JSON structure
+                     try:
+                         import json
+                         af_pairs_json = state.get("af_pairs", "[]")
+                         af_pairs = json.loads(af_pairs_json) if af_pairs_json else []
+                     except:
+                         af_pairs = []
+
+                     # Fallback to af_list format if no pairs defined
+                     if not af_pairs and afs:
+                         af_pairs = [{
+                             'main': afs[0],
+                             'alts': ', '.join(afs[1:]) if len(afs) > 1 else ''
+                         }]
+
+                     if af_pairs:
+                        # Check if pairs changed - rebuild transmission list if so
+                        if af_pairs_json != self.last_af_pairs:
+                            self.last_af_pairs = af_pairs_json
+                            self.af_b_transmissions = []
+                            self.af_ptr = 0
+
+                            # Build transmission list - Method B with sequential list numbers
+                            # Each pair starts with count code 224 + list_number (1, 2, 3...)
+                            list_num = 1
+                            for pair in af_pairs:
+                                main_freq = pair.get('main', '').strip()
+                                alts_str = pair.get('alts', '')
+                                if not main_freq:
+                                    continue
+
+                                alt_freqs = [f.strip() for f in alts_str.split(',') if f.strip()]
+
+                                if alt_freqs:
+                                    # Sort alternate frequencies in ascending order (may help decoder interpretation)
+                                    try:
+                                        alt_freqs_sorted = sorted(alt_freqs, key=lambda x: float(x))
+                                    except:
+                                        alt_freqs_sorted = alt_freqs
+
+                                    # Count code: 224 + sequential list number (1, 2, 3, 4...)
+                                    self.af_b_transmissions.append(((224 + list_num) << 8) | self.freq_code(main_freq))
+                                    list_num += 1
+
+                                    # Then the frequency pairs in ascending order
+                                    for alt_freq in alt_freqs_sorted:
+                                        self.af_b_transmissions.append(
+                                            (self.freq_code(main_freq) << 8) | self.freq_code(alt_freq)
+                                        )
+
+                        # Cycle through transmissions
+                        if self.af_b_transmissions:
+                            b3 = self.af_b_transmissions[self.af_ptr % len(self.af_b_transmissions)]
+                            self.af_ptr = (self.af_ptr + 1) % len(self.af_b_transmissions)
+                        else:
+                            b3 = 0xE0E0
+                     else:
+                         b3 = 0xE0E0
+                         self.af_ptr = 0
             
             if g_ver == 1: b3 = int(state["pi"], 16)
             return RDSHelper.get_group_bits(0, g_ver, tail, b3, (ord(txt[seg*2])<<8)|ord(txt[seg*2+1]))
@@ -2048,7 +2120,40 @@ UI_HTML = r"""
                         </div>
                     </div>
                 </div>
-                
+
+                <!-- AF Pair Modal -->
+                <div id="af_pair_modal" class="rtplus-modal-overlay" style="display: none;">
+                    <div class="rtplus-modal-content" style="max-width: 500px;">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 id="af_pair_modal_title" class="text-lg font-bold">Add Frequency Pair</h3>
+                            <button onclick="closeAFPairModal()" class="text-2xl leading-none hover:text-[#d946ef]">×</button>
+                        </div>
+
+                        <input type="hidden" id="af_pair_edit_id" value="">
+
+                        <div class="space-y-4">
+                            <!-- Main Frequency -->
+                            <div>
+                                <label class="text-xs text-gray-400 mb-1 block">Main Frequency (MHz)</label>
+                                <input type="text" id="af_pair_main" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="99.5">
+                                <div class="text-[10px] text-gray-500 mt-1">The tuning frequency</div>
+                            </div>
+
+                            <!-- Alternative Frequencies -->
+                            <div>
+                                <label class="text-xs text-gray-400 mb-1 block">Alternative Frequencies (MHz)</label>
+                                <textarea id="af_pair_alts" rows="3" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="89.3, 101.7, 88.1"></textarea>
+                                <div class="text-[10px] text-gray-500 mt-1">Comma-separated list of frequencies carrying same/regional variants</div>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-end gap-2 mt-6">
+                            <button onclick="closeAFPairModal()" class="px-4 py-2 bg-[#444] hover:bg-[#555] rounded text-sm">Cancel</button>
+                            <button onclick="saveAFPair()" class="px-4 py-2 bg-[#7c3aed] hover:bg-[#6d28d9] rounded text-sm text-white font-bold">Save</button>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="section">
                     <div class="section-header">Flags & Switches</div>
                     <div class="section-body grid-cols-4">
@@ -2063,10 +2168,40 @@ UI_HTML = r"""
                 </div>
                 
                 <div class="section">
-                    <div class="section-header">Alternative Frequencies</div>
+                    <div class="section-header flex justify-between items-center">
+                        <span>Alternative Frequencies (AF)</span>
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <span class="text-xs">Enable</span>
+                            <input type="checkbox" class="toggle-checkbox" id="en_af" {% if state.en_af %}checked{% endif %} onchange="sync()">
+                        </label>
+                    </div>
                     <div class="section-body">
-                         <div class="flex justify-between"><label>Enable AF Method A</label><input type="checkbox" class="toggle-checkbox" id="en_af" {% if state.en_af %}checked{% endif %} onchange="sync()"></div>
-                         <textarea id="af_list" rows="2" placeholder="87.5, 98.1, 104.2" onchange="sync()">{{state.af_list}}</textarea>
+                         <div class="mb-3">
+                             <label class="text-xs text-gray-400 mb-1 block">AF Method</label>
+                             <select id="af_method" class="w-full" onchange="updateAFMethodUI(); sync();">
+                                 <option value="A" {% if state.af_method == "A" %}selected{% endif %}>Method A - Simple list</option>
+                                 <option value="B" {% if state.af_method == "B" %}selected{% endif %}>Method B - Frequency pairs</option>
+                             </select>
+                         </div>
+
+                         <!-- Method A: Simple list -->
+                         <div id="af_method_a_ui" style="display:none">
+                             <label class="text-xs text-gray-400 mb-1 block">Frequency List (MHz)</label>
+                             <textarea id="af_list" rows="2" placeholder="87.5, 98.1, 104.2" onchange="sync()">{{state.af_list}}</textarea>
+                             <div class="text-[10px] text-gray-500 mt-1">Comma-separated list of all frequencies</div>
+                         </div>
+
+                         <!-- Method B: Frequency pairs -->
+                         <div id="af_method_b_ui" style="display:none">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-xs text-gray-400">Frequency Pairs</span>
+                                 <button onclick="addAFPair()" class="px-2 py-1 bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-xs rounded">+ Add Pair</button>
+                             </div>
+                             <div id="af_pairs_list" class="space-y-2"></div>
+                             <div id="af_pairs_empty" class="text-center py-4 text-gray-600 text-sm" style="display:none">
+                                 No frequency pairs configured. Click "+ Add Pair" to create one.
+                             </div>
+                         </div>
                     </div>
                 </div>
             </div>
@@ -3493,7 +3628,8 @@ UI_HTML = r"""
                 rds_level: getVal('rds_level'),
                 pilot_level: getVal('pilot_level'),
                 pi: getVal('pi'), pty: getVal('pty'), rbds: getVal('rbds'), tp: getVal('tp'), ta: getVal('ta'), ms: getVal('ms'),
-                di_stereo: getVal('di_stereo'), di_head: getVal('di_head'), di_comp: getVal('di_comp'), di_dyn: getVal('di_dyn'), en_af: getVal('en_af'), af_list: getVal('af_list'),
+                di_stereo: getVal('di_stereo'), di_head: getVal('di_head'), di_comp: getVal('di_comp'), di_dyn: getVal('di_dyn'),
+                en_af: getVal('en_af'), af_list: getVal('af_list'), af_method: getVal('af_method'),
                 ps_dynamic: getVal('ps_dynamic'), ps_centered: getVal('ps_centered'),
                 rt_text: getVal('rt_text'), rt_manual_buffers: getVal('rt_manual_buffers'), rt_cycle_ab: getVal('rt_cycle_ab'),
                 rt_a: getVal('rt_a'), rt_b: getVal('rt_b'), rt_mode: getVal('rt_mode'),
@@ -3565,6 +3701,194 @@ UI_HTML = r"""
         initRTMsgTagSelects();
         renderRTMessages();
         updatePTYList(); // Initialize PTY list based on RDS/RBDS setting
+        updateAFMethodUI(); // Initialize AF UI based on method
+
+        // === AF PAIR FUNCTIONS ===
+        var afPairs = [];
+        var pendingNewAFPair = null;
+
+        function updateAFMethodUI() {
+            var method = document.getElementById('af_method').value;
+            var methodAUI = document.getElementById('af_method_a_ui');
+            var methodBUI = document.getElementById('af_method_b_ui');
+
+            if (method === 'A') {
+                methodAUI.style.display = 'block';
+                methodBUI.style.display = 'none';
+            } else {
+                methodAUI.style.display = 'none';
+                methodBUI.style.display = 'block';
+                parseAFPairs(); // Load pairs from af_list
+            }
+        }
+
+        function parseAFPairs() {
+            // Load AF pairs from state
+            try {
+                var pairsJson = '{{ state.af_pairs|safe }}';
+                afPairs = JSON.parse(pairsJson) || [];
+            } catch(e) {
+                // Fallback: parse af_list into a single pair for backward compatibility
+                var afList = document.getElementById('af_list').value;
+                if (afList) {
+                    var freqs = afList.split(',').map(function(f) { return f.trim(); }).filter(function(f) { return f; });
+                    if (freqs.length > 0) {
+                        afPairs = [{
+                            id: 'pair_1',
+                            main: freqs[0],
+                            alts: freqs.slice(1).join(', ')
+                        }];
+                    }
+                }
+            }
+            renderAFPairs();
+        }
+
+        function renderAFPairs() {
+            var container = document.getElementById('af_pairs_list');
+            var emptyState = document.getElementById('af_pairs_empty');
+
+            if (!afPairs || afPairs.length === 0) {
+                container.innerHTML = '';
+                emptyState.style.display = 'block';
+                return;
+            }
+
+            emptyState.style.display = 'none';
+            container.innerHTML = '';
+
+            afPairs.forEach(function(pair, index) {
+                var card = document.createElement('div');
+                card.className = 'rt-msg-card';
+                card.setAttribute('data-id', pair.id);
+
+                var header = document.createElement('div');
+                header.className = 'rt-msg-header';
+                header.style.cssText = 'display: flex; align-items: center;';
+
+                var editArea = document.createElement('div');
+                editArea.style.cssText = 'cursor:pointer; flex: 1; display: flex; align-items: center;';
+                editArea.onclick = function() { editAFPair(pair.id); };
+
+                var pairLabel = document.createElement('span');
+                pairLabel.className = 'text-sm font-bold text-[#7c3aed]';
+                pairLabel.textContent = 'Pair ' + (index + 1) + ': ' + pair.main + ' MHz';
+
+                var arrow = document.createElement('span');
+                arrow.className = 'text-xs text-gray-500 mx-2';
+                arrow.textContent = '→';
+
+                var altsLabel = document.createElement('span');
+                altsLabel.className = 'text-xs text-gray-400';
+                altsLabel.textContent = pair.alts || '(no alternates)';
+
+                editArea.appendChild(pairLabel);
+                editArea.appendChild(arrow);
+                editArea.appendChild(altsLabel);
+
+                var deleteBtn = document.createElement('button');
+                deleteBtn.className = 'text-sm hover:text-red-400 ml-2';
+                deleteBtn.style.cssText = 'flex-shrink: 0;';
+                deleteBtn.textContent = '×';
+                deleteBtn.onclick = function(e) {
+                    e.stopPropagation();
+                    deleteAFPair(pair.id);
+                };
+
+                header.appendChild(editArea);
+                header.appendChild(deleteBtn);
+                card.appendChild(header);
+                container.appendChild(card);
+            });
+        }
+
+        function addAFPair() {
+            pendingNewAFPair = {
+                id: 'pair_' + Date.now(),
+                main: '',
+                alts: ''
+            };
+            openAFPairModal(pendingNewAFPair, true);
+        }
+
+        function editAFPair(id) {
+            var pair = afPairs.find(function(p) { return p.id === id; });
+            if (!pair) return;
+            pendingNewAFPair = null;
+            openAFPairModal(pair, false);
+        }
+
+        function openAFPairModal(pair, isNew) {
+            document.getElementById('af_pair_edit_id').value = pair.id;
+            document.getElementById('af_pair_modal_title').textContent = isNew ? 'Add Frequency Pair' : 'Edit Frequency Pair';
+            document.getElementById('af_pair_main').value = pair.main || '';
+            document.getElementById('af_pair_alts').value = pair.alts || '';
+            document.getElementById('af_pair_modal').style.display = 'flex';
+        }
+
+        function closeAFPairModal() {
+            pendingNewAFPair = null;
+            document.getElementById('af_pair_modal').style.display = 'none';
+        }
+
+        function saveAFPair() {
+            var id = document.getElementById('af_pair_edit_id').value;
+            var pair = afPairs.find(function(p) { return p.id === id; });
+
+            if (!pair && pendingNewAFPair && pendingNewAFPair.id === id) {
+                pair = pendingNewAFPair;
+                afPairs.push(pair);
+                pendingNewAFPair = null;
+            }
+
+            if (!pair) return;
+
+            pair.main = document.getElementById('af_pair_main').value.trim();
+            pair.alts = document.getElementById('af_pair_alts').value.trim();
+
+            closeAFPairModal();
+            renderAFPairs();
+            syncAFPairs();
+        }
+
+        function deleteAFPair(id) {
+            afPairs = afPairs.filter(function(p) { return p.id !== id; });
+            renderAFPairs();
+            syncAFPairs();
+        }
+
+        function syncAFPairs() {
+            // Store pairs as JSON in af_pairs field
+            socket.emit('update', { af_pairs: JSON.stringify(afPairs) });
+
+            // Build af_list for display - show all unique main frequencies
+            if (afPairs.length === 0) {
+                document.getElementById('af_list').value = '';
+            } else {
+                // Collect all unique frequencies from all pairs
+                var allFreqs = [];
+                var seen = {};
+
+                afPairs.forEach(function(pair) {
+                    if (pair.main && !seen[pair.main]) {
+                        allFreqs.push(pair.main);
+                        seen[pair.main] = true;
+                    }
+                    if (pair.alts) {
+                        var altFreqs = pair.alts.split(',').map(function(f) { return f.trim(); }).filter(function(f) { return f; });
+                        altFreqs.forEach(function(alt) {
+                            if (!seen[alt]) {
+                                allFreqs.push(alt);
+                                seen[alt] = true;
+                            }
+                        });
+                    }
+                });
+
+                document.getElementById('af_list').value = allFreqs.join(', ');
+            }
+        }
+
     </script>
 </body>
 </html>
