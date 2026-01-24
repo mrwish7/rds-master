@@ -1011,14 +1011,14 @@ class RDSScheduler:
         return out if out else [(0,0)]
 
     def generate_auto_schedule(self):
-        # 65% 0A, 35% 2A (increased 0A by 5% for better PS reception)
-        seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0)]
-        if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +10% increase
-        # EN 50067 recommends up to 8 consecutive 14A/14B groups, reduced to 6 for better PS scheduling
+        # 57% 0A, 43% 2A (rebalanced for better RT coverage)
+        seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (2,0), (2,0), (2,0), (0,0), (0,0), (2,0)]
+        if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +7% increase
+        # EON at 15% - 4 consecutive groups for PS assembly
         if state.get("en_eon"):
-            for _ in range(6):  # Send 6 Group 14A (reduced from 8 by ~25% for 5% overall reduction)
+            for _ in range(4):  # Send 4 Group 14A (~15% overall)
                 seq.append((14,0))
-        if state["en_ptyn"]: seq.append((10,0)); seq.append((10,0))  # +5% increase (was +5%, now +10%)
+        if state["en_ptyn"]: seq.append((10,0))  # +4% (single group)
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
         if state.get("en_dab") and (self.schedule_gen_counter % 2 == 0): seq.append((3,0))
@@ -1468,47 +1468,37 @@ class RDSScheduler:
                     self.eon_variant = 4  # Next variant: AF
                     self.eon_af_idx = -1
 
-            # Variant 4: AF(ON) - Method A: Tuning freq (TN) + mapped frequencies (ON)
+            # Variant 4: AF(ON) - Method A: Send ON frequencies without TN
             elif self.eon_variant == 4:
-                # Get main station's tuning frequency from af_list
-                import re
-                main_afs = [x.strip() for x in re.split(r'[,\s]+', state.get("af_list", "")) if x.strip()]
-                tuning_freq_str = main_afs[0] if main_afs else "87.6"
-                tuning_freq = self.freq_code(tuning_freq_str)
-
                 # Get other network's frequencies (ALL frequencies in af_list are ON freqs)
                 af_list = service.get('af_list', '')
-                all_afs = [f.strip() for f in af_list.split(',') if f.strip()]
+                afs = [f.strip() for f in af_list.split(',') if f.strip()]
 
-                # Filter out any frequencies that match the tuning frequency to avoid self-pairing
-                afs = [f for f in all_afs if self.freq_code(f) != tuning_freq]
+                b2_tail = (tp_on << 4) | 0x04  # Variant 4
 
                 if not afs:
-                    # No AFs (or only duplicate of tuning freq) - send filler and skip
-                    b2_tail = (tp_on << 4) | 0x04  # Variant 4
-                    b3_val = 0xE0E0
+                    # No AFs - send filler and skip
+                    b3_val = (205 << 8) | 205  # Filler codes (not count codes)
                     self.eon_variant = 13  # Next variant: PTY+TA
                 else:
                     if self.eon_af_idx == -1:
-                        # First transmission: count code + tuning frequency (TN)
-                        b2_tail = (tp_on << 4) | 0x04  # Variant 4
-                        b3_val = ((224 + len(afs)) << 8) | tuning_freq
-                        self.eon_af_idx = 0  # Start at 0 - all afs are ON frequencies
+                        # First transmission: count code + first frequency (Method A format)
+                        b3_val = ((224 + len(afs)) << 8) | self.freq_code(afs[0])
+                        self.eon_af_idx = 1  # Start at 1 for next transmission
                     else:
-                        # Subsequent transmissions: tuning freq (TN) + mapped freq (ON)
+                        # Subsequent transmissions: send two frequencies at a time (Method A)
                         if self.eon_af_idx < len(afs):
-                            b2_tail = (tp_on << 4) | 0x04  # Variant 4
-                            mapped_freq = self.freq_code(afs[self.eon_af_idx])
-                            b3_val = (tuning_freq << 8) | mapped_freq
-                            self.eon_af_idx += 1
+                            f1 = self.freq_code(afs[self.eon_af_idx])
+                            f2 = self.freq_code(afs[self.eon_af_idx + 1]) if self.eon_af_idx + 1 < len(afs) else 205
+                            b3_val = (f1 << 8) | f2
+                            self.eon_af_idx += 2
 
                             # Check if we've sent all AFs
                             if self.eon_af_idx >= len(afs):
                                 self.eon_variant = 13  # Next variant: PTY+TA
                         else:
                             # Shouldn't happen, but safety check
-                            b2_tail = (tp_on << 4) | 0x04
-                            b3_val = 0xE0E0
+                            b3_val = (205 << 8) | 205
                             self.eon_variant = 13
 
             # Variant 13: PTY(ON) + TA
