@@ -19,9 +19,11 @@ A work-in-progress open-source webUI based RDS encoder. Ships with a lightweight
 
 - Dynamic PS/RT editing with simple timed sequencing and centering options.
 
-- RT+ formatting for basic `{artist} - {title}` style extraction.
+- RT+ formatting with visual builder and support for up to 2 tags per RT message.
 
-- Long PS, PTYN, CT, and AF Method A controls; DAB cross-reference (12A) (experimental!).
+- Long PS (32 chars), PTYN, CT, AF Method A & B controls; DAB cross-reference (12A) (experimental).
+
+- Enhanced Other Networks (EON) Group 14A support with PS/AF/PTY transmission (experimental).
 
 - Live monitor panel that reflects PS/RT/PI/PTY and pilot status via WebSocket.
 
@@ -69,17 +71,21 @@ python app.py
 
 - Not production-ready; use only for lab/bench testing until a formal release.
 
-- RT+ tagging is basic (simple artist/title extraction only). ✅
+- RT+ tagging with visual builder supporting 2 tags per message. ✅
 
-- EON (Enhanced Other Networks) not implemented (planned). [ in progress ] 
+- EON (Enhanced Other Networks) Group 14A implemented but **experimental** - use with caution and verify on-air behavior. ⚠️
 
-- AF Method B not implemented (planned; only AF Method A available). ✅
+- AF Method B support. ✅
 
-- DAB cross-reference is experimental and unverified on-air. ✅
+- DAB cross-reference (Group 12A) is experimental, verified on-air. ✅
 
-- No packaged EXE release yet; restart-on-crash not managed.
+- Extended ASCII character support (ISO-8859-1/Latin-1 encoding). ✅
 
-- Support for RBDS ✅
+- Datasets Mode (Group 5A) for transparent data channel. ✅
+
+- No packaged EXE release yet
+
+- Support for RBDS variant. ✅
 
 - Support for UECP Input / output (planned)
 
