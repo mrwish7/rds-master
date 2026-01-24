@@ -9,8 +9,9 @@ import signal
 import random
 import configparser
 import urllib.request
+import json
 from datetime import datetime, timezone, date
-from flask import Flask, render_template_string, request, redirect, url_for, session
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
 from flask_socketio import SocketIO
 from scipy import signal as dsp_signal
 from scipy.fft import fft
@@ -162,6 +163,7 @@ default_state = {
     "pi": "2FFF", "pty": 0, "rbds": False, "tp": 1, "ta": 0, "ms": 1,
     "di_stereo": 1, "di_head": 0, "di_comp": 1, "di_dyn": 0,
     "en_af": 1, "af_list": "87.6, 87.7", "af_method": "A", "af_pairs": "[]",
+    "en_eon": 0, "eon_services": "[]",
     
     # Text
     "ps_dynamic": "RDS PRO", "ps_centered": False,
@@ -486,6 +488,45 @@ def save_config():
     config['AUTH'] = {'user': auth_config.get('user','admin'), 'pass': auth_config.get('pass','admin')}
     with open(CONFIG_FILE, 'w') as f: config.write(f)
 
+# --- DATASETS ---
+DATASETS_FILE = os.path.join(os.path.dirname(__file__), 'datasets.json')
+datasets = {}
+current_dataset = 1
+
+def load_datasets():
+    global datasets, current_dataset
+    try:
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+                datasets = data.get('datasets', {})
+                current_dataset = data.get('current', 1)
+        else:
+            datasets = {'1': {'name': 'Dataset 1', 'state': dict(state)}}
+            current_dataset = 1
+    except:
+        datasets = {'1': {'name': 'Dataset 1', 'state': dict(state)}}
+        current_dataset = 1
+
+def save_datasets():
+    try:
+        with open(DATASETS_FILE, 'w') as f:
+            json.dump({'datasets': datasets, 'current': current_dataset}, f, indent=2)
+    except Exception as e:
+        print(f"Error saving datasets: {e}")
+
+def switch_dataset(dataset_num):
+    global state, current_dataset
+    dataset_num = str(dataset_num)
+    if dataset_num in datasets:
+        datasets[str(current_dataset)]['state'] = dict(state)
+        save_datasets()
+        state.update(datasets[dataset_num]['state'])
+        current_dataset = int(dataset_num)
+        save_config()
+        return True
+    return False
+
 def sig_abort(sig, frame):
     state["running"] = False
     save_config()
@@ -495,41 +536,24 @@ signal.signal(signal.SIGINT, sig_abort)
 # --- WORKERS ---
 
 # EBU Latin character mapping for encoding conversion
-EBU_LATIN_MAP = {
-    'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e', 'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'å': 'a',
-    'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
-    'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u', 'ç': 'c', 'ñ': 'n', 'ß': 'ss', '€': 'E',
-    'æ': 'ae', 'œ': 'oe', '°': ' ', '™': ' ', '®': ' ', '©': 'c'
-}
-
+# RDS uses ISO-8859-1 (Latin-1) encoding for extended characters
 def convert_to_ebu_latin(text):
-    """Convert UTF-8 text to RDS/EBU Latin compatible characters."""
-    if not text: return ""
-    return ''.join(EBU_LATIN_MAP.get(c, c) if ord(c) > 127 else c for c in text)
-
-# EBU Latin character mapping for encoding conversion
-EBU_LATIN_MAP = {
-    # Common Windows-1252 / UTF-8 to EBU Latin conversions
-    'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
-    'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a', 'å': 'a',
-    'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i',
-    'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
-    'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u',
-    'ç': 'c', 'ñ': 'n',
-    'ß': 'ss', '€': 'E',
-    'æ': 'ae', 'œ': 'oe',
-    '°': ' ', '™': ' ', '®': ' ',  # Replace symbols with space
-}
-
-def convert_to_ebu_latin(text):
-    """Convert UTF-8 or Windows-1252 text to RDS/EBU Latin compatible characters."""
-    result = []
-    for char in text:
-        if ord(char) > 127:  # Non-ASCII
-            result.append(EBU_LATIN_MAP.get(char, '?'))
-        else:
-            result.append(char)
-    return ''.join(result)
+    """Convert UTF-8 text to RDS/EBU Latin (ISO-8859-1) encoding."""
+    if not text:
+        return ""
+    try:
+        # Encode to Latin-1, which is what RDS uses
+        return text.encode('latin-1', errors='replace').decode('latin-1')
+    except:
+        # Fallback: replace non-Latin-1 characters with ?
+        result = []
+        for char in text:
+            try:
+                char.encode('latin-1')
+                result.append(char)
+            except:
+                result.append('?')
+        return ''.join(result)
 
 def parse_text_source(text):
     if not text: return ""
@@ -987,9 +1011,13 @@ class RDSScheduler:
         return out if out else [(0,0)]
 
     def generate_auto_schedule(self):
-        # 60% 0A, 40% 2A (reduced 0A by 10%, gave 5% to PTYN and 5% to LPS)
-        seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0)]
+        # 65% 0A, 35% 2A (increased 0A by 5% for better PS reception)
+        seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0)]
         if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +10% increase
+        # EN 50067 recommends up to 8 consecutive 14A/14B groups, reduced to 6 for better PS scheduling
+        if state.get("en_eon"):
+            for _ in range(6):  # Send 6 Group 14A (reduced from 8 by ~25% for 5% overall reduction)
+                seq.append((14,0))
         if state["en_ptyn"]: seq.append((10,0)); seq.append((10,0))  # +5% increase (was +5%, now +10%)
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
@@ -1070,10 +1098,9 @@ class RDSScheduler:
                          b3, self.af_ptr = (f1<<8)|f2, (self.af_ptr+2) if self.af_ptr+2 < len(afs) else 0
 
                  elif afs and af_method == "B":
-                     # Method B: Multiple frequency pairs transmitted sequentially
-                     # Parse af_pairs JSON structure
+                     # Method B: Frequency pairs with tuning frequency indicator
+                     # Parse af_pairs JSON structure (json already imported at module level)
                      try:
-                         import json
                          af_pairs_json = state.get("af_pairs", "[]")
                          af_pairs = json.loads(af_pairs_json) if af_pairs_json else []
                      except:
@@ -1083,7 +1110,8 @@ class RDSScheduler:
                      if not af_pairs and afs:
                          af_pairs = [{
                              'main': afs[0],
-                             'alts': ', '.join(afs[1:]) if len(afs) > 1 else ''
+                             'alts': ', '.join(afs[1:]) if len(afs) > 1 else '',
+                             'regional': False
                          }]
 
                      if af_pairs:
@@ -1093,33 +1121,45 @@ class RDSScheduler:
                             self.af_b_transmissions = []
                             self.af_ptr = 0
 
-                            # Build transmission list - Method B with sequential list numbers
-                            # Each pair starts with count code 224 + list_number (1, 2, 3...)
-                            list_num = 1
+                            # Build transmission list - Method B
+                            # Count ALL frequencies across all pairs (including main freq repetitions)
+                            # Group pairs by main frequency
+                            freq_groups = {}
                             for pair in af_pairs:
                                 main_freq = pair.get('main', '').strip()
                                 alts_str = pair.get('alts', '')
+                                is_regional = pair.get('regional', False)
                                 if not main_freq:
                                     continue
 
                                 alt_freqs = [f.strip() for f in alts_str.split(',') if f.strip()]
+                                if not alt_freqs:
+                                    continue
 
-                                if alt_freqs:
-                                    # Sort alternate frequencies in ascending order (may help decoder interpretation)
-                                    try:
-                                        alt_freqs_sorted = sorted(alt_freqs, key=lambda x: float(x))
-                                    except:
-                                        alt_freqs_sorted = alt_freqs
+                                if main_freq not in freq_groups:
+                                    freq_groups[main_freq] = {'alts': [], 'regional': is_regional}
 
-                                    # Count code: 224 + sequential list number (1, 2, 3, 4...)
-                                    self.af_b_transmissions.append(((224 + list_num) << 8) | self.freq_code(main_freq))
-                                    list_num += 1
+                                freq_groups[main_freq]['alts'].extend(alt_freqs)
+                                if is_regional:
+                                    freq_groups[main_freq]['regional'] = True
 
-                                    # Then the frequency pairs in ascending order
-                                    for alt_freq in alt_freqs_sorted:
-                                        self.af_b_transmissions.append(
-                                            (self.freq_code(main_freq) << 8) | self.freq_code(alt_freq)
-                                        )
+                            # Transmit each frequency group
+                            for main_freq, group_data in freq_groups.items():
+                                alt_list = group_data['alts']
+                                is_regional = group_data['regional']
+
+                                # Count code: 224 + total number of frequency codes transmitted
+                                # = 1 (linking freq in count code) + len(alt_list) * 2 (pairs of tuning+alt)
+                                total_freqs = 1 + (len(alt_list) * 2)
+                                # Use code 250 (filler) for regional variant, otherwise main freq
+                                tuning_indicator = 250 if is_regional else self.freq_code(main_freq)
+                                self.af_b_transmissions.append(((224 + total_freqs) << 8) | tuning_indicator)
+
+                                # Then transmit all main/alt pairs
+                                for alt_freq in alt_list:
+                                    self.af_b_transmissions.append(
+                                        (self.freq_code(main_freq) << 8) | self.freq_code(alt_freq)
+                                    )
 
                         # Cycle through transmissions
                         if self.af_b_transmissions:
@@ -1284,11 +1324,23 @@ class RDSScheduler:
                         self.rt_ab_cycles = 0
                 self.rt_ptr = 0
             pad = clean.ljust(64)
+
+            # Encode to Latin-1 bytes for proper RDS character encoding (fixes extended chars like ë, ö, etc.)
+            try:
+                pad_bytes = pad.encode('latin-1', errors='replace')
+            except:
+                pad_bytes = pad.encode('ascii', errors='replace')
+
+            # Ensure it's 64 bytes long
+            if len(pad_bytes) < 64:
+                pad_bytes = pad_bytes + b' ' * (64 - len(pad_bytes))
+
             a = self.rt_ptr % 16
             self.rt_ptr += 1
             # Group 2B Fix: Block 3 is PI, Block 4 is 2 chars of RT
-            b3_val = (ord(pad[a*4])<<8)|ord(pad[a*4+1]) if v==0 else int(state["pi"], 16)
-            b4_val = (ord(pad[a*4+2])<<8)|ord(pad[a*4+3]) if v==0 else (ord(pad[a*2])<<8)|ord(pad[a*2+1])
+            # Use byte values directly instead of ord() to properly handle extended characters
+            b3_val = (pad_bytes[a*4]<<8)|pad_bytes[a*4+1] if v==0 else int(state["pi"], 16)
+            b4_val = (pad_bytes[a*4+2]<<8)|pad_bytes[a*4+3] if v==0 else (pad_bytes[a*2]<<8)|pad_bytes[a*2+1]
             return RDSHelper.get_group_bits(2, v, (buf<<4)|a, b3_val, b4_val)
 
         elif g_type == 3:
@@ -1354,11 +1406,142 @@ class RDSScheduler:
              
              return RDSHelper.get_group_bits(11, 0, b2_tail, b3_val, b4_val)
 
+        elif g_type == 14 and state.get("en_eon"):
+            # Group 14A: Enhanced Other Networks (EON) - EN 50067 section 3.2.1.8
+            eon_services = []
+            eon_services_str = state.get("eon_services", "[]")
+
+            try:
+                if isinstance(eon_services_str, str):
+                    eon_services = json.loads(eon_services_str)
+                elif isinstance(eon_services_str, list):
+                    eon_services = eon_services_str
+                else:
+                    eon_services = []
+            except Exception as e:
+                eon_services = []
+
+            if not eon_services:
+                # No services configured - send empty 14A group with filler codes
+                return RDSHelper.get_group_bits(14,0,0,0xE0E0,0xE0E0)
+
+            # Initialize EON state tracking
+            if not hasattr(self, 'eon_service_idx'):
+                self.eon_service_idx = 0
+                self.eon_variant = 0  # 0=PS, 4=AF, 13=PTY+TA
+                self.eon_ps_seg = 0   # PS segment (0-3)
+                self.eon_af_idx = -1  # AF index (-1=count code, 0+=mapped freqs)
+
+            service = eon_services[self.eon_service_idx % len(eon_services)]
+
+            # Get PI(ON) for block 4
+            try:
+                pi_on = int(service.get('pi_on', 'C000'), 16) & 0xFFFF
+            except:
+                pi_on = 0xC000
+
+            # Get TP(ON) for block 2
+            tp_on = service.get('tp', 0) & 1
+
+            # Variant 0: PS(ON) - 2 characters per transmission, 4 segments total
+            if self.eon_variant == 0:
+                ps_text = service.get('ps', 'OTHER   ')[:8].ljust(8)
+
+                # Encode directly to bytes - don't use convert_to_ebu_latin as it returns string
+                try:
+                    ps_bytes = ps_text.encode('latin-1', errors='replace')[:8]
+                    if len(ps_bytes) < 8:
+                        ps_bytes = ps_bytes.ljust(8, b' ')
+                except:
+                    ps_bytes = b'OTHER   '
+
+                # Block 2 tail for variant 0: TP(ON) in bit 4, variant bits 000SS where SS=segment
+                b2_tail = (tp_on << 4) | (self.eon_ps_seg & 0x03)
+
+                # Send 2 characters for current segment
+                b3_val = (ps_bytes[self.eon_ps_seg*2] << 8) | ps_bytes[self.eon_ps_seg*2 + 1]
+
+                # Advance to next PS segment
+                self.eon_ps_seg += 1
+                if self.eon_ps_seg >= 4:
+                    self.eon_ps_seg = 0
+                    self.eon_variant = 4  # Next variant: AF
+                    self.eon_af_idx = -1
+
+            # Variant 4: AF(ON) - Method A: Tuning freq (TN) + mapped frequencies (ON)
+            elif self.eon_variant == 4:
+                # Get main station's tuning frequency from af_list
+                import re
+                main_afs = [x.strip() for x in re.split(r'[,\s]+', state.get("af_list", "")) if x.strip()]
+                tuning_freq_str = main_afs[0] if main_afs else "87.6"
+                tuning_freq = self.freq_code(tuning_freq_str)
+
+                # Get other network's frequencies (ALL frequencies in af_list are ON freqs)
+                af_list = service.get('af_list', '')
+                all_afs = [f.strip() for f in af_list.split(',') if f.strip()]
+
+                # Filter out any frequencies that match the tuning frequency to avoid self-pairing
+                afs = [f for f in all_afs if self.freq_code(f) != tuning_freq]
+
+                if not afs:
+                    # No AFs (or only duplicate of tuning freq) - send filler and skip
+                    b2_tail = (tp_on << 4) | 0x04  # Variant 4
+                    b3_val = 0xE0E0
+                    self.eon_variant = 13  # Next variant: PTY+TA
+                else:
+                    if self.eon_af_idx == -1:
+                        # First transmission: count code + tuning frequency (TN)
+                        b2_tail = (tp_on << 4) | 0x04  # Variant 4
+                        b3_val = ((224 + len(afs)) << 8) | tuning_freq
+                        self.eon_af_idx = 0  # Start at 0 - all afs are ON frequencies
+                    else:
+                        # Subsequent transmissions: tuning freq (TN) + mapped freq (ON)
+                        if self.eon_af_idx < len(afs):
+                            b2_tail = (tp_on << 4) | 0x04  # Variant 4
+                            mapped_freq = self.freq_code(afs[self.eon_af_idx])
+                            b3_val = (tuning_freq << 8) | mapped_freq
+                            self.eon_af_idx += 1
+
+                            # Check if we've sent all AFs
+                            if self.eon_af_idx >= len(afs):
+                                self.eon_variant = 13  # Next variant: PTY+TA
+                        else:
+                            # Shouldn't happen, but safety check
+                            b2_tail = (tp_on << 4) | 0x04
+                            b3_val = 0xE0E0
+                            self.eon_variant = 13
+
+            # Variant 13: PTY(ON) + TA
+            elif self.eon_variant == 13:
+                b2_tail = (tp_on << 4) | 0x0D  # Variant 13
+                pty_on = service.get('pty', 0) & 0x1F
+                ta_on = service.get('ta', 0) & 1
+                b3_val = (pty_on << 11) | (ta_on << 10)
+
+                # After PTY+TA, move to next service or back to PS
+                self.eon_service_idx += 1
+                if self.eon_service_idx >= len(eon_services):
+                    self.eon_service_idx = 0
+                self.eon_variant = 0  # Start with PS for next service
+                self.eon_ps_seg = 0
+                self.eon_af_idx = -1
+
+            else:
+                # Invalid variant - reset
+                b2_tail = (tp_on << 4)
+                b3_val = 0xE0E0
+                self.eon_variant = 0
+                self.eon_ps_seg = 0
+
+            return RDSHelper.get_group_bits(14, 0, b2_tail, b3_val, pi_on)
+
         elif g_type == 15 and state["en_lps"]:
             raw = self.get_text("ps_long_32")
+            lps_centered = state['lps_centered']
             if raw != self.last_lps_content: self.last_lps_content, self.lps_ptr = raw, 0
-            if not self.lps_sequence or raw != self.lps_sequence[0][1].strip(): 
-                self.lps_sequence = self.parse_smart(raw, 32, state['lps_centered'])
+            if not self.lps_sequence or raw != self.lps_sequence[0][1].strip() or not hasattr(self, 'last_lps_centered') or self.last_lps_centered != lps_centered:
+                self.lps_sequence = self.parse_smart(raw, 32, lps_centered)
+                self.last_lps_centered = lps_centered
             dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
             
             monitor_data["lps"] = txt + ('\r' if state['lps_cr'] else '')
@@ -1673,11 +1856,43 @@ def handle_control(data):
         state["running"] = True
         save_config()
         threading.Thread(target=run_audio, daemon=True).start()
-    else: 
+    else:
         state["running"] = False
         save_config()
 
+# Dataset API Routes
+@app.route('/datasets', methods=['GET'])
+def get_datasets():
+    if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
+    return jsonify({'datasets': datasets, 'current': current_dataset})
+
+@app.route('/datasets/<int:num>', methods=['PUT'])
+def update_dataset(num):
+    if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
+    data = request.json
+    datasets[str(num)] = {'name': data.get('name', f'Dataset {num}'), 'state': data.get('state', dict(state))}
+    save_datasets()
+    return jsonify({'success': True})
+
+@app.route('/datasets/<int:num>/switch', methods=['POST'])
+def switch_to_dataset(num):
+    if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
+    if switch_dataset(num):
+        socketio.emit('dataset_changed', {'current': current_dataset})
+        return jsonify({'success': True, 'current': current_dataset})
+    return jsonify({'error': 'Dataset not found'}), 404
+
+@app.route('/datasets/<int:num>', methods=['DELETE'])
+def delete_dataset(num):
+    if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
+    if str(num) in datasets and len(datasets) > 1:
+        del datasets[str(num)]
+        save_datasets()
+        return jsonify({'success': True})
+    return jsonify({'error': 'Cannot delete last dataset'}), 400
+
 load_config()
+load_datasets()
 
 def auto_start_if_enabled():
     if state.get("auto_start") and not state.get("running"):
@@ -1784,6 +1999,7 @@ UI_HTML = r"""
         /* RT+ Builder Modal */
         .rtplus-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 100; display: flex; align-items: center; justify-content: center; padding: 20px; }
         .rtplus-modal { background: #1a1a1a; border: 1px solid #444; border-radius: 8px; max-width: 700px; width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+        .rtplus-modal-content { background: #1a1a1a; border: 1px solid #444; border-radius: 8px; width: 100%; max-height: 90vh; overflow-y: auto; padding: 20px; }
         .rtplus-modal-header { background: #2d1b4e; border-bottom: 2px solid #d946ef; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
         .rtplus-modal-body { padding: 16px; overflow-y: auto; flex: 1; }
         .rtplus-modal-footer { background: #252525; border-top: 1px solid #333; padding: 12px 16px; display: flex; justify-content: space-between; }
@@ -1830,6 +2046,7 @@ UI_HTML = r"""
                 <div class="tab-btn" onclick="setTab('basic')">Basic RDS</div>
                 <div class="tab-btn" onclick="setTab('expert')">Expert</div>
                 <div class="tab-btn" onclick="setTab('audio')">Audio & MPX</div>
+                <div class="tab-btn" onclick="setTab('datasets')">Datasets</div>
                 <div class="tab-btn" onclick="setTab('settings')">Settings</div>
             </div>
 
@@ -2145,6 +2362,15 @@ UI_HTML = r"""
                                 <textarea id="af_pair_alts" rows="3" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="89.3, 101.7, 88.1"></textarea>
                                 <div class="text-[10px] text-gray-500 mt-1">Comma-separated list of frequencies carrying same/regional variants</div>
                             </div>
+
+                            <!-- Regional Variant Flag -->
+                            <div class="flex items-center justify-between bg-[#111] border border-[#444] rounded px-3 py-2">
+                                <div>
+                                    <label class="text-xs text-gray-400">Regional Variant (RV)</label>
+                                    <div class="text-[10px] text-gray-500 mt-1">Check if these frequencies carry different regional programming</div>
+                                </div>
+                                <input type="checkbox" class="toggle-checkbox" id="af_pair_regional">
+                            </div>
                         </div>
 
                         <div class="flex justify-end gap-2 mt-6">
@@ -2362,8 +2588,31 @@ UI_HTML = r"""
                          </div>
                     </div>
                  </div>
+
+                 <div class="section">
+                    <div class="section-header">EON - Enhanced Other Networks (Group 14A)</div>
+                    <div class="section-body">
+                         <div class="flex justify-between items-center mb-3">
+                             <div>
+                                 <label>Enable EON</label>
+                                 <div class="text-[9px] text-gray-500">Broadcast information about other radio stations</div>
+                             </div>
+                             <input type="checkbox" class="toggle-checkbox" id="en_eon" {% if state.en_eon %}checked{% endif %} onchange="sync()">
+                         </div>
+
+                         <input type="hidden" id="eon_services" value="{{state.eon_services}}">
+
+                         <div class="mb-3">
+                             <button onclick="openEONModal()" class="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-2 text-sm w-full">Manage EON Services</button>
+                         </div>
+
+                         <div id="eon_services_display" class="text-xs text-gray-400">
+                             No services configured
+                         </div>
+                    </div>
+                 </div>
             </div>
-            
+
             <div id="audio" class="content">
                 <div class="section border-l-4 border-l-orange-500">
                     <div class="section-header text-orange-400">Audio I/O & Genlock</div>
@@ -2435,6 +2684,30 @@ UI_HTML = r"""
                                     <input type="range" id="rds_level" min="0" max="20" step="0.1" value="{{state.rds_level}}" oninput="sync()">
                                     <span class="slider-val" id="val_rds">{{state.rds_level}}</span>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="datasets" class="content">
+                <div class="section">
+                    <div class="section-header">RDS Datasets</div>
+                    <div class="section-body">
+                        <p class="text-sm text-gray-400 mb-4">Save and switch between different RDS configurations. Each dataset stores all RDS settings.</p>
+
+                        <div class="grid grid-cols-3 gap-3 mb-4" id="dataset_buttons">
+                        </div>
+
+                        <div class="flex gap-2">
+                            <button onclick="createDataset()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm">+ New Dataset</button>
+                            <button onclick="renameCurrentDataset()" class="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-2 text-sm">Rename</button>
+                            <button onclick="deleteCurrentDataset()" class="bg-red-600 hover:bg-red-500 text-white rounded px-3 py-2 text-sm">Delete</button>
+                        </div>
+
+                        <div class="mt-4 p-3 bg-black/40 rounded border border-gray-700">
+                            <div class="text-xs text-gray-400">
+                                <strong>Current Dataset:</strong> <span id="current_dataset_name">Dataset 1</span>
                             </div>
                         </div>
                     </div>
@@ -2608,6 +2881,87 @@ UI_HTML = r"""
                     <button onclick="closeRTPlusModal()" class="px-4 py-2 bg-[#333] hover:bg-[#444] rounded text-sm text-gray-300">Cancel</button>
                     <button onclick="applyBuilderConfig()" class="px-4 py-2 bg-[#d946ef] hover:bg-[#c026d3] rounded text-sm text-white font-bold">Apply</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="eon_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal-content" style="max-width: 600px;">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="eon_modal_title" class="text-lg font-bold">Manage EON Services</h3>
+                <button onclick="closeEONModal()" class="text-2xl leading-none hover:text-pink-600">×</button>
+            </div>
+
+            <div class="mb-4">
+                <div id="eon_service_list" class="space-y-2 mb-3">
+                </div>
+                <button onclick="addEONService()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm w-full">+ Add Service</button>
+            </div>
+
+            <div id="eon_edit_form" style="display: none;" class="border-t border-gray-700 pt-4 mt-4">
+                <input type="hidden" id="eon_edit_idx" value="">
+
+                <div class="space-y-3">
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">PI Code (ON)</label>
+                        <input type="text" id="eon_pi" maxlength="4" pattern="[0-9A-Fa-f]{4}" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="C201">
+                        <div class="text-[10px] text-gray-500 mt-1">4-digit hex code</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">PS Name (ON)</label>
+                        <input type="text" id="eon_ps" maxlength="8" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="OTHER FM">
+                        <div class="text-[10px] text-gray-500 mt-1">8 characters max</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">PTY (ON)</label>
+                        <select id="eon_pty" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                            <option value="0">None</option>
+                            <option value="1">News</option>
+                            <option value="2">Current Affairs</option>
+                            <option value="3">Information</option>
+                            <option value="4">Sport</option>
+                            <option value="5">Education</option>
+                            <option value="6">Drama</option>
+                            <option value="7">Culture</option>
+                            <option value="8">Science</option>
+                            <option value="9">Varied</option>
+                            <option value="10">Pop Music</option>
+                            <option value="11">Rock Music</option>
+                            <option value="12">Easy Listening</option>
+                            <option value="13">Light Classical</option>
+                            <option value="14">Serious Classical</option>
+                            <option value="15">Other Music</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">AF List (ON)</label>
+                        <input type="text" id="eon_af" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="88.1, 101.5">
+                        <div class="text-[10px] text-gray-500 mt-1">Comma-separated frequencies in MHz</div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="flex items-center justify-between bg-black p-2 rounded">
+                            <label class="text-xs text-gray-400">TP (ON)</label>
+                            <input type="checkbox" class="toggle-checkbox" id="eon_tp">
+                        </div>
+                        <div class="flex items-center justify-between bg-black p-2 rounded">
+                            <label class="text-xs text-gray-400">TA (ON)</label>
+                            <input type="checkbox" class="toggle-checkbox" id="eon_ta">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-4">
+                    <button onclick="cancelEONEdit()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                    <button onclick="saveEONService()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm text-white font-bold">Save</button>
+                </div>
+            </div>
+
+            <div class="flex justify-end mt-4">
+                <button onclick="closeEONModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
             </div>
         </div>
     </div>
@@ -3648,10 +4002,277 @@ UI_HTML = r"""
                 en_dab: getVal('en_dab'), dab_channel: getVal('dab_channel'),
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
                 dab_sid: getVal('dab_sid'), dab_variant: getVal('dab_variant'),
+                en_eon: getVal('en_eon'), eon_services: getVal('eon_services'),
                 rds_freq: getVal('rds_freq'),
                 group_sequence: getVal('group_sequence'), scheduler_auto: getVal('scheduler_auto')
             };
             socket.emit('update', data);
+        }
+
+        // === DATASET FUNCTIONS ===
+        var datasets = {};
+        var currentDataset = 1;
+
+        function loadDatasets() {
+            fetch('/datasets')
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    datasets = data.datasets;
+                    currentDataset = data.current;
+                    renderDatasetButtons();
+                })
+                .catch(function(e) { console.error('Failed to load datasets:', e); });
+        }
+
+        function renderDatasetButtons() {
+            var container = document.getElementById('dataset_buttons');
+            if (!container) return;
+            container.innerHTML = '';
+
+            for (var num in datasets) {
+                var dataset = datasets[num];
+                var btn = document.createElement('button');
+                btn.className = parseInt(num) === currentDataset ? 'px-4 py-3 rounded text-sm font-semibold bg-pink-600 text-white' : 'px-4 py-3 rounded text-sm font-semibold bg-gray-700 hover:bg-gray-600 text-gray-200';
+                btn.textContent = dataset.name || 'Dataset ' + num;
+                btn.onclick = (function(n) { return function() { switchDataset(n); }; })(parseInt(num));
+                container.appendChild(btn);
+            }
+
+            var nameEl = document.getElementById('current_dataset_name');
+            if (nameEl && datasets[currentDataset]) {
+                nameEl.textContent = datasets[currentDataset].name || 'Dataset ' + currentDataset;
+            }
+        }
+
+        function switchDataset(num) {
+            fetch('/datasets/' + num + '/switch', { method: 'POST' })
+                .then(function(res) {
+                    if (res.ok) {
+                        location.reload();
+                    }
+                })
+                .catch(function(e) { alert('Failed to switch dataset'); });
+        }
+
+        function createDataset() {
+            var nextNum = Math.max.apply(Math, Object.keys(datasets).map(function(n) { return parseInt(n); })) + 1;
+            var name = prompt('Enter dataset name:', 'Dataset ' + nextNum);
+            if (!name) return;
+
+            fetch('/datasets/' + nextNum, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, state: {} })
+            })
+                .then(function(res) {
+                    if (res.ok) {
+                        loadDatasets();
+                    }
+                })
+                .catch(function(e) { alert('Failed to create dataset'); });
+        }
+
+        function renameCurrentDataset() {
+            var currentName = datasets[currentDataset] ? datasets[currentDataset].name : 'Dataset ' + currentDataset;
+            var newName = prompt('Enter new name:', currentName);
+            if (!newName) return;
+
+            datasets[currentDataset].name = newName;
+            fetch('/datasets/' + currentDataset, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(datasets[currentDataset])
+            })
+                .then(function(res) {
+                    if (res.ok) {
+                        loadDatasets();
+                    }
+                })
+                .catch(function(e) { alert('Failed to rename dataset'); });
+        }
+
+        function deleteCurrentDataset() {
+            if (Object.keys(datasets).length <= 1) {
+                alert('Cannot delete the last dataset');
+                return;
+            }
+            var currentName = datasets[currentDataset] ? datasets[currentDataset].name : 'Dataset ' + currentDataset;
+            if (!confirm('Delete dataset "' + currentName + '"?')) return;
+
+            fetch('/datasets/' + currentDataset, { method: 'DELETE' })
+                .then(function(res) {
+                    if (res.ok) {
+                        location.reload();
+                    }
+                })
+                .catch(function(e) { alert('Failed to delete dataset'); });
+        }
+
+        // === EON FUNCTIONS ===
+        var eonServices = [];
+
+        function loadEONServices() {
+            var getVal = function(id) {
+                var el = document.getElementById(id);
+                if (!el) return null;
+                if (el.type === 'checkbox') return el.checked;
+                return el.value;
+            };
+            try {
+                eonServices = JSON.parse(getVal('eon_services') || '[]');
+            } catch (e) {
+                eonServices = [];
+            }
+            updateEONDisplay();
+        }
+
+        function updateEONDisplay() {
+            var display = document.getElementById('eon_services_display');
+            if (!display) return;
+
+            if (eonServices.length === 0) {
+                display.innerHTML = '<div class="text-xs text-gray-400">No services configured</div>';
+            } else {
+                var html = '<div class="text-xs space-y-1">';
+                for (var i = 0; i < eonServices.length; i++) {
+                    var svc = eonServices[i];
+                    html += '<div class="p-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer border border-gray-700 hover:border-pink-600 transition-colors" onclick="openEONModalAndEdit(' + i + ')">';
+                    html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span> - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
+                    if (svc.af_list) html += ' <span class="text-xs text-gray-500">(' + svc.af_list + ')</span>';
+                    html += '</div>';
+                }
+                html += '</div>';
+                display.innerHTML = html;
+            }
+        }
+
+        function openEONModal() {
+            loadEONServices();
+            renderEONServiceList();
+            document.getElementById('eon_modal').style.display = 'flex';
+            document.getElementById('eon_edit_form').style.display = 'none';
+        }
+
+        function closeEONModal() {
+            document.getElementById('eon_modal').style.display = 'none';
+            document.getElementById('eon_edit_form').style.display = 'none';
+        }
+
+        function renderEONServiceList() {
+            var container = document.getElementById('eon_service_list');
+            container.innerHTML = '';
+
+            if (eonServices.length === 0) {
+                container.innerHTML = '<div class="text-xs text-gray-400 text-center py-4">No services configured. Click Add Service to create one.</div>';
+                return;
+            }
+
+            for (var i = 0; i < eonServices.length; i++) {
+                var svc = eonServices[i];
+                var card = document.createElement('div');
+                card.className = 'bg-black border border-gray-700 rounded p-3 flex justify-between items-center';
+
+                var info = document.createElement('div');
+                info.className = 'flex-1';
+                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + '</div>' +
+                                '<div class="text-sm">' + (svc.ps || 'UNKNOWN') + '</div>' +
+                                '<div class="text-xs text-gray-400">' + (svc.af_list || 'No AFs') + '</div>';
+
+                var actions = document.createElement('div');
+                actions.className = 'flex gap-2';
+
+                var editBtn = document.createElement('button');
+                editBtn.textContent = 'Edit';
+                editBtn.className = 'px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs';
+                editBtn.onclick = (function(idx) { return function() { editEONService(idx); }; })(i);
+
+                var delBtn = document.createElement('button');
+                delBtn.textContent = 'Delete';
+                delBtn.className = 'px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs';
+                delBtn.onclick = (function(idx) { return function() { deleteEONService(idx); }; })(i);
+
+                actions.appendChild(editBtn);
+                actions.appendChild(delBtn);
+                card.appendChild(info);
+                card.appendChild(actions);
+                container.appendChild(card);
+            }
+        }
+
+        function addEONService() {
+            document.getElementById('eon_edit_idx').value = '';
+            document.getElementById('eon_pi').value = '';
+            document.getElementById('eon_ps').value = '';
+            document.getElementById('eon_pty').value = '0';
+            document.getElementById('eon_af').value = '';
+            document.getElementById('eon_tp').checked = false;
+            document.getElementById('eon_ta').checked = false;
+            document.getElementById('eon_modal_title').textContent = 'Add EON Service';
+            document.getElementById('eon_edit_form').style.display = 'block';
+        }
+
+        function editEONService(idx) {
+            var svc = eonServices[idx];
+            document.getElementById('eon_edit_idx').value = idx;
+            document.getElementById('eon_pi').value = svc.pi_on || '';
+            document.getElementById('eon_ps').value = svc.ps || '';
+            document.getElementById('eon_pty').value = svc.pty || 0;
+            document.getElementById('eon_af').value = svc.af_list || '';
+            document.getElementById('eon_tp').checked = svc.tp || false;
+            document.getElementById('eon_ta').checked = svc.ta || false;
+            document.getElementById('eon_modal_title').textContent = 'Edit EON Service';
+            document.getElementById('eon_edit_form').style.display = 'block';
+        }
+
+        function deleteEONService(idx) {
+            if (!confirm('Delete this EON service?')) return;
+            eonServices.splice(idx, 1);
+            syncEONServices();
+            renderEONServiceList();
+            updateEONDisplay();
+        }
+
+        function cancelEONEdit() {
+            document.getElementById('eon_edit_form').style.display = 'none';
+            document.getElementById('eon_modal_title').textContent = 'Manage EON Services';
+        }
+
+        function saveEONService() {
+            var idx = document.getElementById('eon_edit_idx').value;
+            var svc = {
+                pi_on: document.getElementById('eon_pi').value.toUpperCase() || 'C000',
+                ps: document.getElementById('eon_ps').value || 'UNKNOWN',
+                pty: parseInt(document.getElementById('eon_pty').value) || 0,
+                af_list: document.getElementById('eon_af').value || '',
+                tp: document.getElementById('eon_tp').checked ? 1 : 0,
+                ta: document.getElementById('eon_ta').checked ? 1 : 0
+            };
+
+            if (idx === '') {
+                eonServices.push(svc);
+            } else {
+                eonServices[parseInt(idx)] = svc;
+            }
+
+            syncEONServices();
+            renderEONServiceList();
+            updateEONDisplay();
+            cancelEONEdit();
+        }
+
+        function syncEONServices() {
+            var hiddenInput = document.getElementById('eon_services');
+            if (hiddenInput) {
+                hiddenInput.value = JSON.stringify(eonServices);
+            }
+            socket.emit('update', { eon_services: JSON.stringify(eonServices) });
+        }
+
+        function openEONModalAndEdit(idx) {
+            openEONModal();
+            setTimeout(function() {
+                editEONService(idx);
+            }, 100);
         }
 
         function togglePower() {
@@ -3702,6 +4323,8 @@ UI_HTML = r"""
         renderRTMessages();
         updatePTYList(); // Initialize PTY list based on RDS/RBDS setting
         updateAFMethodUI(); // Initialize AF UI based on method
+        loadDatasets(); // Initialize datasets on page load
+        loadEONServices(); // Initialize EON services on page load
 
         // === AF PAIR FUNCTIONS ===
         var afPairs = [];
@@ -3786,6 +4409,13 @@ UI_HTML = r"""
                 editArea.appendChild(arrow);
                 editArea.appendChild(altsLabel);
 
+                if (pair.regional) {
+                    var rvBadge = document.createElement('span');
+                    rvBadge.className = 'text-[10px] bg-orange-600 text-white px-2 py-0.5 rounded ml-2';
+                    rvBadge.textContent = 'RV';
+                    editArea.appendChild(rvBadge);
+                }
+
                 var deleteBtn = document.createElement('button');
                 deleteBtn.className = 'text-sm hover:text-red-400 ml-2';
                 deleteBtn.style.cssText = 'flex-shrink: 0;';
@@ -3806,7 +4436,8 @@ UI_HTML = r"""
             pendingNewAFPair = {
                 id: 'pair_' + Date.now(),
                 main: '',
-                alts: ''
+                alts: '',
+                regional: false
             };
             openAFPairModal(pendingNewAFPair, true);
         }
@@ -3823,6 +4454,7 @@ UI_HTML = r"""
             document.getElementById('af_pair_modal_title').textContent = isNew ? 'Add Frequency Pair' : 'Edit Frequency Pair';
             document.getElementById('af_pair_main').value = pair.main || '';
             document.getElementById('af_pair_alts').value = pair.alts || '';
+            document.getElementById('af_pair_regional').checked = pair.regional || false;
             document.getElementById('af_pair_modal').style.display = 'flex';
         }
 
@@ -3845,6 +4477,7 @@ UI_HTML = r"""
 
             pair.main = document.getElementById('af_pair_main').value.trim();
             pair.alts = document.getElementById('af_pair_alts').value.trim();
+            pair.regional = document.getElementById('af_pair_regional').checked;
 
             closeAFPairModal();
             renderAFPairs();
