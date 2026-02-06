@@ -1244,10 +1244,23 @@ class RDSScheduler:
                     if key not in unique_groups or schedule_freq > unique_groups[key]:
                         unique_groups[key] = schedule_freq
 
-            # Add each unique group type N times based on schedule_freq
+            # Build list of all custom groups to add
+            custom_to_add = []
             for (group_type, group_ver), freq in unique_groups.items():
                 for _ in range(freq):
-                    seq.append((group_type, group_ver))
+                    custom_to_add.append((group_type, group_ver))
+
+            # Interleave custom groups evenly throughout the sequence
+            # instead of appending them all at the end
+            if custom_to_add:
+                base_len = len(seq)
+                total_len = base_len + len(custom_to_add)
+
+                # Calculate insertion positions for even distribution
+                for i, custom_group in enumerate(custom_to_add):
+                    # Position = evenly spaced throughout final sequence
+                    position = round((i + 1) * total_len / (len(custom_to_add) + 1))
+                    seq.insert(min(position, len(seq)), custom_group)
         except:
             pass  # Ignore errors loading custom groups
 
@@ -1654,7 +1667,7 @@ class RDSScheduler:
                  # Only RT+ enabled: announce Group 11A ODA
                  return RDSHelper.get_group_bits(3, 0, 22, 0x0000, 0x4BD7)
         
-        elif g_type == 11 and state["en_rt_plus"]:
+        elif g_type == 11 and (not state["scheduler_auto"] or state["en_rt_plus"]):
              # --- CORRECTED RT+ PACKING (37 Bits split across blocks) ---
              # Requires 2 tags. If we have 1, we add a dummy. If we have >2, we cycle? 
              # For simplicity, we stick to the first 2 tags found.
@@ -1691,7 +1704,7 @@ class RDSScheduler:
              
              return RDSHelper.get_group_bits(11, 0, b2_tail, b3_val, b4_val)
 
-        elif g_type == 14 and state.get("en_eon"):
+        elif g_type == 14 and (not state["scheduler_auto"] or state.get("en_eon")):
             # Group 14A: Enhanced Other Networks (EON) - EN 50067 section 3.2.1.8
             eon_services = []
             eon_services_str = state.get("eon_services", "[]")
@@ -1809,7 +1822,7 @@ class RDSScheduler:
 
             return RDSHelper.get_group_bits(14, 0, b2_tail, b3_val, pi_on)
 
-        elif g_type == 15 and state["en_lps"]:
+        elif g_type == 15 and (not state["scheduler_auto"] or state["en_lps"]):
             raw = self.get_text("ps_long_32")
             lps_centered = state['lps_centered']
             if raw != self.last_lps_content: self.last_lps_content, self.lps_ptr = raw, 0
@@ -1845,7 +1858,7 @@ class RDSScheduler:
                 lps_txt += b'\x00'
             return RDSHelper.get_group_bits(15, g_ver, seg, (lps_txt[seg*4]<<8)|lps_txt[seg*4+1], (lps_txt[seg*4+2]<<8)|lps_txt[seg*4+3])
 
-        elif g_type == 10 and state["en_ptyn"]:
+        elif g_type == 10 and (not state["scheduler_auto"] or state["en_ptyn"]):
             raw = self.get_text("ptyn")
             if raw != self.last_ptyn_content: self.last_ptyn_content, self.ptyn_ptr = raw, 0
             if not self.ptyn_sequence or raw != self.ptyn_sequence[0][1].strip(): 
@@ -1865,12 +1878,14 @@ class RDSScheduler:
             self.ptyn_ptr += 1
             return RDSHelper.get_group_bits(10, g_ver, seg, (txt_bytes[seg*4]<<8)|txt_bytes[seg*4+1], (txt_bytes[seg*4+2]<<8)|txt_bytes[seg*4+3])
             
-        elif g_type == 1 and state["en_id"]:
-            vars = [0, 3] 
-            vnt = vars[int(time.time()/2) % 2]
-            return RDSHelper.get_group_bits(1, g_ver, 0, (vnt << 12) | (int(state['ecc' if vnt==0 else 'lic'], 16) & 0xFF), 0)
+        elif g_type == 1:
+            # In manual mode, transmit if explicitly scheduled; in auto mode, check en_id flag
+            if not state["scheduler_auto"] or state["en_id"]:
+                vars = [0, 3]
+                vnt = vars[int(time.time()/2) % 2]
+                return RDSHelper.get_group_bits(1, g_ver, 0, (vnt << 12) | (int(state['ecc' if vnt==0 else 'lic'], 16) & 0xFF), 0)
 
-        elif g_type == 12 and state.get("en_dab"):
+        elif g_type == 12 and (not state["scheduler_auto"] or state.get("en_dab")):
             # Group 12A: ODA data for DAB linkage (Ensemble table)
             # Per EN 301 700 spec section 5.3.3
             dab_ch = state.get("dab_channel", "12B")
@@ -1942,7 +1957,7 @@ class RDSScheduler:
             
             return RDSHelper.get_group_bits(12, 0, b2_tail, b3_val, b4_val)
 
-        elif g_type == 3 and state.get("en_dab"):
+        elif g_type == 3 and (not state["scheduler_auto"] or state.get("en_dab")):
             # Group 3A: ODA (Open Data Application) for DAB cross-reference
             # AID: 0xCD46 (DAB linkage)
             dab_ch = state.get("dab_channel", "12B")
@@ -1957,7 +1972,7 @@ class RDSScheduler:
 
         # Group not implemented or disabled - skip to next group instead of sending E0E0
         # This prevents filling the sequence with empty groups
-        self.schedule_ptr += 1
+        # NOTE: Don't increment ptr here - it was already incremented at line 1295
         return self.next()
 
 # --- DSP ENGINE ---
