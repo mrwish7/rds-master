@@ -52,6 +52,80 @@ DAB_CHANNELS = {
     "13A": 0x3A25, "13B": 0x3AA0, "13C": 0x3B1B, "13D": 0x3B96, "13E": 0x3C11, "13F": 0x3C8C,
 }
 
+# --- RDS CHARACTER ENCODING (IEC 62106-4:2018 Table 5) ---
+# RDS uses its own character set, NOT ISO-8859-1/Latin-1
+# This table maps RDS byte codes (0x00-0xFF) to Unicode code points
+RDS_TO_UNICODE = {
+    0x00: 0x0000, 0x01: 0x0001, 0x02: 0x0002, 0x03: 0x0003,
+    0x04: 0x0004, 0x05: 0x0005, 0x06: 0x0006, 0x07: 0x0007,
+    0x08: 0x0008, 0x09: 0x0009, 0x0A: 0x000A, 0x0B: 0x000B,
+    0x0C: 0x000C, 0x0D: 0x000D, 0x0E: 0x000E, 0x0F: 0x000F,
+    0x10: 0x0010, 0x11: 0x0011, 0x12: 0x0012, 0x13: 0x0013,
+    0x14: 0x0014, 0x15: 0x0015, 0x16: 0x0016, 0x17: 0x0017,
+    0x18: 0x0018, 0x19: 0x0019, 0x1A: 0x001A, 0x1B: 0x001B,
+    0x1C: 0x001C, 0x1D: 0x001D, 0x1E: 0x001E, 0x1F: 0x001F,
+    0x20: 0x0020, 0x21: 0x0021, 0x22: 0x0022, 0x23: 0x0023,
+    0x24: 0x00A4, 0x25: 0x0025, 0x26: 0x0026, 0x27: 0x0027,  # 0x24 is ¤ not $
+    0x28: 0x0028, 0x29: 0x0029, 0x2A: 0x002A, 0x2B: 0x002B,
+    0x2C: 0x002C, 0x2D: 0x002D, 0x2E: 0x002E, 0x2F: 0x002F,
+    0x30: 0x0030, 0x31: 0x0031, 0x32: 0x0032, 0x33: 0x0033,
+    0x34: 0x0034, 0x35: 0x0035, 0x36: 0x0036, 0x37: 0x0037,
+    0x38: 0x0038, 0x39: 0x0039, 0x3A: 0x003A, 0x3B: 0x003B,
+    0x3C: 0x003C, 0x3D: 0x003D, 0x3E: 0x003E, 0x3F: 0x003F,
+    0x40: 0x0040, 0x41: 0x0041, 0x42: 0x0042, 0x43: 0x0043,
+    0x44: 0x0044, 0x45: 0x0045, 0x46: 0x0046, 0x47: 0x0047,
+    0x48: 0x0048, 0x49: 0x0049, 0x4A: 0x004A, 0x4B: 0x004B,
+    0x4C: 0x004C, 0x4D: 0x004D, 0x4E: 0x004E, 0x4F: 0x004F,
+    0x50: 0x0050, 0x51: 0x0051, 0x52: 0x0052, 0x53: 0x0053,
+    0x54: 0x0054, 0x55: 0x0055, 0x56: 0x0056, 0x57: 0x0057,
+    0x58: 0x0058, 0x59: 0x0059, 0x5A: 0x005A, 0x5B: 0x005B,
+    0x5C: 0x005C, 0x5D: 0x005D, 0x5E: 0x2015, 0x5F: 0x005F,  # 0x5E is ― not ^
+    0x60: 0x2016, 0x61: 0x0061, 0x62: 0x0062, 0x63: 0x0063,  # 0x60 is ║ not `
+    0x64: 0x0064, 0x65: 0x0065, 0x66: 0x0066, 0x67: 0x0067,
+    0x68: 0x0068, 0x69: 0x0069, 0x6A: 0x006A, 0x6B: 0x006B,
+    0x6C: 0x006C, 0x6D: 0x006D, 0x6E: 0x006E, 0x6F: 0x006F,
+    0x70: 0x0070, 0x71: 0x0071, 0x72: 0x0072, 0x73: 0x0073,
+    0x74: 0x0074, 0x75: 0x0075, 0x76: 0x0076, 0x77: 0x0077,
+    0x78: 0x0078, 0x79: 0x0079, 0x7A: 0x007A, 0x7B: 0x007B,
+    0x7C: 0x007C, 0x7D: 0x007D, 0x7E: 0x203E, 0x7F: 0x007F,  # 0x7E is ¯ not ~
+    0x80: 0x00E1, 0x81: 0x00E0, 0x82: 0x00E9, 0x83: 0x00E8,
+    0x84: 0x00ED, 0x85: 0x00EC, 0x86: 0x00F3, 0x87: 0x00F2,
+    0x88: 0x00FA, 0x89: 0x00F9, 0x8A: 0x00D1, 0x8B: 0x00C7,
+    0x8C: 0x015E, 0x8D: 0x00DF, 0x8E: 0x00A1, 0x8F: 0x0132,
+    0x90: 0x00E2, 0x91: 0x00E4, 0x92: 0x00EA, 0x93: 0x00EB,
+    0x94: 0x00EE, 0x95: 0x00EF, 0x96: 0x00F4, 0x97: 0x00F6,
+    0x98: 0x00FB, 0x99: 0x00FC, 0x9A: 0x00F1, 0x9B: 0x00E7,
+    0x9C: 0x015F, 0x9D: 0x011F, 0x9E: 0x0131, 0x9F: 0x0133,
+    0xA0: 0x00AA, 0xA1: 0x03B1, 0xA2: 0x00A9, 0xA3: 0x2030,
+    0xA4: 0x011E, 0xA5: 0x011B, 0xA6: 0x0148, 0xA7: 0x0151,
+    0xA8: 0x03C0, 0xA9: 0x20AC, 0xAA: 0x00A3, 0xAB: 0x0024,
+    0xAC: 0x2190, 0xAD: 0x2191, 0xAE: 0x2192, 0xAF: 0x2193,
+    0xB0: 0x00BA, 0xB1: 0x00B9, 0xB2: 0x00B2, 0xB3: 0x00B3,
+    0xB4: 0x00B1, 0xB5: 0x0130, 0xB6: 0x0144, 0xB7: 0x0171,
+    0xB8: 0x00B5, 0xB9: 0x00BF, 0xBA: 0x00F7, 0xBB: 0x00B0,
+    0xBC: 0x00BC, 0xBD: 0x00BD, 0xBE: 0x00BE, 0xBF: 0x00A7,
+    0xC0: 0x00C1, 0xC1: 0x00C0, 0xC2: 0x00C9, 0xC3: 0x00C8,
+    0xC4: 0x00CD, 0xC5: 0x00CC, 0xC6: 0x00D3, 0xC7: 0x00D2,
+    0xC8: 0x00DA, 0xC9: 0x00D9, 0xCA: 0x0158, 0xCB: 0x010C,
+    0xCC: 0x0160, 0xCD: 0x017D, 0xCE: 0x00D0, 0xCF: 0x013F,
+    0xD0: 0x00C2, 0xD1: 0x00C4, 0xD2: 0x00CA, 0xD3: 0x00CB,
+    0xD4: 0x00CE, 0xD5: 0x00CF, 0xD6: 0x00D4, 0xD7: 0x00D6,
+    0xD8: 0x00DB, 0xD9: 0x00DC, 0xDA: 0x0159, 0xDB: 0x010D,
+    0xDC: 0x0161, 0xDD: 0x017E, 0xDE: 0x0111, 0xDF: 0x0140,
+    0xE0: 0x00C3, 0xE1: 0x00C5, 0xE2: 0x00C6, 0xE3: 0x0152,
+    0xE4: 0x0177, 0xE5: 0x00DD, 0xE6: 0x00D5, 0xE7: 0x00D8,
+    0xE8: 0x00DE, 0xE9: 0x014A, 0xEA: 0x0154, 0xEB: 0x0106,
+    0xEC: 0x015A, 0xED: 0x0179, 0xEE: 0x0166, 0xEF: 0x00F0,
+    0xF0: 0x00E3, 0xF1: 0x00E5, 0xF2: 0x00E6, 0xF3: 0x0153,
+    0xF4: 0x0175, 0xF5: 0x00FD, 0xF6: 0x00F5, 0xF7: 0x00F8,
+    0xF8: 0x00FE, 0xF9: 0x014B, 0xFA: 0x0155, 0xFB: 0x0107,
+    0xFC: 0x015B, 0xFD: 0x017A, 0xFE: 0x0167, 0xFF: 0x0000,
+}
+
+# Create reverse mapping: Unicode to RDS
+UNICODE_TO_RDS = {v: k for k, v in RDS_TO_UNICODE.items() if v != 0x0000 or k == 0x00}
+# Handle special case: $ (U+0024) should map to 0xAB in RDS, not be missing
+UNICODE_TO_RDS[0x0024] = 0xAB  # Dollar sign at correct position
 
 # RDS PTY List (Europe/Rest of World)
 PTY_LIST_RDS = ["None", "News", "Current Affairs", "Information", "Sport", "Education", "Drama", "Culture", "Science", "Varied", "Pop Music", "Rock Music", "Easy Music", "Light Classical", "Serious Classical", "Other Music", "Weather", "Finance", "Children's", "Social Affairs", "Religion", "Phone-In", "Travel", "Leisure", "Jazz", "Country", "National Music", "Oldies", "Folk Music", "Documentary", "Alarm Test", "Alarm"]
@@ -191,6 +265,7 @@ default_state = {
     "ptyn": "PYTHON", "en_ptyn": 1, "ptyn_centered": False,
     "en_dab": 0, "dab_channel": "12B", "dab_eid": "CE15", "dab_mode": 1, "dab_es_flag": 0,
     "dab_sid": "0000", "dab_variant": 0,
+    "custom_groups": "[]",  # JSON array of custom group data
 
     # Settings
     "auto_start": True,
@@ -535,25 +610,48 @@ signal.signal(signal.SIGINT, sig_abort)
 
 # --- WORKERS ---
 
-# EBU Latin character mapping for encoding conversion
-# RDS uses ISO-8859-1 (Latin-1) encoding for extended characters
 def convert_to_ebu_latin(text):
-    """Convert UTF-8 text to RDS/EBU Latin (ISO-8859-1) encoding."""
+    """Convert UTF-8 text to RDS character encoding (IEC 62106-4:2018).
+
+    RDS uses its own character set that differs from Latin-1/ISO-8859-1.
+    Notable differences:
+    - 0x24: ¤ (currency sign) not $ (dollar)
+    - 0x5E: ― (horizontal bar) not ^ (caret)
+    - 0x60: ║ (double vertical line) not ` (grave)
+    - 0x7E: ¯ (overline) not ~ (tilde)
+    """
     if not text:
         return ""
-    try:
-        # Encode to Latin-1, which is what RDS uses
-        return text.encode('latin-1', errors='replace').decode('latin-1')
-    except:
-        # Fallback: replace non-Latin-1 characters with ?
-        result = []
-        for char in text:
-            try:
-                char.encode('latin-1')
-                result.append(char)
-            except:
-                result.append('?')
-        return ''.join(result)
+    result = []
+    for char in text:
+        code_point = ord(char)
+        if code_point in UNICODE_TO_RDS:
+            # Valid RDS character
+            result.append(char)
+        else:
+            # Character not in RDS charset, replace with space
+            result.append(' ')
+    return ''.join(result)
+
+def text_to_rds_bytes(text):
+    """Convert Unicode text to RDS byte codes (IEC 62106-4:2018).
+
+    Returns a bytes object where each byte is the RDS character code.
+    Characters not in the RDS charset are replaced with space (0x20).
+    """
+    if not text:
+        return b''
+    result = []
+    for char in text:
+        code_point = ord(char)
+        if code_point in UNICODE_TO_RDS:
+            # Valid RDS character - get its RDS byte code
+            rds_code = UNICODE_TO_RDS[code_point]
+            result.append(rds_code)
+        else:
+            # Character not in RDS charset, replace with space
+            result.append(0x20)
+    return bytes(result)
 
 def parse_text_source(text):
     if not text: return ""
@@ -640,7 +738,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -691,18 +789,18 @@ class RDSScheduler:
         self.rt_ab_flag = 0
         self.rt_ab_cycles = 0  # number of full RT transmissions before toggling in cycle-ab mode
         self.last_rt_buf = 0   # track last A/B buffer used to reset pointer on change
-        self.rt_sequence, self.rt_seq_idx = [], 0
-        self.rt_seq_start_time = 0
+        self.rt_sequence, self.rt_seq_idx = [(10, "")], 0
+        self.rt_seq_start_time = time.time()
         self.last_ps_content = ""
-        self.ps_sequence, self.ps_seq_idx = [], 0
-        self.ps_seq_start_time = 0
+        self.ps_sequence, self.ps_seq_idx = [(10, state.get("ps_dynamic", "RDS_PRO ").ljust(8)[:8])], 0
+        self.ps_seq_start_time = time.time()
         self.burst_counter = 0
         self.last_lps_content = ""
-        self.lps_sequence, self.lps_seq_idx = [], 0
-        self.lps_seq_start_time = 0
+        self.lps_sequence, self.lps_seq_idx = [(10, "")], 0
+        self.lps_seq_start_time = time.time()
         self.last_ptyn_content = ""
-        self.ptyn_sequence, self.ptyn_seq_idx = [], 0
-        self.ptyn_seq_start_time = 0
+        self.ptyn_sequence, self.ptyn_seq_idx = [(10, "")], 0
+        self.ptyn_seq_start_time = time.time()
         self.schedule_ptr = 0
 
         self.rt_plus_toggle = 0
@@ -712,6 +810,7 @@ class RDSScheduler:
         self.dab_last_sent = time.time()
         self.group_3a_toggle = 0  # Toggle between DAB ODA and RT+ ODA on Group 3A
         self.schedule_gen_counter = 0  # Counter to half 3A frequency
+        self.custom_group_indices = {}  # Track current index for each custom group type (key: "typeVer", value: index)
 
         # New unified RT message system
         self.rt_msg_idx = 0
@@ -736,7 +835,7 @@ class RDSScheduler:
             return []
 
     def resolve_msg_content(self, msg):
-        """Resolve dynamic content for a message (file/URL sources)."""
+        """Resolve dynamic content for a message (file/URL/JSON sources)."""
         content = msg.get("content", "")
         source_type = msg.get("source_type", "manual")
         prefix = msg.get("prefix", "")
@@ -763,6 +862,88 @@ class RDSScheduler:
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     resolved = resp.read().decode('utf-8', errors='replace').strip()
             except:
+                resolved = ""
+        elif source_type == "json":
+            # JSON source - fetch and build message with prefix/field1/delimiter/field2/suffix
+            try:
+                url = content
+                delimiter = msg.get("split_delimiter", " - ")
+                field1_path = msg.get("json_field1", "")
+                field2_path = msg.get("json_field2", "")
+                hide_empty = msg.get("json_hide_empty", True)
+                tag1_type = msg.get("rt_plus_tags", {}).get("tag1_type", 4)
+                tag2_type = msg.get("rt_plus_tags", {}).get("tag2_type", 1)
+
+                req = urllib.request.Request(url, headers={'User-Agent': 'RDS-Encoder/1.0'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    response_bytes = resp.read()
+                    try:
+                        response_text = response_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        response_text = response_bytes.decode('latin-1')
+                    json_data = json.loads(response_text)
+
+                # Extract values by path
+                def get_value_by_path(obj, path):
+                    if not path:
+                        return ''
+                    parts = path.replace('[0]', '').split('.')
+                    current = obj
+                    for part in parts:
+                        if isinstance(current, list) and len(current) > 0:
+                            current = current[0]
+                        if isinstance(current, dict) and part in current:
+                            current = current[part]
+                        else:
+                            return ''
+                    # Ensure proper UTF-8 encoding
+                    if current is None:
+                        return ''
+                    elif isinstance(current, str):
+                        return current
+                    else:
+                        return str(current)
+
+                field1_value = get_value_by_path(json_data, field1_path)
+                field2_value = get_value_by_path(json_data, field2_path) if field2_path else ''
+
+                # Build resolved string with smart hiding
+                resolved = prefix
+                tag_positions = {}
+                current_pos = len(prefix)
+
+                if field1_value:
+                    tag_positions['field1'] = {
+                        'start': current_pos,
+                        'length': len(field1_value),
+                        'tag_type': tag1_type
+                    }
+                    resolved += field1_value
+                    current_pos += len(field1_value)
+
+                    if field2_value:
+                        # Add delimiter only if both fields have values
+                        resolved += delimiter
+                        current_pos += len(delimiter)
+                    elif not hide_empty and field2_path:
+                        # Add delimiter even if field2 is empty (when hide_empty is false)
+                        resolved += delimiter
+                        current_pos += len(delimiter)
+
+                if field2_value:
+                    tag_positions['field2'] = {
+                        'start': current_pos,
+                        'length': len(field2_value),
+                        'tag_type': tag2_type
+                    }
+                    resolved += field2_value
+                    current_pos += len(field2_value)
+
+                resolved += suffix
+
+                # Store tag positions in message for later retrieval
+                msg['_cached_tag_positions'] = tag_positions
+            except Exception:
                 resolved = ""
         else:
             resolved = content
@@ -874,6 +1055,24 @@ class RDSScheduler:
                 tag2_len = min(len(tag2_text), limit - tag2_start)
                 if tag2_start < limit and tag2_len > 0:
                     tags.append((tag2_type, tag2_start, tag2_len))
+        elif msg.get("source_type") == "json":
+            # JSON mode: use cached tag positions from resolve_msg_content
+            tag_positions = msg.get("_cached_tag_positions", {})
+
+            if tag_positions:
+                # Convert tag positions to tags list
+                tag_list = []
+                for tag_info in tag_positions.values():
+                    tag_type = int(tag_info.get('tag_type', -1))
+                    tag_start = offset + tag_info.get('start', 0)
+                    tag_len = tag_info.get('length', 0)
+
+                    if tag_type >= 0 and tag_start < limit and tag_len > 0:
+                        tag_list.append((tag_type, tag_start, tag_len))
+
+                # Sort by position and add to tags
+                tag_list.sort(key=lambda x: x[1])
+                tags.extend(tag_list)
         else:
             # Auto mode: split by delimiter (file/URL sources)
             # For file/URL, we need to account for prefix and suffix in the resolved_content
@@ -1022,9 +1221,36 @@ class RDSScheduler:
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
         if state.get("en_dab") and (self.schedule_gen_counter % 2 == 0): seq.append((3,0))
-        if state["en_rt_plus"]: 
+        if state["en_rt_plus"]:
             if self.schedule_gen_counter % 2 == 0: seq.append((3,0))
-            seq.append((11,0)) 
+            seq.append((11,0))
+
+        # Add enabled custom groups to auto schedule
+        # Only add each unique group type once (or multiple times based on schedule_freq)
+        # The custom group handler will cycle through all entries of that type
+        try:
+            custom_groups_str = state.get("custom_groups", "[]")
+            custom_groups = json.loads(custom_groups_str) if isinstance(custom_groups_str, str) else custom_groups_str
+
+            # Collect unique group types with their max schedule_freq
+            unique_groups = {}
+            for custom in custom_groups:
+                if custom.get("enabled", False):
+                    group_type = custom.get("type", 0)
+                    group_ver = custom.get("version", 0)
+                    schedule_freq = custom.get("schedule_freq", 1)
+                    key = (group_type, group_ver)
+                    # Use the max schedule_freq if multiple entries exist
+                    if key not in unique_groups or schedule_freq > unique_groups[key]:
+                        unique_groups[key] = schedule_freq
+
+            # Add each unique group type N times based on schedule_freq
+            for (group_type, group_ver), freq in unique_groups.items():
+                for _ in range(freq):
+                    seq.append((group_type, group_ver))
+        except:
+            pass  # Ignore errors loading custom groups
+
         self.schedule_gen_counter += 1
         return seq
 
@@ -1055,6 +1281,61 @@ class RDSScheduler:
                 g_type, g_ver = schedule[self.schedule_ptr % len(schedule)]
                 self.schedule_ptr += 1
 
+        # Check for custom data groups FIRST (allows overriding built-in groups)
+        try:
+            custom_groups_str = state.get("custom_groups", "[]")
+            custom_groups = json.loads(custom_groups_str) if isinstance(custom_groups_str, str) else custom_groups_str
+
+            # Debug: print loaded custom groups on first call (summary only)
+            if not hasattr(self, '_custom_groups_debug_printed'):
+                self._custom_groups_debug_printed = True
+                enabled_count = sum(1 for cg in custom_groups if cg.get("enabled", False))
+                if enabled_count > 0:
+                    print(f"[Custom Groups] Loaded {enabled_count} enabled custom group(s) out of {len(custom_groups)} total")
+        except Exception as e:
+            custom_groups = []
+            print(f"[Custom Groups] JSON parse error: {e}")
+            print(f"[Custom Groups] Raw value: {state.get('custom_groups', '[]')}")
+
+        # Optional: Enable detailed debug logging with env var RDS_DEBUG_CUSTOM=1
+        debug_custom = os.environ.get("RDS_DEBUG_CUSTOM", "0") == "1"
+
+        if custom_groups:
+            # Collect all enabled matching groups for this type+version
+            matching_groups = []
+            for custom in custom_groups:
+                if not custom.get("enabled", False):
+                    continue
+                cg_type = custom.get("type", 0)
+                cg_ver = custom.get("version", 0)
+                if cg_type == g_type and cg_ver == g_ver:
+                    matching_groups.append(custom)
+
+            if matching_groups:
+                # Cycle through matching groups using round-robin
+                group_key = f"{g_type}{['A','B'][g_ver]}"
+                if group_key not in self.custom_group_indices:
+                    self.custom_group_indices[group_key] = 0
+
+                # Get current index and cycle
+                current_idx = self.custom_group_indices[group_key] % len(matching_groups)
+                custom = matching_groups[current_idx]
+
+                # Increment for next time
+                self.custom_group_indices[group_key] = (current_idx + 1) % len(matching_groups)
+
+                # Use selected custom group
+                if debug_custom:
+                    print(f"[Custom Groups] Sending Group {group_key} [{current_idx+1}/{len(matching_groups)}]: B2=0x{custom.get('b2_tail','00')} B3=0x{custom.get('b3','0000')} B4=0x{custom.get('b4','0000')}")
+                try:
+                    b2_tail = int(custom.get("b2_tail", "0"), 16) & 0x1F
+                    b3_val = int(custom.get("b3", "0"), 16) & 0xFFFF
+                    b4_val = int(custom.get("b4", "0"), 16) & 0xFFFF
+                    return RDSHelper.get_group_bits(g_type, g_ver, b2_tail, b3_val, b4_val)
+                except Exception as e:
+                    print(f"[Custom Groups] Error creating group: {e}")
+                    pass  # Invalid custom data, skip
+
         if g_type == 0:
             raw = self.get_text("ps_dynamic")
             sig = f"{raw}_{state['ps_centered']}"
@@ -1070,12 +1351,17 @@ class RDSScheduler:
             txt = (txt or "").ljust(8)[:8]
             monitor_data["ps"] = txt
 
+            # Convert PS text to RDS bytes (IEC 62106-4:2018)
+            txt_bytes = text_to_rds_bytes(txt)
+
             if (time.time() - self.ps_seq_start_time) >= dur:
                 self.ps_seq_idx += 1
                 self.ps_seq_start_time, self.ps_ptr = time.time(), 0
                 dur, txt = self.ps_sequence[self.ps_seq_idx % len(self.ps_sequence)]
-                if state["scheduler_auto"] and self.ps_sequence[self.ps_seq_idx%len(self.ps_sequence)][1] != txt: 
+                if state["scheduler_auto"] and self.ps_sequence[self.ps_seq_idx%len(self.ps_sequence)][1] != txt:
                     self.burst_counter = 12
+                # Update bytes for new text
+                txt_bytes = text_to_rds_bytes((txt or "").ljust(8)[:8])
 
             seg = self.ps_ptr % 4
             self.ps_ptr += 1
@@ -1172,7 +1458,7 @@ class RDSScheduler:
                          self.af_ptr = 0
             
             if g_ver == 1: b3 = int(state["pi"], 16)
-            return RDSHelper.get_group_bits(0, g_ver, tail, b3, (ord(txt[seg*2])<<8)|ord(txt[seg*2+1]))
+            return RDSHelper.get_group_bits(0, g_ver, tail, b3, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
 
         elif g_type == 2:
             limit = 32 if state["rt_mode"] == "2B" else 64
@@ -1325,15 +1611,14 @@ class RDSScheduler:
                 self.rt_ptr = 0
             pad = clean.ljust(64)
 
-            # Encode to Latin-1 bytes for proper RDS character encoding (fixes extended chars like ë, ö, etc.)
-            try:
-                pad_bytes = pad.encode('latin-1', errors='replace')
-            except:
-                pad_bytes = pad.encode('ascii', errors='replace')
+            # Encode to RDS character encoding (IEC 62106-4:2018)
+            pad_bytes = text_to_rds_bytes(pad)
 
             # Ensure it's 64 bytes long
             if len(pad_bytes) < 64:
                 pad_bytes = pad_bytes + b' ' * (64 - len(pad_bytes))
+            else:
+                pad_bytes = pad_bytes[:64]
 
             a = self.rt_ptr % 16
             self.rt_ptr += 1
@@ -1447,13 +1732,12 @@ class RDSScheduler:
             if self.eon_variant == 0:
                 ps_text = service.get('ps', 'OTHER   ')[:8].ljust(8)
 
-                # Encode directly to bytes - don't use convert_to_ebu_latin as it returns string
-                try:
-                    ps_bytes = ps_text.encode('latin-1', errors='replace')[:8]
-                    if len(ps_bytes) < 8:
-                        ps_bytes = ps_bytes.ljust(8, b' ')
-                except:
-                    ps_bytes = b'OTHER   '
+                # Encode to RDS character encoding (IEC 62106-4:2018)
+                ps_bytes = text_to_rds_bytes(ps_text)
+                if len(ps_bytes) < 8:
+                    ps_bytes = ps_bytes + b' ' * (8 - len(ps_bytes))
+                else:
+                    ps_bytes = ps_bytes[:8]
 
                 # Block 2 tail for variant 0: TP(ON) in bit 4, variant bits 000SS where SS=segment
                 b2_tail = (tp_on << 4) | (self.eon_ps_seg & 0x03)
@@ -1575,9 +1859,11 @@ class RDSScheduler:
                 self.ptyn_seq_start_time, self.ptyn_ptr = time.time(), 0
                 dur, txt = self.ptyn_sequence[self.ptyn_seq_idx % len(self.ptyn_sequence)]
             txt = txt.ljust(8)
+            # Convert PTYN text to RDS bytes (IEC 62106-4:2018)
+            txt_bytes = text_to_rds_bytes(txt)
             seg = self.ptyn_ptr % 2
             self.ptyn_ptr += 1
-            return RDSHelper.get_group_bits(10, g_ver, seg, (ord(txt[seg*4])<<8)|ord(txt[seg*4+1]), (ord(txt[seg*4+2])<<8)|ord(txt[seg*4+3]))
+            return RDSHelper.get_group_bits(10, g_ver, seg, (txt_bytes[seg*4]<<8)|txt_bytes[seg*4+1], (txt_bytes[seg*4+2]<<8)|txt_bytes[seg*4+3])
             
         elif g_type == 1 and state["en_id"]:
             vars = [0, 3] 
@@ -1668,7 +1954,11 @@ class RDSScheduler:
             # Block 4: AID low byte (0x46) + linkage frequency data
             b4_val = 0x4600 | (linkage_code & 0xFF)
             return RDSHelper.get_group_bits(3, 0, b2_tail, b3_val, b4_val)
-        return RDSHelper.get_group_bits(0,0,0,0xE0E0,0xE0E0)
+
+        # Group not implemented or disabled - skip to next group instead of sending E0E0
+        # This prevents filling the sequence with empty groups
+        self.schedule_ptr += 1
+        return self.next()
 
 # --- DSP ENGINE ---
 class RDSDSP:
@@ -1801,6 +2091,72 @@ def update_settings():
     if changed: save_config()
     return {"ok": True}
 
+@app.route('/fetch-json-structure', methods=['POST'])
+def fetch_json_structure():
+    """Fetch JSON from URL and return available fields and sample data."""
+    if not session.get('auth'): return {"ok": False, "error": "unauthorized"}, 401
+    data = request.get_json(silent=True) or {}
+    url = data.get('url', '')
+
+    if not url:
+        return {"ok": False, "error": "No URL provided"}
+
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'RDS-Encoder/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            # Read response and decode as UTF-8 (strict to preserve special chars like ä, ö, etc.)
+            response_bytes = resp.read()
+            try:
+                response_text = response_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                # Fallback to latin-1 if not valid UTF-8
+                response_text = response_bytes.decode('latin-1')
+            json_data = json.loads(response_text)
+
+        # Extract all field paths from JSON
+        def extract_fields(obj, prefix=''):
+            fields = []
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    current_path = f"{prefix}.{key}" if prefix else key
+                    if isinstance(value, (dict, list)):
+                        fields.extend(extract_fields(value, current_path))
+                    else:
+                        fields.append(current_path)
+            elif isinstance(obj, list) and len(obj) > 0:
+                # For arrays, use first element
+                fields.extend(extract_fields(obj[0], f"{prefix}[0]"))
+            return fields
+
+        fields = extract_fields(json_data)
+
+        # Extract sample values for each field
+        def get_value_by_path(obj, path):
+            parts = path.replace('[0]', '').split('.')
+            current = obj
+            for part in parts:
+                if isinstance(current, list) and len(current) > 0:
+                    current = current[0]
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                else:
+                    return ''
+            # Ensure proper UTF-8 encoding for string values
+            if current is None:
+                return ''
+            elif isinstance(current, str):
+                return current
+            else:
+                return str(current)
+
+        sample = {field: get_value_by_path(json_data, field) for field in fields}
+
+        return {"ok": True, "fields": fields, "sample": sample}
+    except json.JSONDecodeError as e:
+        return {"ok": False, "error": f"Invalid JSON: {str(e)}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 @app.route('/resolve-content', methods=['POST'])
 def resolve_content():
     """Resolve content from file path or URL for preview."""
@@ -1821,6 +2177,90 @@ def resolve_content():
             req = urllib.request.Request(content, headers={'User-Agent': 'RDS-Encoder/1.0'})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 resolved = resp.read().decode('utf-8', errors='replace').strip()
+        elif source_type == 'json':
+            # Fetch JSON and build message with prefix/field1/delimiter/field2/suffix
+            url = content
+            prefix = data.get('prefix', '')
+            suffix = data.get('suffix', '')
+            delimiter = data.get('split_delimiter', ' - ')
+            field1_path = data.get('json_field1', '')
+            field2_path = data.get('json_field2', '')
+            hide_empty = data.get('json_hide_empty', True)
+            tag1_type = data.get('rt_plus_tags', {}).get('tag1_type', 4)
+            tag2_type = data.get('rt_plus_tags', {}).get('tag2_type', 1)
+
+            req = urllib.request.Request(url, headers={'User-Agent': 'RDS-Encoder/1.0'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                response_bytes = resp.read()
+                try:
+                    response_text = response_bytes.decode('utf-8')
+                except UnicodeDecodeError:
+                    response_text = response_bytes.decode('latin-1')
+                json_data = json.loads(response_text)
+
+            # Extract values by path
+            def get_value_by_path(obj, path):
+                if not path:
+                    return ''
+                parts = path.replace('[0]', '').split('.')
+                current = obj
+                for part in parts:
+                    if isinstance(current, list) and len(current) > 0:
+                        current = current[0]
+                    if isinstance(current, dict) and part in current:
+                        current = current[part]
+                    else:
+                        return ''
+                # Ensure proper UTF-8 encoding
+                if current is None:
+                    return ''
+                elif isinstance(current, str):
+                    return current
+                else:
+                    return str(current)
+
+            field1_value = get_value_by_path(json_data, field1_path)
+            field2_value = get_value_by_path(json_data, field2_path) if field2_path else ''
+
+            # Debug: Log JSON values
+            if 'ä' in field1_value or 'ö' in field1_value or 'å' in field1_value:
+                print(f"DEBUG JSON: field1_value = {repr(field1_value)}")
+                print(f"DEBUG JSON: field1 bytes = {[hex(ord(c)) for c in field1_value]}")
+
+            # Build resolved string with smart hiding
+            resolved = prefix
+            tag_positions = {}
+            current_pos = len(prefix)
+
+            if field1_value:
+                tag_positions['field1'] = {
+                    'start': current_pos,
+                    'length': len(field1_value),
+                    'tag_type': tag1_type
+                }
+                resolved += field1_value
+                current_pos += len(field1_value)
+
+                if field2_value:
+                    # Add delimiter only if both fields have values
+                    resolved += delimiter
+                    current_pos += len(delimiter)
+                elif not hide_empty and field2_path:
+                    # Add delimiter even if field2 is empty (when hide_empty is false)
+                    resolved += delimiter
+                    current_pos += len(delimiter)
+
+            if field2_value:
+                tag_positions['field2'] = {
+                    'start': current_pos,
+                    'length': len(field2_value),
+                    'tag_type': tag2_type
+                }
+                resolved += field2_value
+                current_pos += len(field2_value)
+
+            resolved += suffix
+
         elif source_type == 'manual':
             # Check for inline dynamic patterns
             if "\\" in content:
@@ -1830,7 +2270,11 @@ def resolve_content():
     except Exception as e:
         return {"ok": False, "error": str(e), "resolved": ""}
 
-    return {"ok": True, "resolved": resolved}
+    result = {"ok": True, "resolved": resolved}
+    # Include tag positions for JSON sources
+    if source_type == 'json' and 'tag_positions' in locals():
+        result['tag_positions'] = tag_positions
+    return result
 
 @socketio.on('update')
 def handle_update(data): 
@@ -1880,6 +2324,180 @@ def delete_dataset(num):
         save_datasets()
         return jsonify({'success': True})
     return jsonify({'error': 'Cannot delete last dataset'}), 400
+
+# Custom Groups API Routes
+@app.route('/custom_groups/export', methods=['GET'])
+def export_custom_groups():
+    if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
+    try:
+        custom_groups = json.loads(state.get("custom_groups", "[]"))
+        return jsonify({'custom_groups': custom_groups, 'count': len(custom_groups)})
+    except:
+        return jsonify({'error': 'Failed to export custom groups'}), 500
+
+@app.route('/custom_groups/import', methods=['POST'])
+def import_custom_groups():
+    if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
+    try:
+        data = request.json
+        source_type = data.get('type', 'json')  # 'json', 'url', 'text'
+
+        if source_type == 'json':
+            # Direct JSON data
+            custom_groups = data.get('custom_groups', [])
+        elif source_type == 'url':
+            # Fetch from URL
+            url = data.get('url', '')
+            if not url:
+                return jsonify({'error': 'URL required'}), 400
+
+            import urllib.request
+            try:
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    content = response.read().decode('utf-8')
+                    # Try to parse as JSON first
+                    try:
+                        custom_groups = json.loads(content)
+                    except:
+                        # Fall back to text format
+                        default_group_type = data.get('default_group_type', 8)
+                        default_version = data.get('default_version', 0)
+                        custom_groups = parse_custom_groups_text(content, default_group_type, default_version)
+            except Exception as e:
+                return jsonify({'error': f'Failed to fetch URL: {str(e)}'}), 400
+        elif source_type == 'text':
+            # Parse text format (one group per line)
+            text = data.get('text', '')
+            default_group_type = data.get('default_group_type', 8)
+            default_version = data.get('default_version', 0)
+            custom_groups = parse_custom_groups_text(text, default_group_type, default_version)
+        elif source_type == 'rdsspy':
+            # Parse RDS Spy format
+            text = data.get('text', '')
+            custom_groups = parse_rds_spy_format(text)
+        else:
+            return jsonify({'error': 'Invalid source type'}), 400
+
+        # Validate structure
+        if not isinstance(custom_groups, list):
+            return jsonify({'error': 'Invalid format: must be array'}), 400
+
+        # Merge or replace
+        mode = data.get('mode', 'replace')  # 'replace' or 'merge'
+        if mode == 'merge':
+            existing = json.loads(state.get("custom_groups", "[]"))
+            existing.extend(custom_groups)
+            custom_groups = existing
+
+        state["custom_groups"] = json.dumps(custom_groups)
+        save_config()
+        return jsonify({'success': True, 'count': len(custom_groups)})
+    except Exception as e:
+        return jsonify({'error': f'Import failed: {str(e)}'}), 500
+
+def parse_custom_groups_text(text, default_type=8, default_version=0):
+    """Parse text format for custom groups.
+
+    Supports two formats:
+    Format 1: TYPE VERSION B2 B3 B4 [ENABLED]
+        Example: 8 0 1F CAFE BEEF 1
+
+    Format 2: B2 B3 B4
+        Example: E0 594C 6201
+        (Uses default_type and default_version for all entries)
+    """
+    groups = []
+    for line in text.strip().split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+
+        parts = line.split()
+        if len(parts) == 3:
+            # Format 2: B2 B3 B4
+            try:
+                group = {
+                    'type': default_type,
+                    'version': default_version,
+                    'b2_tail': parts[0].upper(),
+                    'b3': parts[1].upper(),
+                    'b4': parts[2].upper(),
+                    'enabled': True
+                }
+                groups.append(group)
+            except:
+                pass  # Skip invalid lines
+        elif len(parts) >= 5:
+            # Format 1: TYPE VERSION B2 B3 B4 [ENABLED]
+            try:
+                group = {
+                    'type': int(parts[0]),
+                    'version': int(parts[1]),
+                    'b2_tail': parts[2].upper(),
+                    'b3': parts[3].upper(),
+                    'b4': parts[4].upper(),
+                    'enabled': parts[5] == '1' if len(parts) > 5 else True
+                }
+                groups.append(group)
+            except:
+                pass  # Skip invalid lines
+    return groups
+
+def parse_rds_spy_format(text):
+    """Parse RDS Spy log format.
+
+    Format: PI B2 B3 B4 @timestamp
+    Example: 5158 052F 8749 4920 @2024/12/31 20:18:18.16
+
+    Where:
+    - PI: Program Identification (ignored, we extract from data)
+    - B2: Contains group type (bits 15-12), version (bit 11), and B2 tail (bits 4-0)
+    - B3: Block 3 data (16 bits)
+    - B4: Block 4 data (16 bits)
+    - @timestamp: Timestamp (ignored)
+    """
+    groups = []
+    for line in text.strip().split('\n'):
+        line = line.strip()
+
+        # Skip header lines
+        if not line or line.startswith('<') or line.startswith('#'):
+            continue
+
+        # Split and get first 4 columns (ignore timestamp after @)
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+
+        try:
+            # Parse hex values
+            pi_code = parts[0]  # PI code (not used, just for reference)
+            b2_full = int(parts[1], 16)  # Full Block 2
+            b3_val = parts[2].upper()    # Block 3 (as hex string)
+            b4_val = parts[3].upper()    # Block 4 (as hex string)
+
+            # Extract group type, version, and B2 tail from Block 2
+            # Bits 15-12: Group type (0-15)
+            # Bit 11: Version (0=A, 1=B)
+            # Bits 10-5: Group-specific data
+            # Bits 4-0: B2 tail (5 bits)
+            group_type = (b2_full >> 12) & 0x0F  # Upper 4 bits
+            version = (b2_full >> 11) & 0x01      # Bit 11
+            b2_tail = b2_full & 0x1F              # Lower 5 bits
+
+            group = {
+                'type': group_type,
+                'version': version,
+                'b2_tail': f'{b2_tail:02X}',
+                'b3': b3_val,
+                'b4': b4_val,
+                'enabled': True
+            }
+            groups.append(group)
+        except:
+            pass  # Skip invalid lines
+
+    return groups
 
 load_config()
 load_datasets()
@@ -2015,6 +2633,43 @@ UI_HTML = r"""
         .rt-msg-actions { display: flex; gap: 4px; }
         .rt-msg-actions button { background: transparent; border: none; color: #666; cursor: pointer; padding: 2px 6px; font-size: 14px; }
         .rt-msg-actions button:hover { color: #fff; }
+
+        /* RDS Spy Group Grid */
+        .rdsspy-group-box {
+            border-radius: 4px;
+            padding: 8px 4px;
+            text-align: center;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+        }
+        .rdsspy-group-disabled {
+            background: #1a1a1a;
+            border-color: #333;
+            color: #555;
+            cursor: not-allowed;
+        }
+        .rdsspy-group-detected {
+            cursor: pointer;
+        }
+        .rdsspy-group-enabled {
+            background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+            border-color: #a855f7;
+            color: white;
+            box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
+        }
+        .rdsspy-group-enabled:hover {
+            background: linear-gradient(135deg, #6d28d9 0%, #9333ea 100%);
+            transform: scale(1.05);
+        }
+        .rdsspy-group-toggled-off {
+            background: #2a2a2a;
+            border-color: #555;
+            color: #888;
+            text-decoration: line-through;
+        }
+        .rdsspy-group-toggled-off:hover {
+            border-color: #888;
+        }
     </style>
 </head>
 <body>
@@ -2151,7 +2806,7 @@ UI_HTML = r"""
 
                 <!-- RT Message Edit Modal -->
                 <div id="rt_msg_modal" class="rtplus-modal-overlay" style="display: none;">
-                    <div class="rtplus-modal" style="max-width: 500px;">
+                    <div class="rtplus-modal" style="max-width: 750px;">
                         <div class="rtplus-modal-header">
                             <div>
                                 <div class="text-lg font-bold text-white" id="rt_msg_modal_title">Edit Message</div>
@@ -2195,6 +2850,10 @@ UI_HTML = r"""
                                         <input type="radio" name="rt_msg_source" value="url" class="accent-[#d946ef]" onchange="updateSourceUI()">
                                         <span class="text-sm text-gray-300">URL</span>
                                     </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="radio" name="rt_msg_source" value="json" class="accent-[#d946ef]" onchange="updateSourceUI()">
+                                        <span class="text-sm text-gray-300">Web (JSON)</span>
+                                    </label>
                                 </div>
                             </div>
 
@@ -2214,6 +2873,73 @@ UI_HTML = r"""
                                         <div>
                                             <label class="text-xs text-gray-400 mb-1 block">Suffix (optional)</label>
                                             <input type="text" id="rt_msg_suffix_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after content" oninput="updateMsgPreview()">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Content for JSON -->
+                            <div id="rt_msg_json_wrap" style="display:none">
+                                <div class="space-y-3">
+                                    <div>
+                                        <label class="text-xs text-gray-400 mb-1 block">JSON URL</label>
+                                        <div class="flex gap-2">
+                                            <input type="text" id="rt_msg_json_url" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="https://api.example.com/nowplaying">
+                                            <button onclick="fetchAndAnalyzeJSON()" class="px-3 py-1 bg-[#d946ef] hover:bg-[#c026d3] rounded text-xs text-white font-bold whitespace-nowrap">Fetch & Analyze</button>
+                                        </div>
+                                        <div class="text-[10px] text-gray-500 mt-1">URL to JSON endpoint</div>
+                                    </div>
+
+                                    <!-- JSON Structure Display -->
+                                    <div id="rt_msg_json_structure" style="display:none" class="bg-[#0a0a0a] border border-[#333] rounded p-3 space-y-2">
+                                        <div class="text-xs text-green-400 font-bold mb-2">Available JSON Fields:</div>
+                                        <div id="rt_msg_json_fields" class="text-xs text-gray-400 space-y-1 max-h-32 overflow-y-auto">
+                                            <!-- Fields will be populated here -->
+                                        </div>
+                                    </div>
+
+                                    <!-- Simple Field Configuration -->
+                                    <div id="rt_msg_json_config" style="display:none" class="space-y-3">
+                                        <div class="grid grid-cols-2 gap-2">
+                                            <div>
+                                                <label class="text-xs text-gray-400 mb-1 block">Prefix (optional)</label>
+                                                <input type="text" id="rt_msg_json_prefix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text before" oninput="updateMsgPreview()">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-gray-400 mb-1 block">Suffix (optional)</label>
+                                                <input type="text" id="rt_msg_json_suffix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after" oninput="updateMsgPreview()">
+                                            </div>
+                                        </div>
+
+                                        <div class="bg-[#1a1a1a] border border-orange-900/50 rounded p-3 space-y-2">
+                                            <div class="flex justify-between items-center mb-1">
+                                                <label class="text-xs text-orange-400 font-bold">Field 1 (Tag 1)</label>
+                                                <select id="rt_msg_json_tag1_type" class="bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" onchange="updateMsgPreview()"></select>
+                                            </div>
+                                            <select id="rt_msg_json_field1" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-sm text-orange-300" onchange="updateMsgPreview()">
+                                                <option value="">Select field...</option>
+                                            </select>
+                                        </div>
+
+                                        <div class="grid grid-cols-2 gap-4 items-center">
+                                            <div class="flex items-center gap-2">
+                                                <label class="text-xs text-gray-400">Delimiter:</label>
+                                                <input type="text" id="rt_msg_json_delimiter" value=" - " class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" oninput="updateMsgPreview()">
+                                            </div>
+                                            <div class="flex items-center gap-2 justify-end">
+                                                <span class="text-xs text-gray-400">Hide if field empty</span>
+                                                <input type="checkbox" id="rt_msg_json_hide_empty" class="toggle-checkbox" checked onchange="updateMsgPreview()">
+                                            </div>
+                                        </div>
+
+                                        <div class="bg-[#1a1a1a] border border-cyan-900/50 rounded p-3 space-y-2">
+                                            <div class="flex justify-between items-center mb-1">
+                                                <label class="text-xs text-cyan-400 font-bold">Field 2 (Tag 2) - Optional</label>
+                                                <select id="rt_msg_json_tag2_type" class="bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" onchange="updateMsgPreview()"></select>
+                                            </div>
+                                            <select id="rt_msg_json_field2" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-sm text-cyan-300" onchange="updateMsgPreview()">
+                                                <option value="">None (single field)</option>
+                                            </select>
                                         </div>
                                     </div>
                                 </div>
@@ -2601,6 +3327,29 @@ UI_HTML = r"""
                          </div>
                     </div>
                  </div>
+
+                 <div class="section">
+                    <div class="section-header">Custom Data Groups</div>
+                    <div class="section-body">
+                         <div class="flex justify-between items-center mb-3">
+                             <div>
+                                 <label>Custom RDS Group Data</label>
+                                 <div class="text-[9px] text-gray-500">Define custom data for any group type (0A-15B)</div>
+                                 <div class="text-[9px] text-amber-600 font-semibold">⚠️ ADVANCED: For expert users only</div>
+                             </div>
+                         </div>
+
+                         <input type="hidden" id="custom_groups" value="{{state.custom_groups}}">
+
+                         <div class="mb-3">
+                             <button onclick="openCustomGroupsModal()" class="bg-purple-600 hover:bg-purple-500 text-white rounded px-3 py-2 text-sm w-full">Manage Custom Groups</button>
+                         </div>
+
+                         <div id="custom_groups_display" class="text-xs text-gray-400">
+                             No custom groups configured
+                         </div>
+                    </div>
+                 </div>
             </div>
 
             <div id="audio" class="content">
@@ -2956,6 +3705,245 @@ UI_HTML = r"""
         </div>
     </div>
 
+    <div id="custom_groups_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal-content" style="max-width: 600px;">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="custom_groups_modal_title" class="text-lg font-bold">Manage Custom Groups</h3>
+                <button onclick="closeCustomGroupsModal()" class="text-2xl leading-none hover:text-pink-600">×</button>
+            </div>
+
+            <div class="mb-4">
+                <div class="text-xs text-gray-400 mb-2">Your custom groups (click to expand):</div>
+                <div id="custom_groups_list" class="space-y-2 mb-3 max-h-96 overflow-y-auto border border-gray-700 rounded p-2 bg-black">
+                </div>
+                <button onclick="addCustomGroup()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm w-full">+ Add Custom Group</button>
+            </div>
+
+            <div id="custom_group_edit_form" style="display: none;" class="border-t border-gray-700 pt-4 mt-4">
+                <input type="hidden" id="cg_edit_idx" value="">
+
+                <div class="space-y-3">
+                    <div class="flex items-center justify-between bg-black p-2 rounded">
+                        <label class="text-xs text-gray-400">Enabled</label>
+                        <input type="checkbox" class="toggle-checkbox" id="cg_enabled" checked>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Group Type</label>
+                        <select id="cg_type" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                            <option value="0">0 - Basic tuning & switching</option>
+                            <option value="1">1 - Programme Item Number</option>
+                            <option value="2">2 - RadioText</option>
+                            <option value="3">3 - Application ID (ODA)</option>
+                            <option value="4">4 - Clock-time & date</option>
+                            <option value="5">5 - Transparent data channels</option>
+                            <option value="6">6 - In-house applications</option>
+                            <option value="7">7 - Radio Paging</option>
+                            <option value="8">8 - Traffic Message Channel</option>
+                            <option value="9">9 - Emergency warning</option>
+                            <option value="10">10 - Programme Type Name</option>
+                            <option value="11">11 - Open Data App (RT+)</option>
+                            <option value="12">12 - ODA (DAB linkage)</option>
+                            <option value="13">13 - Enhanced Paging</option>
+                            <option value="14">14 - Enhanced Other Networks</option>
+                            <option value="15">15 - Long Programme Service</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Version (A/B)</label>
+                        <select id="cg_version" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                            <option value="0">A (Version 0)</option>
+                            <option value="1">B (Version 1)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Block 2 Tail (5 bits)</label>
+                        <input type="text" id="cg_b2_tail" maxlength="2" pattern="[0-9A-Fa-f]{1,2}" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="00" value="00">
+                        <div class="text-[10px] text-gray-500 mt-1">Hex value 0x00-0x1F (0-31)</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Block 3 (16 bits)</label>
+                        <input type="text" id="cg_b3" maxlength="4" pattern="[0-9A-Fa-f]{1,4}" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="0000" value="0000">
+                        <div class="text-[10px] text-gray-500 mt-1">Hex value 0x0000-0xFFFF</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Block 4 (16 bits)</label>
+                        <input type="text" id="cg_b4" maxlength="4" pattern="[0-9A-Fa-f]{1,4}" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="0000" value="0000">
+                        <div class="text-[10px] text-gray-500 mt-1">Hex value 0x0000-0xFFFF</div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-4">
+                    <button onclick="cancelCustomGroupEdit()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                    <button onclick="saveCustomGroup()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm text-white font-bold">Save</button>
+                </div>
+            </div>
+
+            <div class="border-t border-gray-700 pt-4 mt-4">
+                <div class="text-xs text-gray-400 mb-2">Import/Export</div>
+                <div class="grid grid-cols-2 gap-2 mb-3">
+                    <button onclick="exportCustomGroups()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Export JSON</button>
+                    <button onclick="showImportDialog()" class="px-3 py-2 bg-green-600 hover:bg-green-500 rounded text-sm">Import</button>
+                </div>
+            </div>
+
+            <div class="flex justify-end mt-4">
+                <button onclick="closeCustomGroupsModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="import_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal-content" style="max-width: 600px;">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold">Import Custom Groups</h3>
+                <button onclick="closeImportDialog()" class="text-2xl leading-none hover:text-pink-600">×</button>
+            </div>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="text-sm font-bold mb-2 block">Import Method</label>
+                    <select id="import_method" class="w-full bg-black border border-gray-600 rounded px-2 py-1" onchange="updateImportMethod()">
+                        <option value="text">Text/Paste (B2 B3 B4)</option>
+                        <option value="rdsspy">RDS Spy Log File</option>
+                        <option value="url">From URL</option>
+                        <option value="json">JSON</option>
+                    </select>
+                </div>
+
+                <div id="import_text_section">
+                    <label class="text-sm font-bold mb-2 block">Paste Custom Groups Data</label>
+                    <textarea id="import_text_data" rows="10" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder="Format: B2 B3 B4&#10;Example:&#10;E0 594C 6201&#10;E1 4520 6201"></textarea>
+                    <div class="text-xs text-gray-400 mt-2">
+                        Format: <code>B2 B3 B4</code> (hex values)
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 mt-3">
+                        <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Default Group Type</label>
+                            <input type="number" id="import_default_type" value="8" min="0" max="15" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                        </div>
+                        <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Default Version</label>
+                            <select id="import_default_version" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                                <option value="0">A (0)</option>
+                                <option value="1">B (1)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="import_url_section" style="display: none;">
+                    <label class="text-sm font-bold mb-2 block">URL to Fetch</label>
+                    <input type="text" id="import_url" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="https://example.com/groups.json">
+                    <div class="text-xs text-gray-400 mt-2">
+                        Supports JSON or text format
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 mt-3">
+                        <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Default Group Type</label>
+                            <input type="number" id="import_url_default_type" value="8" min="0" max="15" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                        </div>
+                        <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Default Version</label>
+                            <select id="import_url_default_version" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                                <option value="0">A (0)</option>
+                                <option value="1">B (1)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="import_json_section" style="display: none;">
+                    <label class="text-sm font-bold mb-2 block">Paste JSON Data</label>
+                    <textarea id="import_json_data" rows="10" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder='[{"type": 8, "version": 0, "b2_tail": "1F", "b3": "CAFE", "b4": "BEEF", "enabled": true}]'></textarea>
+                </div>
+
+                <div id="import_rdsspy_section" style="display: none;">
+                    <label class="text-sm font-bold mb-2 block">Paste RDS Spy Log Data</label>
+                    <textarea id="import_rdsspy_data" rows="10" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder="5158 052F 8749 4920 @2024/12/31 20:18:18.16&#10;5158 0528 E79E 2020 @2024/12/31 20:18:18.23&#10;5158 0527 9C56 2020 @2024/12/31 20:18:18.30" oninput="updateRdsSpyGroupGrid()"></textarea>
+                    <div class="text-xs text-gray-400 mt-2">
+                        Format: <code>PI B2 B3 B4 @timestamp</code> (RDS Spy log format)<br>
+                        Group type and version automatically extracted from Block 2
+                    </div>
+
+                    <div class="mt-3 border-t border-gray-700 pt-3">
+                        <div class="text-xs font-bold text-gray-400 mb-2">Detected Groups (click to toggle import):</div>
+                        <div id="rdsspy_group_grid" class="grid grid-cols-8 gap-2">
+                            <!-- Grid will be populated by JavaScript -->
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="text-sm font-bold mb-2 block">Import Mode</label>
+                    <div class="flex gap-2">
+                        <label class="flex items-center">
+                            <input type="radio" name="import_mode" value="replace" checked class="mr-2">
+                            <span class="text-sm">Replace all</span>
+                        </label>
+                        <label class="flex items-center">
+                            <input type="radio" name="import_mode" value="merge" class="mr-2">
+                            <span class="text-sm">Merge with existing</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2">
+                    <button onclick="closeImportDialog()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                    <button onclick="doImport()" class="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm text-white font-bold">Import</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- RDS Spy Preview Modal -->
+    <div id="rdsspy_preview_modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center;">
+        <div style="background: #1a1a1a; border: 1px solid #444; border-radius: 8px; max-width: 900px; width: 90%; max-height: 80vh; overflow: auto; box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
+            <div style="padding: 20px;">
+                <h3 class="text-xl font-bold mb-4 text-purple-400">RDS Spy Import Preview</h3>
+
+                <div class="mb-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <span class="text-sm text-gray-400">Select groups to import:</span>
+                            <div class="text-xs text-gray-500 mt-1">💡 Click any group or item to toggle selection (bright = selected, dark = not selected)</div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="rdsspySelectAll()" class="px-3 py-1 bg-purple-600 hover:bg-purple-500 rounded text-xs">Select All</button>
+                            <button onclick="rdsspyDeselectAll()" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs">Deselect All</button>
+                        </div>
+                    </div>
+                    <div id="rdsspy_preview_list" class="space-y-2 max-h-96 overflow-y-auto border border-gray-700 rounded p-2 bg-black">
+                        <!-- Preview items will be rendered here -->
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <label class="text-sm font-bold mb-2 block">Import Mode</label>
+                    <div class="flex gap-2">
+                        <label class="flex items-center">
+                            <input type="radio" name="rdsspy_import_mode" value="replace" checked class="mr-2">
+                            <span class="text-sm">Replace all</span>
+                        </label>
+                        <label class="flex items-center">
+                            <input type="radio" name="rdsspy_import_mode" value="merge" class="mr-2">
+                            <span class="text-sm">Merge with existing</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2">
+                    <button onclick="closeRdsSpyPreview()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                    <button onclick="confirmRdsSpyImport()" class="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm text-white font-bold">Import Selected</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         var socket = io();
         var running = {{ 'true' if state.running else 'false' }};
@@ -3122,7 +4110,7 @@ UI_HTML = r"""
 
         function renderMessageCard(msg, idx) {
             var bufferClass = 'buffer-' + msg.buffer.toLowerCase();
-            var sourceIcon = {manual: '✏️', file: '📄', url: '🌐'}[msg.source_type] || '✏️';
+            var sourceIcon = {manual: '✏️', file: '📄', url: '🌐', json: '📊'}[msg.source_type] || '✏️';
             var preview = (msg.content || '').substring(0, 50) + ((msg.content || '').length > 50 ? '...' : '');
             var enabledClass = msg.enabled ? '' : 'disabled';
 
@@ -3159,10 +4147,13 @@ UI_HTML = r"""
                 rt_plus_tags: { tag1_type: 4, tag2_type: 1 },
                 enabled: true,
                 prefix: '',
+                suffix: '',
                 tag1_text: '',
                 middle: ' - ',
                 tag2_text: '',
-                suffix: ''
+                json_field1: '',
+                json_field2: '',
+                json_hide_empty: true
             };
             openMessageModal(pendingNewMessage, true);
         }
@@ -3195,6 +4186,59 @@ UI_HTML = r"""
                     document.getElementById('rt_msg_suffix').value = msg.suffix || '';
                     document.getElementById('rt_msg_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
                     document.getElementById('rt_msg_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                }
+            } else if (msg.source_type === 'json') {
+                document.getElementById('rt_msg_json_url').value = msg.content || '';
+                document.getElementById('rt_msg_json_prefix').value = msg.prefix || '';
+                document.getElementById('rt_msg_json_suffix').value = msg.suffix || '';
+                document.getElementById('rt_msg_json_delimiter').value = msg.split_delimiter || ' - ';
+                document.getElementById('rt_msg_json_hide_empty').checked = msg.json_hide_empty !== false; // Default to true
+
+                // Show config section immediately so elements exist
+                document.getElementById('rt_msg_json_config').style.display = 'block';
+
+                // Initialize tag selects
+                initJSONTagSelects();
+                document.getElementById('rt_msg_json_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
+                document.getElementById('rt_msg_json_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+
+                // Auto-fetch JSON structure first to populate the field cache
+                var url = msg.content;
+                var savedField1 = msg.json_field1;
+                var savedField2 = msg.json_field2;
+
+                if (url) {
+                    fetch('/fetch-json-structure', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: url })
+                    })
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data.ok) {
+                            jsonFieldsCache = data.fields;
+                            displayJSONFields(data.fields, data.sample);
+                            // Pass saved values to populate function
+                            populateJSONFieldDropdowns(data.fields, savedField1, savedField2);
+
+                            document.getElementById('rt_msg_json_structure').style.display = 'block';
+                            document.getElementById('rt_msg_json_config').style.display = 'block';
+
+                            // Trigger preview update
+                            updateMsgPreview();
+                        } else {
+                            // If fetch fails, still show config but with manual field entry
+                            initJSONTagSelects();
+                            document.getElementById('rt_msg_json_config').style.display = 'block';
+                            updateMsgPreview();
+                        }
+                    })
+                    .catch(function(err) {
+                        // If fetch fails, still show config
+                        initJSONTagSelects();
+                        document.getElementById('rt_msg_json_config').style.display = 'block';
+                        updateMsgPreview();
+                    });
                 }
             } else {
                 document.getElementById('rt_msg_content').value = msg.content || '';
@@ -3242,6 +4286,7 @@ UI_HTML = r"""
         function updateSourceUI() {
             var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
             var contentWrap = document.getElementById('rt_msg_content_wrap');
+            var jsonWrap = document.getElementById('rt_msg_json_wrap');
             var manualSimple = document.getElementById('rt_msg_manual_simple');
             var manualBuilder = document.getElementById('rt_msg_manual_builder');
             var rtplusOptions = document.getElementById('rt_msg_rtplus_options');
@@ -3250,11 +4295,20 @@ UI_HTML = r"""
             if (sourceType === 'manual') {
                 // Show manual input (simple or builder depending on RT+ toggle)
                 contentWrap.style.display = 'none';
+                if (jsonWrap) jsonWrap.style.display = 'none';
                 updateRTPlusUI(); // This will handle showing simple vs builder
                 tagInfo.style.display = 'grid';
+            } else if (sourceType === 'json') {
+                // Show JSON configuration
+                contentWrap.style.display = 'none';
+                if (jsonWrap) jsonWrap.style.display = 'block';
+                if (manualSimple) manualSimple.style.display = 'none';
+                if (manualBuilder) manualBuilder.style.display = 'none';
+                tagInfo.style.display = 'grid';
             } else {
-                // Show content input, hide manual inputs
+                // Show content input, hide manual inputs and JSON
                 contentWrap.style.display = 'block';
+                if (jsonWrap) jsonWrap.style.display = 'none';
                 if (manualSimple) manualSimple.style.display = 'none';
                 if (manualBuilder) manualBuilder.style.display = 'none';
                 tagInfo.style.display = 'grid';
@@ -3286,6 +4340,11 @@ UI_HTML = r"""
                 if (manualSimple) manualSimple.style.display = enabled ? 'none' : 'block';
                 if (manualBuilder) manualBuilder.style.display = enabled ? 'block' : 'none';
                 if (opts) opts.style.display = 'none';
+            } else if (sourceType === 'json') {
+                // For JSON: hide manual inputs and RT+ options (handled in JSON config)
+                if (manualSimple) manualSimple.style.display = 'none';
+                if (manualBuilder) manualBuilder.style.display = 'none';
+                if (opts) opts.style.display = 'none';
             } else {
                 // For file/URL: hide manual inputs, show RT+ options if enabled
                 if (manualSimple) manualSimple.style.display = 'none';
@@ -3297,13 +4356,14 @@ UI_HTML = r"""
 
         // Cache for resolved content
         var resolvedContentCache = '';
+        var resolvedTagPositions = null;
         var resolveDebounceTimer = null;
         var lastResolvePath = '';
         var lastResolveType = '';
 
         function fetchResolvedContent() {
             var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
-            var content = document.getElementById('rt_msg_content').value || '';
+            var content = sourceType === 'json' ? document.getElementById('rt_msg_json_url').value : document.getElementById('rt_msg_content').value || '';
 
             if (sourceType === 'manual' || !content) {
                 resolvedContentCache = '';
@@ -3311,34 +4371,72 @@ UI_HTML = r"""
                 return;
             }
 
-            if (content === lastResolvePath && sourceType === lastResolveType && resolvedContentCache) {
-                renderPreviewWithContent(resolvedContentCache);
+            var cacheKey = content + sourceType;
+            if (sourceType === 'json') {
+                cacheKey += document.getElementById('rt_msg_json_field1').value +
+                            document.getElementById('rt_msg_json_field2').value;
+            }
+
+            if (cacheKey === lastResolvePath && resolvedContentCache) {
+                renderPreviewWithContent(resolvedContentCache, resolvedTagPositions);
                 return;
             }
 
-            lastResolvePath = content;
+            lastResolvePath = cacheKey;
             lastResolveType = sourceType;
 
             var previewEl = document.getElementById('rt_msg_preview');
             previewEl.innerHTML = '<span class="text-gray-500">Loading...</span>';
 
+            var requestData = { source_type: sourceType, content: content };
+
+            if (sourceType === 'json') {
+                var prefixEl = document.getElementById('rt_msg_json_prefix');
+                var suffixEl = document.getElementById('rt_msg_json_suffix');
+                var delimiterEl = document.getElementById('rt_msg_json_delimiter');
+                var field1El = document.getElementById('rt_msg_json_field1');
+                var field2El = document.getElementById('rt_msg_json_field2');
+                var hideEmptyEl = document.getElementById('rt_msg_json_hide_empty');
+                var tag1El = document.getElementById('rt_msg_json_tag1_type');
+                var tag2El = document.getElementById('rt_msg_json_tag2_type');
+
+                if (!field1El || !field2El) {
+                    // Elements not ready yet
+                    return;
+                }
+
+                requestData.prefix = prefixEl ? prefixEl.value : '';
+                requestData.suffix = suffixEl ? suffixEl.value : '';
+                requestData.split_delimiter = delimiterEl ? delimiterEl.value : ' - ';
+                requestData.json_field1 = field1El.value;
+                requestData.json_field2 = field2El.value;
+                requestData.json_hide_empty = hideEmptyEl ? hideEmptyEl.checked : true;
+                requestData.rt_plus_tags = {
+                    tag1_type: tag1El ? parseInt(tag1El.value) : 4,
+                    tag2_type: tag2El ? parseInt(tag2El.value) : 1
+                };
+            }
+
             fetch('/resolve-content', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ source_type: sourceType, content: content })
+                body: JSON.stringify(requestData)
             })
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.ok) {
                     resolvedContentCache = data.resolved || '';
-                    renderPreviewWithContent(resolvedContentCache);
+                    resolvedTagPositions = data.tag_positions || null;
+                    renderPreviewWithContent(resolvedContentCache, resolvedTagPositions);
                 } else {
                     resolvedContentCache = '';
+                    resolvedTagPositions = null;
                     previewEl.innerHTML = '<span class="text-red-400">Error: ' + escapeHtml(data.error || 'Failed') + '</span>';
                 }
             })
             .catch(function(err) {
                 resolvedContentCache = '';
+                resolvedTagPositions = null;
                 previewEl.innerHTML = '<span class="text-red-400">Error loading content</span>';
             });
         }
@@ -3348,13 +4446,16 @@ UI_HTML = r"""
 
             if (sourceType === 'manual') {
                 renderPreviewWithContent(null);
+            } else if (sourceType === 'json') {
+                clearTimeout(resolveDebounceTimer);
+                resolveDebounceTimer = setTimeout(fetchResolvedContent, 500);
             } else {
                 clearTimeout(resolveDebounceTimer);
                 resolveDebounceTimer = setTimeout(fetchResolvedContent, 500);
             }
         }
 
-        function renderPreviewWithContent(resolvedContent) {
+        function renderPreviewWithContent(resolvedContent, tagPositions) {
             var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
             var limit = document.getElementById('rt_mode').value === '2B' ? 32 : 64;
             var preview = '';
@@ -3389,6 +4490,40 @@ UI_HTML = r"""
                         tag2Len = tag2Text.length;
                     }
                     preview += suffix;
+                }
+            } else if (sourceType === 'json') {
+                // JSON source type
+                var url = document.getElementById('rt_msg_json_url').value || '';
+                var prefix = document.getElementById('rt_msg_json_prefix').value || '';
+                var suffix = document.getElementById('rt_msg_json_suffix').value || '';
+                var delimiter = document.getElementById('rt_msg_json_delimiter').value || ' - ';
+                var field1 = document.getElementById('rt_msg_json_field1').value;
+                var field2 = document.getElementById('rt_msg_json_field2').value;
+                tag1Type = parseInt(document.getElementById('rt_msg_json_tag1_type').value) || 0;
+                tag2Type = parseInt(document.getElementById('rt_msg_json_tag2_type').value) || 0;
+
+                if (!url) {
+                    preview = '(enter JSON URL and click Fetch & Analyze)';
+                } else if (!field1) {
+                    preview = '(select Field 1)';
+                } else {
+                    // Build preview from resolved content if available
+                    if (resolvedContent) {
+                        preview = resolvedContent;
+
+                        // Use RT+ tag positions from server if available
+                        if (rtPlusEnabled && tagPositions && tagPositions.field1) {
+                            tag1Start = tagPositions.field1.start;
+                            tag1Len = tagPositions.field1.length;
+
+                            if (tagPositions.field2) {
+                                tag2Start = tagPositions.field2.start;
+                                tag2Len = tagPositions.field2.length;
+                            }
+                        }
+                    } else {
+                        preview = '(loading...)';
+                    }
                 }
             } else {
                 var path = document.getElementById('rt_msg_content').value || '';
@@ -3523,6 +4658,27 @@ UI_HTML = r"""
                         (msg.tag2_text ? (msg.middle || '') + msg.tag2_text : '') + (msg.suffix || '');
                     msg.split_delimiter = msg.middle || ' - ';
                 }
+            } else if (msg.source_type === 'json') {
+                // Save JSON fields
+                msg.content = document.getElementById('rt_msg_json_url').value;
+                msg.prefix = document.getElementById('rt_msg_json_prefix').value;
+                msg.suffix = document.getElementById('rt_msg_json_suffix').value;
+                msg.json_field1 = document.getElementById('rt_msg_json_field1').value;
+                msg.json_field2 = document.getElementById('rt_msg_json_field2').value;
+                msg.split_delimiter = document.getElementById('rt_msg_json_delimiter').value;
+                msg.json_hide_empty = document.getElementById('rt_msg_json_hide_empty').checked;
+                msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+                msg.rt_plus_tags = {
+                    tag1_type: parseInt(document.getElementById('rt_msg_json_tag1_type').value),
+                    tag2_type: parseInt(document.getElementById('rt_msg_json_tag2_type').value)
+                };
+
+                // Clear fields not used by JSON
+                msg.tag1_text = '';
+                msg.middle = '';
+                msg.tag2_text = '';
+                msg.json_template = '';
+                msg.json_mappings = [];
             } else {
                 // Save file/URL fields
                 msg.content = document.getElementById('rt_msg_content').value;
@@ -3560,6 +4716,110 @@ UI_HTML = r"""
             renderRTMessages();
             syncRTMessages();
         }
+
+        // === JSON SOURCE FUNCTIONS ===
+        var jsonFieldsCache = [];
+
+        function fetchAndAnalyzeJSON() {
+            var url = document.getElementById('rt_msg_json_url').value;
+            if (!url) {
+                alert('Please enter a JSON URL');
+                return;
+            }
+
+            fetch('/fetch-json-structure', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: url })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    jsonFieldsCache = data.fields;
+                    displayJSONFields(data.fields, data.sample);
+                    populateJSONFieldDropdowns(data.fields);
+                    document.getElementById('rt_msg_json_structure').style.display = 'block';
+                    document.getElementById('rt_msg_json_config').style.display = 'block';
+                    updateMsgPreview();
+                } else {
+                    alert('Failed to fetch JSON: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(function(err) {
+                alert('Error fetching JSON: ' + err.message);
+            });
+        }
+
+        function populateJSONFieldDropdowns(fields, selectedField1, selectedField2) {
+            var field1Select = document.getElementById('rt_msg_json_field1');
+            var field2Select = document.getElementById('rt_msg_json_field2');
+
+            // Use passed parameters or current values
+            var currentField1 = selectedField1 !== undefined ? selectedField1 : field1Select.value;
+            var currentField2 = selectedField2 !== undefined ? selectedField2 : field2Select.value;
+
+            // Clear and populate field 1
+            field1Select.innerHTML = '<option value="">Select field...</option>';
+            fields.forEach(function(field) {
+                var opt = document.createElement('option');
+                opt.value = field;
+                opt.textContent = field;
+                if (field === currentField1) opt.selected = true;
+                field1Select.appendChild(opt);
+            });
+
+            // Clear and populate field 2
+            field2Select.innerHTML = '<option value="">None (single field)</option>';
+            fields.forEach(function(field) {
+                var opt = document.createElement('option');
+                opt.value = field;
+                opt.textContent = field;
+                if (field === currentField2) opt.selected = true;
+                field2Select.appendChild(opt);
+            });
+
+            // Initialize tag type selects if not already done
+            initJSONTagSelects();
+        }
+
+        function initJSONTagSelects() {
+            var tag1Select = document.getElementById('rt_msg_json_tag1_type');
+            var tag2Select = document.getElementById('rt_msg_json_tag2_type');
+
+            if (tag1Select && tag1Select.options.length === 0) {
+                for (var code in RTPLUS_TYPES) {
+                    var opt1 = document.createElement('option');
+                    opt1.value = code;
+                    opt1.textContent = RTPLUS_TYPES[code][1];
+                    tag1Select.appendChild(opt1);
+
+                    var opt2 = document.createElement('option');
+                    opt2.value = code;
+                    opt2.textContent = RTPLUS_TYPES[code][1];
+                    tag2Select.appendChild(opt2);
+                }
+                tag1Select.value = '4'; // Default to Artist
+                tag2Select.value = '1'; // Default to Title
+            }
+        }
+
+        function displayJSONFields(fields, sample) {
+            var container = document.getElementById('rt_msg_json_fields');
+            var html = '';
+
+            fields.forEach(function(field) {
+                var value = sample[field] || '';
+                var displayValue = String(value).substring(0, 40);
+                if (String(value).length > 40) displayValue += '...';
+                html += '<div class="flex justify-between gap-2">';
+                html += '<span class="text-cyan-400 font-mono">' + field + '</span>';
+                html += '<span class="text-gray-500 text-xs truncate flex-1">' + displayValue + '</span>';
+                html += '</div>';
+            });
+
+            container.innerHTML = html;
+        }
+
 
         function syncRTMessages() {
             socket.emit('update', { rt_messages: JSON.stringify(rtMessages) });
@@ -4265,6 +5525,826 @@ UI_HTML = r"""
             }, 100);
         }
 
+        // Custom Groups Management
+        var customGroups = [];
+
+        function loadCustomGroups() {
+            try {
+                var hiddenInput = document.getElementById('custom_groups');
+                if (hiddenInput && hiddenInput.value) {
+                    customGroups = JSON.parse(hiddenInput.value);
+                }
+            } catch (e) {
+                customGroups = [];
+            }
+        }
+
+        function openCustomGroupsModal() {
+            loadCustomGroups();
+            renderCustomGroupsList();
+            document.getElementById('custom_groups_modal').style.display = 'flex';
+            document.getElementById('custom_group_edit_form').style.display = 'none';
+        }
+
+        function closeCustomGroupsModal() {
+            document.getElementById('custom_groups_modal').style.display = 'none';
+            document.getElementById('custom_group_edit_form').style.display = 'none';
+        }
+
+        var modalExpandedGroups = {}; // Track expansion state for modal
+
+        function renderCustomGroupsList() {
+            var container = document.getElementById('custom_groups_list');
+            container.innerHTML = '';
+
+            if (customGroups.length === 0) {
+                container.innerHTML = '<div class="text-xs text-gray-400 text-center py-4">No custom groups configured. Click Add Custom Group to create one.</div>';
+                return;
+            }
+
+            // Group by type+version
+            var grouped = {};
+            for (var i = 0; i < customGroups.length; i++) {
+                var grp = customGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                if (!grouped[key]) {
+                    grouped[key] = [];
+                }
+                grouped[key].push({index: i, group: grp});
+            }
+
+            // Sort group keys
+            var keys = Object.keys(grouped).sort(function(a, b) {
+                var aNum = parseInt(a);
+                var bNum = parseInt(b);
+                if (aNum !== bNum) return aNum - bNum;
+                return a.localeCompare(b);
+            });
+
+            // Render each group type
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                var items = grouped[key];
+                var isExpanded = modalExpandedGroups[key];
+                var expandIcon = isExpanded ? '▼' : '▶';
+
+                // Group header (clickable to expand/collapse)
+                var groupHeader = document.createElement('div');
+                groupHeader.className = 'bg-gradient-to-r from-purple-900 to-purple-800 border border-purple-600 rounded-t px-3 py-2 mt-3 first:mt-0 cursor-pointer hover:from-purple-800 hover:to-purple-700 transition-colors';
+                groupHeader.innerHTML = '<div class="font-mono text-sm font-bold text-purple-200"><span class="inline-block w-4">' + expandIcon + '</span> Group ' + key + ' <span class="text-xs text-purple-300">(' + items.length + ' item' + (items.length > 1 ? 's' : '') + ')</span></div>';
+                groupHeader.onclick = (function(groupKey) {
+                    return function() {
+                        modalExpandedGroups[groupKey] = !modalExpandedGroups[groupKey];
+                        renderCustomGroupsList();
+                    };
+                })(key);
+                container.appendChild(groupHeader);
+
+                // Group items (only show if expanded)
+                if (isExpanded) {
+                    var groupContainer = document.createElement('div');
+                    groupContainer.className = 'border border-t-0 border-purple-600 rounded-b bg-gray-900 p-2 space-y-2 mb-2';
+
+                    for (var j = 0; j < items.length; j++) {
+                        var item = items[j];
+                        var grp = item.group;
+                        var idx = item.index;
+
+                        var card = document.createElement('div');
+                        card.className = 'bg-black border border-gray-700 rounded p-2 flex justify-between items-center hover:border-purple-500 transition-colors';
+
+                        var info = document.createElement('div');
+                        info.className = 'flex-1';
+                        var enabledLabel = grp.enabled ? '<span class="text-green-400">✓ ENABLED</span>' : '<span class="text-gray-500">✗ DISABLED</span>';
+                        info.innerHTML = '<div class="font-mono text-xs">' + enabledLabel + '</div>' +
+                                        '<div class="text-[10px] text-gray-400 font-mono">B2: 0x' + (grp.b2_tail || '00').toUpperCase() + ' | B3: 0x' + (grp.b3 || '0000').toUpperCase() + ' | B4: 0x' + (grp.b4 || '0000').toUpperCase() + '</div>';
+
+                        var actions = document.createElement('div');
+                        actions.className = 'flex gap-1';
+
+                    var editBtn = document.createElement('button');
+                    editBtn.textContent = 'Edit';
+                    editBtn.className = 'px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs';
+                    editBtn.onclick = (function(idx) { return function() { editCustomGroup(idx); }; })(idx);
+
+                    var delBtn = document.createElement('button');
+                    delBtn.textContent = 'Delete';
+                    delBtn.className = 'px-2 py-1 bg-red-600 hover:bg-red-500 rounded text-xs';
+                    delBtn.onclick = (function(idx) { return function() { deleteCustomGroup(idx); }; })(idx);
+
+                        actions.appendChild(editBtn);
+                        actions.appendChild(delBtn);
+                        card.appendChild(info);
+                        card.appendChild(actions);
+                        groupContainer.appendChild(card);
+                    }
+
+                    container.appendChild(groupContainer);
+                } else {
+                    // Collapsed - just show thin line
+                    var collapsedLine = document.createElement('div');
+                    collapsedLine.className = 'border border-t-0 border-purple-600 rounded-b bg-gray-900 mb-2';
+                    collapsedLine.style.height = '2px';
+                    container.appendChild(collapsedLine);
+                }
+            }
+        }
+
+        function addCustomGroup() {
+            document.getElementById('cg_edit_idx').value = '';
+            document.getElementById('cg_enabled').checked = true;
+            document.getElementById('cg_type').value = '0';
+            document.getElementById('cg_version').value = '0';
+            document.getElementById('cg_b2_tail').value = '00';
+            document.getElementById('cg_b3').value = '0000';
+            document.getElementById('cg_b4').value = '0000';
+            document.getElementById('custom_groups_modal_title').textContent = 'Add Custom Group';
+            document.getElementById('custom_group_edit_form').style.display = 'block';
+        }
+
+        function editCustomGroup(idx) {
+            var grp = customGroups[idx];
+            document.getElementById('cg_edit_idx').value = idx;
+            document.getElementById('cg_enabled').checked = grp.enabled !== false;
+            document.getElementById('cg_type').value = grp.type || 0;
+            document.getElementById('cg_version').value = grp.version || 0;
+            document.getElementById('cg_b2_tail').value = (grp.b2_tail || '00').toUpperCase();
+            document.getElementById('cg_b3').value = (grp.b3 || '0000').toUpperCase();
+            document.getElementById('cg_b4').value = (grp.b4 || '0000').toUpperCase();
+            document.getElementById('custom_groups_modal_title').textContent = 'Edit Custom Group';
+            document.getElementById('custom_group_edit_form').style.display = 'block';
+        }
+
+        function deleteCustomGroup(idx) {
+            if (!confirm('Delete this custom group?')) return;
+            customGroups.splice(idx, 1);
+            syncCustomGroups();
+            renderCustomGroupsList();
+            updateCustomGroupsDisplay();
+        }
+
+        function cancelCustomGroupEdit() {
+            document.getElementById('custom_group_edit_form').style.display = 'none';
+            document.getElementById('custom_groups_modal_title').textContent = 'Manage Custom Groups';
+        }
+
+        function saveCustomGroup() {
+            var idx = document.getElementById('cg_edit_idx').value;
+            var grp = {
+                enabled: document.getElementById('cg_enabled').checked,
+                type: parseInt(document.getElementById('cg_type').value) || 0,
+                version: parseInt(document.getElementById('cg_version').value) || 0,
+                b2_tail: document.getElementById('cg_b2_tail').value.toUpperCase() || '00',
+                b3: document.getElementById('cg_b3').value.toUpperCase() || '0000',
+                b4: document.getElementById('cg_b4').value.toUpperCase() || '0000',
+                schedule_freq: customGroups[idx] ? customGroups[idx].schedule_freq || 1 : 1
+            };
+
+            if (idx === '') {
+                customGroups.push(grp);
+            } else {
+                customGroups[parseInt(idx)] = grp;
+            }
+
+            syncCustomGroups();
+            renderCustomGroupsList();
+            updateCustomGroupsDisplay();
+            cancelCustomGroupEdit();
+        }
+
+        function syncCustomGroups() {
+            var hiddenInput = document.getElementById('custom_groups');
+            if (hiddenInput) {
+                hiddenInput.value = JSON.stringify(customGroups);
+            }
+            socket.emit('update', { custom_groups: JSON.stringify(customGroups) });
+        }
+
+        var expandedGroups = {};
+
+        function updateCustomGroupsDisplay() {
+            var display = document.getElementById('custom_groups_display');
+            if (!display) return;
+
+            if (customGroups.length === 0) {
+                display.innerHTML = 'No custom groups configured';
+                display.className = 'text-xs text-gray-400';
+                return;
+            }
+
+            // Group by type+version
+            var grouped = {};
+            for (var i = 0; i < customGroups.length; i++) {
+                var grp = customGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                if (!grouped[key]) {
+                    grouped[key] = [];
+                }
+                grouped[key].push({index: i, group: grp});
+            }
+
+            // Sort group keys
+            var keys = Object.keys(grouped).sort(function(a, b) {
+                var aNum = parseInt(a);
+                var bNum = parseInt(b);
+                if (aNum !== bNum) return aNum - bNum;
+                return a.localeCompare(b);
+            });
+
+            var html = '';
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                var items = grouped[key];
+                var isExpanded = expandedGroups[key];
+                var expandIcon = isExpanded ? '▼' : '▶';
+
+                // Count enabled/disabled and get schedule frequency
+                var enabledCount = 0;
+                var scheduleFreq = 1;
+                for (var j = 0; j < items.length; j++) {
+                    if (items[j].group.enabled) enabledCount++;
+                    // Use max schedule_freq from all items in this group
+                    var itemFreq = items[j].group.schedule_freq || 1;
+                    if (itemFreq > scheduleFreq) scheduleFreq = itemFreq;
+                }
+
+                // Group header (collapsible)
+                html += '<div class="bg-gradient-to-r from-purple-900 to-purple-800 border border-purple-600 rounded-t px-3 py-2 cursor-pointer hover:from-purple-800 hover:to-purple-700 transition-colors" onclick="toggleCustomGroupExpand(\'' + key + '\')">';
+                html += '<div class="flex items-center justify-between gap-2">';
+                html += '<div class="font-mono text-sm font-bold text-purple-200 flex-shrink-0">';
+                html += '<span class="inline-block w-4">' + expandIcon + '</span> Group ' + key;
+                html += ' <span class="text-xs text-purple-300">(' + items.length + ' item' + (items.length > 1 ? 's' : '') + ', ' + enabledCount + ' enabled)</span>';
+                html += '</div>';
+                html += '<div class="flex items-center gap-2">';
+                html += '<select onchange="event.stopPropagation(); updateGroupScheduleFreq(\'' + key + '\', this.value)" class="bg-black border border-purple-500 rounded px-2 py-1 text-xs text-purple-200 font-mono hover:bg-purple-950" title="Schedule frequency in Auto Mode">';
+                html += '<option value="1"' + (scheduleFreq == 1 ? ' selected' : '') + '>1x</option>';
+                html += '<option value="2"' + (scheduleFreq == 2 ? ' selected' : '') + '>2x</option>';
+                html += '<option value="3"' + (scheduleFreq == 3 ? ' selected' : '') + '>3x</option>';
+                html += '<option value="4"' + (scheduleFreq == 4 ? ' selected' : '') + '>4x</option>';
+                html += '<option value="5"' + (scheduleFreq == 5 ? ' selected' : '') + '>5x</option>';
+                html += '</select>';
+                html += '<button onclick="event.stopPropagation(); deleteWholeGroup(\'' + key + '\')" class="px-2 py-1 bg-red-600 hover:bg-red-500 rounded text-xs text-white flex-shrink-0" title="Delete all Group ' + key + ' entries">';
+                html += '🗑 Delete Group';
+                html += '</button>';
+                html += '</div>';
+                html += '</div>';
+                html += '</div>';
+
+                // Group items (expandable)
+                if (isExpanded) {
+                    html += '<div class="border border-t-0 border-purple-600 rounded-b bg-gray-900 p-2 space-y-1 mb-2">';
+                    for (var j = 0; j < items.length; j++) {
+                        var item = items[j];
+                        var grp = item.group;
+                        var idx = item.index;
+                        var enabledLabel = grp.enabled ? '<span class="text-green-400">✓</span>' : '<span class="text-gray-500">✗</span>';
+
+                        html += '<div class="bg-black border border-gray-700 rounded p-2 flex justify-between items-center hover:border-purple-500 transition-colors">';
+                        html += '<div class="flex-1 cursor-pointer" onclick="openCustomGroupsModalAndEdit(' + idx + ')">';
+                        html += '<div class="font-mono text-xs">' + enabledLabel + ' B2: 0x' + (grp.b2_tail || '00').toUpperCase() + ' | B3: 0x' + (grp.b3 || '0000').toUpperCase() + ' | B4: 0x' + (grp.b4 || '0000').toUpperCase() + '</div>';
+                        html += '</div>';
+                        html += '<button onclick="event.stopPropagation(); deleteCustomGroupItem(' + idx + ')" class="px-2 py-1 bg-red-600 hover:bg-red-500 rounded text-xs ml-2" title="Delete this item">🗑</button>';
+                        html += '</div>';
+                    }
+                    html += '</div>';
+                } else {
+                    html += '<div class="border border-t-0 border-purple-600 rounded-b bg-gray-900 mb-2"></div>';
+                }
+            }
+
+            display.innerHTML = html;
+            display.className = 'text-xs space-y-1';
+        }
+
+        function toggleCustomGroupExpand(groupKey) {
+            expandedGroups[groupKey] = !expandedGroups[groupKey];
+            updateCustomGroupsDisplay();
+        }
+
+        function updateGroupScheduleFreq(groupKey, freq) {
+            var freqValue = parseInt(freq) || 1;
+
+            // Update all items in this group
+            for (var i = 0; i < customGroups.length; i++) {
+                var grp = customGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                if (key === groupKey) {
+                    customGroups[i].schedule_freq = freqValue;
+                }
+            }
+
+            syncCustomGroups();
+            renderCustomGroupsList();
+            updateCustomGroupsDisplay();
+        }
+
+        function deleteCustomGroupItem(idx) {
+            if (!confirm('Delete this custom group entry?')) return;
+            customGroups.splice(idx, 1);
+            syncCustomGroups();
+            renderCustomGroupsList();
+            updateCustomGroupsDisplay();
+        }
+
+        function deleteWholeGroup(groupKey) {
+            // Count items in this group
+            var count = 0;
+            for (var i = 0; i < customGroups.length; i++) {
+                var grp = customGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                if (key === groupKey) count++;
+            }
+
+            if (!confirm('Delete all ' + count + ' entries for Group ' + groupKey + '?')) return;
+
+            // Remove all matching groups
+            customGroups = customGroups.filter(function(grp) {
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                return key !== groupKey;
+            });
+
+            syncCustomGroups();
+            renderCustomGroupsList();
+            updateCustomGroupsDisplay();
+        }
+
+        function openCustomGroupsModalAndEdit(idx) {
+            openCustomGroupsModal();
+            setTimeout(function() {
+                editCustomGroup(idx);
+            }, 100);
+        }
+
+        // Custom Groups Import/Export
+        function exportCustomGroups() {
+            var dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(customGroups, null, 2));
+            var downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            downloadAnchorNode.setAttribute("download", "rds_custom_groups.json");
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        }
+
+        function showImportDialog() {
+            document.getElementById('import_modal').style.display = 'flex';
+        }
+
+        function closeImportDialog() {
+            document.getElementById('import_modal').style.display = 'none';
+        }
+
+        function updateImportMethod() {
+            var method = document.getElementById('import_method').value;
+            document.getElementById('import_text_section').style.display = method === 'text' ? 'block' : 'none';
+            document.getElementById('import_url_section').style.display = method === 'url' ? 'block' : 'none';
+            document.getElementById('import_json_section').style.display = method === 'json' ? 'block' : 'none';
+            document.getElementById('import_rdsspy_section').style.display = method === 'rdsspy' ? 'block' : 'none';
+
+            // Create group grid when RDS Spy is selected
+            if (method === 'rdsspy') {
+                createRdsSpyGroupGrid();
+            }
+        }
+
+        var rdsspyParsedGroups = [];
+        var rdsspyGroupFilter = {}; // Track which group types to import (default: all enabled)
+
+        // Initialize group filter (all groups enabled by default)
+        function initRdsSpyGroupFilter() {
+            for (var type = 0; type <= 15; type++) {
+                for (var ver = 0; ver <= 1; ver++) {
+                    var verLabel = ver == 1 ? 'B' : 'A';
+                    var key = type + verLabel;
+                    rdsspyGroupFilter[key] = true;
+                }
+            }
+        }
+        initRdsSpyGroupFilter();
+
+        // Create the group grid UI
+        function createRdsSpyGroupGrid() {
+            var grid = document.getElementById('rdsspy_group_grid');
+            if (!grid) return;
+
+            grid.innerHTML = '';
+
+            for (var type = 0; type <= 15; type++) {
+                for (var ver = 0; ver <= 1; ver++) {
+                    var verLabel = ver == 1 ? 'B' : 'A';
+                    var key = type + verLabel;
+
+                    var box = document.createElement('div');
+                    box.id = 'rdsspy_group_' + key;
+                    box.className = 'rdsspy-group-box rdsspy-group-disabled';
+                    box.setAttribute('data-group', key);
+                    box.innerHTML = '<div class="font-mono text-xs font-bold">' + key + '</div>';
+                    box.onclick = function() {
+                        var groupKey = this.getAttribute('data-group');
+                        if (this.classList.contains('rdsspy-group-detected')) {
+                            rdsspyGroupFilter[groupKey] = !rdsspyGroupFilter[groupKey];
+                            updateRdsSpyGroupGrid();
+                        }
+                    };
+
+                    grid.appendChild(box);
+                }
+            }
+        }
+
+        // Update the grid based on textarea content
+        function updateRdsSpyGroupGrid() {
+            var text = document.getElementById('import_rdsspy_data').value;
+            if (!text.trim()) {
+                // Reset grid if no text
+                createRdsSpyGroupGrid();
+                return;
+            }
+
+            // Parse to detect which groups are present
+            var detectedGroups = {};
+            var lines = text.trim().split('\n');
+
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (!line || line.startsWith('<') || line.startsWith('#')) continue;
+
+                var parts = line.split(/\s+/);
+                if (parts.length < 4) continue;
+
+                try {
+                    var b2_full = parseInt(parts[1], 16);
+                    var group_type = (b2_full >> 12) & 0x0F;
+                    var version = (b2_full >> 11) & 0x01;
+                    var verLabel = version == 1 ? 'B' : 'A';
+                    var key = group_type + verLabel;
+
+                    detectedGroups[key] = (detectedGroups[key] || 0) + 1;
+                } catch (e) {
+                    // Skip invalid lines
+                }
+            }
+
+            // Update each box
+            for (var type = 0; type <= 15; type++) {
+                for (var ver = 0; ver <= 1; ver++) {
+                    var verLabel = ver == 1 ? 'B' : 'A';
+                    var key = type + verLabel;
+                    var box = document.getElementById('rdsspy_group_' + key);
+                    if (!box) continue;
+
+                    if (detectedGroups[key]) {
+                        // Group detected in data
+                        box.classList.remove('rdsspy-group-disabled');
+                        box.classList.add('rdsspy-group-detected');
+
+                        if (rdsspyGroupFilter[key]) {
+                            box.classList.add('rdsspy-group-enabled');
+                            box.classList.remove('rdsspy-group-toggled-off');
+                        } else {
+                            box.classList.add('rdsspy-group-toggled-off');
+                            box.classList.remove('rdsspy-group-enabled');
+                        }
+
+                        box.innerHTML = '<div class="font-mono text-xs font-bold">' + key + '</div><div class="text-[10px]">(' + detectedGroups[key] + ')</div>';
+                    } else {
+                        // Group not in data
+                        box.classList.remove('rdsspy-group-detected', 'rdsspy-group-enabled', 'rdsspy-group-toggled-off');
+                        box.classList.add('rdsspy-group-disabled');
+                        box.innerHTML = '<div class="font-mono text-xs font-bold">' + key + '</div>';
+                    }
+                }
+            }
+        }
+
+        function doImport() {
+            var method = document.getElementById('import_method').value;
+            var mode = document.querySelector('input[name="import_mode"]:checked').value;
+
+            var payload = {
+                type: method,
+                mode: mode
+            };
+
+            if (method === 'text') {
+                payload.text = document.getElementById('import_text_data').value;
+                payload.default_group_type = parseInt(document.getElementById('import_default_type').value);
+                payload.default_version = parseInt(document.getElementById('import_default_version').value);
+            } else if (method === 'url') {
+                payload.url = document.getElementById('import_url').value;
+                payload.default_group_type = parseInt(document.getElementById('import_url_default_type').value);
+                payload.default_version = parseInt(document.getElementById('import_url_default_version').value);
+            } else if (method === 'json') {
+                try {
+                    payload.custom_groups = JSON.parse(document.getElementById('import_json_data').value);
+                } catch (e) {
+                    alert('Invalid JSON: ' + e.message);
+                    return;
+                }
+            } else if (method === 'rdsspy') {
+                // Parse RDS Spy format and filter by enabled groups
+                var text = document.getElementById('import_rdsspy_data').value;
+                if (!text.trim()) {
+                    alert('Please paste RDS Spy log data');
+                    return;
+                }
+
+                var groups = [];
+                var lines = text.trim().split('\n');
+
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (!line || line.startsWith('<') || line.startsWith('#')) continue;
+
+                    var parts = line.split(/\s+/);
+                    if (parts.length < 4) continue;
+
+                    try {
+                        var b2_full = parseInt(parts[1], 16);
+                        var group_type = (b2_full >> 12) & 0x0F;
+                        var version = (b2_full >> 11) & 0x01;
+                        var b2_tail = b2_full & 0x1F;
+                        var verLabel = version == 1 ? 'B' : 'A';
+                        var key = group_type + verLabel;
+
+                        // Only include if group type is enabled in filter
+                        if (rdsspyGroupFilter[key]) {
+                            groups.push({
+                                type: group_type,
+                                version: version,
+                                b2_tail: ('0' + b2_tail.toString(16)).slice(-2).toUpperCase(),
+                                b3: parts[2].toUpperCase(),
+                                b4: parts[3].toUpperCase(),
+                                enabled: true
+                            });
+                        }
+                    } catch (e) {
+                        // Skip invalid lines
+                    }
+                }
+
+                if (groups.length === 0) {
+                    alert('No groups selected for import or no valid RDS data found');
+                    return;
+                }
+
+                payload.custom_groups = groups;
+            }
+
+            fetch('/custom_groups/import', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Imported ' + data.count + ' custom group(s)');
+                    loadCustomGroups();
+                    renderCustomGroupsList();
+                    updateCustomGroupsDisplay();
+                    closeImportDialog();
+                } else {
+                    alert('Import failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Import failed: ' + error);
+            });
+        }
+
+        function parseAndPreviewRdsSpy(text) {
+            // Parse RDS Spy format client-side
+            var lines = text.trim().split('\n');
+            rdsspyParsedGroups = [];
+
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (!line || line.startsWith('<') || line.startsWith('#')) continue;
+
+                var parts = line.split(/\s+/);
+                if (parts.length < 4) continue;
+
+                try {
+                    var b2_full = parseInt(parts[1], 16);
+                    var group_type = (b2_full >> 12) & 0x0F;
+                    var version = (b2_full >> 11) & 0x01;
+                    var b2_tail = b2_full & 0x1F;
+
+                    rdsspyParsedGroups.push({
+                        type: group_type,
+                        version: version,
+                        b2_tail: ('0' + b2_tail.toString(16)).slice(-2).toUpperCase(),
+                        b3: parts[2].toUpperCase(),
+                        b4: parts[3].toUpperCase(),
+                        enabled: true,
+                        selected: true
+                    });
+                } catch (e) {
+                    // Skip invalid lines
+                }
+            }
+
+            if (rdsspyParsedGroups.length === 0) {
+                alert('No valid RDS groups found in the input');
+                return;
+            }
+
+            // Show preview modal
+            renderRdsSpyPreview();
+            closeImportDialog();
+            document.getElementById('rdsspy_preview_modal').style.display = 'flex';
+        }
+
+        function renderRdsSpyPreview() {
+            var container = document.getElementById('rdsspy_preview_list');
+            container.innerHTML = '';
+
+            // Group by type+version
+            var grouped = {};
+            for (var i = 0; i < rdsspyParsedGroups.length; i++) {
+                var grp = rdsspyParsedGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                if (!grouped[key]) {
+                    grouped[key] = [];
+                }
+                grouped[key].push({index: i, group: grp});
+            }
+
+            // Sort group keys
+            var keys = Object.keys(grouped).sort(function(a, b) {
+                var aNum = parseInt(a);
+                var bNum = parseInt(b);
+                if (aNum !== bNum) return aNum - bNum;
+                return a.localeCompare(b);
+            });
+
+            // Render each group type
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                var items = grouped[key];
+
+                // Count selected items in this group
+                var selectedCount = 0;
+                for (var j = 0; j < items.length; j++) {
+                    if (items[j].group.selected) selectedCount++;
+                }
+                var allSelected = selectedCount === items.length;
+
+                // Group header
+                var groupHeader = document.createElement('div');
+                groupHeader.className = 'bg-gradient-to-r from-purple-900 to-purple-800 border border-purple-600 rounded-t px-3 py-2 mt-3 first:mt-0 flex items-center justify-between cursor-pointer hover:from-purple-800 hover:to-purple-700 transition-colors';
+                groupHeader.onclick = (function(groupKey, currentlyAllSelected) {
+                    return function(e) {
+                        toggleRdsSpyGroup(groupKey, !currentlyAllSelected);
+                    };
+                })(key, allSelected);
+
+                var headerLeft = document.createElement('div');
+                headerLeft.innerHTML = '<span class="font-mono text-sm font-bold text-purple-200">Group ' + key + '</span> ' +
+                    '<span class="text-xs text-purple-300">(' + selectedCount + '/' + items.length + ' selected)</span>';
+
+                var headerToggle = document.createElement('div');
+                headerToggle.className = 'px-3 py-1 rounded text-xs font-bold ' + (allSelected ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-300');
+                headerToggle.innerHTML = allSelected ? 'All Selected' : 'Some/None';
+
+                groupHeader.appendChild(headerLeft);
+                groupHeader.appendChild(headerToggle);
+                container.appendChild(groupHeader);
+
+                // Group items
+                var groupContainer = document.createElement('div');
+                groupContainer.className = 'border border-t-0 border-purple-600 rounded-b bg-gray-900 p-2 space-y-1';
+
+                for (var j = 0; j < items.length; j++) {
+                    var item = items[j];
+                    var grp = item.group;
+                    var idx = item.index;
+
+                    var card = document.createElement('div');
+                    // Visual feedback: bright when selected, dark/dim when not selected
+                    if (grp.selected) {
+                        card.className = 'bg-gradient-to-r from-purple-900 to-purple-800 border-2 border-purple-400 rounded p-3 flex justify-between items-center text-xs cursor-pointer hover:from-purple-800 hover:to-purple-700 transition-all shadow-lg shadow-purple-900/50';
+                    } else {
+                        card.className = 'bg-gray-950 border border-gray-800 rounded p-3 flex justify-between items-center text-xs cursor-pointer hover:border-gray-600 transition-all opacity-40';
+                    }
+
+                    // Make entire card clickable
+                    card.onclick = (function(index) {
+                        return function(e) {
+                            rdsspyParsedGroups[index].selected = !rdsspyParsedGroups[index].selected;
+                            renderRdsSpyPreview();
+                        };
+                    })(idx);
+
+                    var info = document.createElement('div');
+                    info.className = 'flex-1 font-mono ' + (grp.selected ? 'text-purple-100 font-semibold' : 'text-gray-600');
+                    info.innerHTML = 'B2: 0x' + grp.b2_tail + ' | B3: 0x' + grp.b3 + ' | B4: 0x' + grp.b4;
+
+                    var checkIcon = document.createElement('div');
+                    checkIcon.className = 'flex-shrink-0 w-6 h-6 rounded flex items-center justify-center ' + (grp.selected ? 'bg-green-500 text-white' : 'bg-gray-800 text-gray-600');
+                    checkIcon.innerHTML = grp.selected ? '✓' : '✗';
+
+                    card.appendChild(info);
+                    card.appendChild(checkIcon);
+                    groupContainer.appendChild(card);
+                }
+
+                container.appendChild(groupContainer);
+            }
+        }
+
+        function toggleRdsSpyGroup(groupKey, checked) {
+            for (var i = 0; i < rdsspyParsedGroups.length; i++) {
+                var grp = rdsspyParsedGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                var key = grp.type + verLabel;
+                if (key === groupKey) {
+                    grp.selected = checked;
+                }
+            }
+            renderRdsSpyPreview();
+        }
+
+        function rdsspySelectAll() {
+            for (var i = 0; i < rdsspyParsedGroups.length; i++) {
+                rdsspyParsedGroups[i].selected = true;
+            }
+            renderRdsSpyPreview();
+        }
+
+        function rdsspyDeselectAll() {
+            for (var i = 0; i < rdsspyParsedGroups.length; i++) {
+                rdsspyParsedGroups[i].selected = false;
+            }
+            renderRdsSpyPreview();
+        }
+
+        function closeRdsSpyPreview() {
+            document.getElementById('rdsspy_preview_modal').style.display = 'none';
+            showImportDialog();
+        }
+
+        function confirmRdsSpyImport() {
+            var selectedGroups = rdsspyParsedGroups.filter(function(g) { return g.selected; });
+
+            if (selectedGroups.length === 0) {
+                alert('Please select at least one group to import');
+                return;
+            }
+
+            // Remove selected flag before sending
+            var cleanGroups = selectedGroups.map(function(g) {
+                return {
+                    type: g.type,
+                    version: g.version,
+                    b2_tail: g.b2_tail,
+                    b3: g.b3,
+                    b4: g.b4,
+                    enabled: g.enabled
+                };
+            });
+
+            var mode = document.querySelector('input[name="rdsspy_import_mode"]:checked').value;
+
+            var payload = {
+                type: 'json',
+                mode: mode,
+                custom_groups: cleanGroups
+            };
+
+            fetch('/custom_groups/import', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Imported ' + selectedGroups.length + ' custom group(s)');
+                    loadCustomGroups();
+                    renderCustomGroupsList();
+                    updateCustomGroupsDisplay();
+                    document.getElementById('rdsspy_preview_modal').style.display = 'none';
+                } else {
+                    alert('Import failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Import failed: ' + error);
+            });
+        }
+
         function togglePower() {
             running = !running;
             updatePwr();
@@ -4315,6 +6395,8 @@ UI_HTML = r"""
         updateAFMethodUI(); // Initialize AF UI based on method
         loadDatasets(); // Initialize datasets on page load
         loadEONServices(); // Initialize EON services on page load
+        loadCustomGroups(); // Initialize custom groups on page load
+        updateCustomGroupsDisplay(); // Update custom groups display
 
         // === AF PAIR FUNCTIONS ===
         var afPairs = [];
