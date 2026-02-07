@@ -2069,8 +2069,8 @@ class RDSDSP:
         self.sched = RDSScheduler()
         self.p_rds, self.p_pilot, self.bit_clock, self.last_bit = 0.0, 0.0, 0.0, 0
         self.bit_queue = []
-        # Set filter cutoff to 2x bitrate (~2.375 kHz) per RDS spec 2/t_d requirement
-        self.taps = dsp_signal.firwin(301, BITRATE * 2.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
+        # Set filter cutoff to 1.5x bitrate (~1.78 kHz) - compromise between spectral width and amplitude
+        self.taps = dsp_signal.firwin(301, BITRATE * 1.5, fs=SAMPLE_RATE, window=('kaiser', 8.0))
         self.zi = np.zeros(300)
 
     def process_frame(self, outdata, frames, indata=None):
@@ -2103,11 +2103,10 @@ class RDSDSP:
             if self.bit_clock >= 0.5: bb[i] *= -1.0
             
         shaped, self.zi = dsp_signal.lfilter(self.taps, 1.0, bb, zi=self.zi)
-        # Apply gain compensation for filter attenuation to achieve proper DSB-SC modulation depth
-        shaped_boosted = shaped * 2.5
         t = np.arange(frames) / SAMPLE_RATE
 
-        rds_sig = shaped_boosted * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
+        # Apply 0.1x compensation for wider filter bandwidth (1.5x filter passes more energy)
+        rds_sig = shaped * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds * 0.1
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
