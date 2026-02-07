@@ -1,9 +1,12 @@
 
+
 # RDS Master Pro (Python)
 
   ![Overview of the User Interface](http://uploads.mpbnl.nl/u/LeTzSM.png)
 
 A work-in-progress open-source webUI based RDS encoder. Ships with a lightweight Flask + Socket.IO server, Tailwind-styled UI, and session-gated access for secure usage.
+
+Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper and DX and Adam W** (not in order) for Testing, ideas and assistance in the development of this program! ❤️
 
   
 
@@ -23,7 +26,9 @@ A work-in-progress open-source webUI based RDS encoder. Ships with a lightweight
 
 - Long PS (32 chars), PTYN, CT, AF Method A & B controls; DAB cross-reference (12A) (experimental).
 
-- Enhanced Other Networks (EON) Group 14A support with PS/AF/PTY transmission (experimental).
+- Enhanced Other Networks (EON) Group 14A support with PS/AF/PTY transmission (experimental, TA/TP not working).
+- FM-DAB linking via ODA
+- Manual RDS group input from RDS Spy recording / Airomate-standard txt file 
 
 - Live monitor panel that reflects PS/RT/PI/PTY and pilot status via WebSocket.
 
