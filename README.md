@@ -6,7 +6,7 @@
 
 A work-in-progress open-source webUI based RDS encoder. Ships with a lightweight Flask + Socket.IO server, Tailwind-styled UI, and session-gated access for secure usage.
 
-Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper and DX and Adam W** (not in order) for Testing, ideas and assistance in the development of this program! ❤️
+Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper DX and Adam W** (not in order) for Testing, ideas and assistance in the development of this program! ❤️
 
   
 
