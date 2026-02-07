@@ -1939,7 +1939,6 @@ class RDSScheduler:
             # For CR mode, only send up to the actual length; for normal mode send all 8 segments
             if state['lps_cr'] and (seg * 4) >= len(lps_txt):
                 # Skip this segment and move to next group
-                self.schedule_ptr += 1
                 return self.next()
             # Pad segment data if needed
             while len(lps_txt) < (seg + 1) * 4:
