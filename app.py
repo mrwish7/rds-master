@@ -36,7 +36,7 @@ SAMPLE_RATE = 192000
 PILOT_FREQ = 19000
 RDS_FREQ = 57000
 G_POLY = 0x5B9
-OFFSETS = {'A': 0x0FC, 'B': 0x198, 'C': 0x168, 'Cp': 0x1E0, 'D': 0x1B4}
+OFFSETS = {'A': 0x0FC, 'B': 0x198, 'C': 0x168, 'Cp': 0x350, 'D': 0x1B4}
 
 # --- DAB CHANNELS (Group 12A ODA Linkage) ---
 # Frequency code: (freq_MHz * 1000) / 16 = decimal value -> encode as 16-bit
@@ -1705,7 +1705,7 @@ class RDSScheduler:
              return RDSHelper.get_group_bits(11, 0, b2_tail, b3_val, b4_val)
 
         elif g_type == 14 and (not state["scheduler_auto"] or state.get("en_eon")):
-            # Group 14A: Enhanced Other Networks (EON) - EN 50067 section 3.2.1.8
+            # Group 14A/14B: Enhanced Other Networks (EON) - EN 50067 section 3.2.1.8
             eon_services = []
             eon_services_str = state.get("eon_services", "[]")
 
@@ -1726,10 +1726,47 @@ class RDSScheduler:
             # Initialize EON state tracking
             if not hasattr(self, 'eon_service_idx'):
                 self.eon_service_idx = 0
-                self.eon_variant = 0  # 0=PS, 4=AF, 13=PTY+TA
+                self.eon_variant = 0  # 0=PS, 4/5-9=AF, 13=PTY+TA
                 self.eon_ps_seg = 0   # PS segment (0-3)
-                self.eon_af_idx = -1  # AF index (-1=count code, 0+=mapped freqs)
+                self.eon_af_idx = -1  # AF index (-1=count code, 0+=freqs)
+                self.eon_14b_burst_count = 0  # Counter for Group 14B bursts
+                self.eon_14b_last_check = {}  # Track last TA state per service
 
+            # GROUP 14B: TA Switching (rapid burst when TA=1)
+            # Check if any service has TA=1 and send Group 14B burst
+            if g_ver == 1:
+                # Find first service with TA=1
+                ta_service = None
+                for svc in eon_services:
+                    if svc.get('ta', 0) == 1 and svc.get('tp', 0) == 1:
+                        ta_service = svc
+                        break
+
+                if ta_service:
+                    try:
+                        pi_on = int(ta_service.get('pi_on', 'C000'), 16) & 0xFFFF
+                    except:
+                        pi_on = 0xC000
+
+                    tp_on = ta_service.get('tp', 0) & 1
+                    ta_on = 1  # Always 1 for Group 14B during TA
+
+                    # Block 2 tail: TP(ON)=1, TA(ON)=1, rffu bits (variant code not used in 14B)
+                    b2_tail = (tp_on << 4) | (ta_on << 3)
+
+                    # Block 3: PI(TN) - Programme Identification of Tuned Network
+                    try:
+                        pi_tn = int(state.get("pi", "0000"), 16) & 0xFFFF
+                    except:
+                        pi_tn = 0x0000
+
+                    # Block 3: PI(TN), Block 4: PI(ON) - matching StereoTool implementation
+                    return RDSHelper.get_group_bits(14, 1, b2_tail, pi_tn, pi_on)
+                else:
+                    # No active TA - send empty 14B
+                    return RDSHelper.get_group_bits(14, 1, 0, 0, 0)
+
+            # GROUP 14A: Background EON transmission
             service = eon_services[self.eon_service_idx % len(eon_services)]
 
             # Get PI(ON) for block 4
@@ -1740,6 +1777,9 @@ class RDSScheduler:
 
             # Get TP(ON) for block 2
             tp_on = service.get('tp', 0) & 1
+
+            # Determine AF method from service config (default to Method A)
+            af_method = service.get('af_method', 'A')
 
             # Variant 0: PS(ON) - 2 characters per transmission, 4 segments total
             if self.eon_variant == 0:
@@ -1762,54 +1802,102 @@ class RDSScheduler:
                 self.eon_ps_seg += 1
                 if self.eon_ps_seg >= 4:
                     self.eon_ps_seg = 0
-                    self.eon_variant = 4  # Next variant: AF
+                    # Move to AF variant based on method
+                    if af_method == 'B':
+                        self.eon_variant = 5  # Method B mapped frequencies
+                    else:
+                        self.eon_variant = 4  # Method A
                     self.eon_af_idx = -1
 
-            # Variant 4: AF(ON) - Method A: Send ON frequencies without TN
+            # Variant 4: AF(ON) - Method A: Send ON frequencies only
             elif self.eon_variant == 4:
-                # Get other network's frequencies (ALL frequencies in af_list are ON freqs)
                 af_list = service.get('af_list', '')
                 afs = [f.strip() for f in af_list.split(',') if f.strip()]
 
                 b2_tail = (tp_on << 4) | 0x04  # Variant 4
 
                 if not afs:
-                    # No AFs - send filler and skip
-                    b3_val = (205 << 8) | 205  # Filler codes (not count codes)
-                    self.eon_variant = 13  # Next variant: PTY+TA
+                    b3_val = (205 << 8) | 205
+                    self.eon_variant = 13
                 else:
                     if self.eon_af_idx == -1:
-                        # First transmission: count code + first frequency (Method A format)
+                        # Count code + first frequency
                         b3_val = ((224 + len(afs)) << 8) | self.freq_code(afs[0])
-                        self.eon_af_idx = 1  # Start at 1 for next transmission
+                        self.eon_af_idx = 1
                     else:
-                        # Subsequent transmissions: send two frequencies at a time (Method A)
                         if self.eon_af_idx < len(afs):
                             f1 = self.freq_code(afs[self.eon_af_idx])
                             f2 = self.freq_code(afs[self.eon_af_idx + 1]) if self.eon_af_idx + 1 < len(afs) else 205
                             b3_val = (f1 << 8) | f2
                             self.eon_af_idx += 2
-
-                            # Check if we've sent all AFs
                             if self.eon_af_idx >= len(afs):
-                                self.eon_variant = 13  # Next variant: PTY+TA
+                                self.eon_variant = 13
                         else:
-                            # Shouldn't happen, but safety check
                             b3_val = (205 << 8) | 205
                             self.eon_variant = 13
 
-            # Variant 13: PTY(ON) + TA
+            # Variants 5-9: AF(ON) - Method B: Mapped frequencies (TN freq -> ON freq)
+            elif 5 <= self.eon_variant <= 9:
+                # Parse af_pairs for Method B
+                # Format: [{"tn_freq": "88.0", "on_freqs": "101.1, 103.3"}, ...]
+                af_pairs_str = service.get('af_pairs', '[]')
+                try:
+                    if isinstance(af_pairs_str, str):
+                        af_pairs = json.loads(af_pairs_str)
+                    else:
+                        af_pairs = af_pairs_str if isinstance(af_pairs_str, list) else []
+                except:
+                    af_pairs = []
+
+                b2_tail = (tp_on << 4) | self.eon_variant
+
+                if not af_pairs:
+                    b3_val = (205 << 8) | 205
+                    self.eon_variant = 13
+                else:
+                    # Build transmission list for Method B if needed
+                    if not hasattr(self, 'eon_af_b_transmissions') or self.eon_af_idx == -1:
+                        self.eon_af_b_transmissions = []
+                        for pair in af_pairs:
+                            tn_freq = pair.get('tn_freq', '')
+                            on_freqs_str = pair.get('on_freqs', '')
+                            on_freqs = [f.strip() for f in on_freqs_str.split(',') if f.strip()]
+
+                            if tn_freq and on_freqs:
+                                # Count code + tuning freq indicator
+                                total_freqs = 1 + len(on_freqs)  # 1 for TN + ON freqs
+                                self.eon_af_b_transmissions.append(
+                                    ((224 + total_freqs) << 8) | self.freq_code(tn_freq)
+                                )
+                                # TN->ON mapping pairs
+                                for on_freq in on_freqs:
+                                    self.eon_af_b_transmissions.append(
+                                        (self.freq_code(tn_freq) << 8) | self.freq_code(on_freq)
+                                    )
+                        self.eon_af_idx = 0
+
+                    if self.eon_af_b_transmissions and self.eon_af_idx < len(self.eon_af_b_transmissions):
+                        b3_val = self.eon_af_b_transmissions[self.eon_af_idx]
+                        self.eon_af_idx += 1
+                        if self.eon_af_idx >= len(self.eon_af_b_transmissions):
+                            self.eon_variant = 13
+                            self.eon_af_idx = -1
+                    else:
+                        b3_val = (205 << 8) | 205
+                        self.eon_variant = 13
+
+            # Variant 13: PTY(ON) + TA(ON)
             elif self.eon_variant == 13:
-                b2_tail = (tp_on << 4) | 0x0D  # Variant 13
+                b2_tail = (tp_on << 4) | 0x0D
                 pty_on = service.get('pty', 0) & 0x1F
                 ta_on = service.get('ta', 0) & 1
                 b3_val = (pty_on << 11) | (ta_on << 10)
 
-                # After PTY+TA, move to next service or back to PS
+                # Move to next service
                 self.eon_service_idx += 1
                 if self.eon_service_idx >= len(eon_services):
                     self.eon_service_idx = 0
-                self.eon_variant = 0  # Start with PS for next service
+                self.eon_variant = 0
                 self.eon_ps_seg = 0
                 self.eon_af_idx = -1
 
@@ -1981,8 +2069,8 @@ class RDSDSP:
         self.sched = RDSScheduler()
         self.p_rds, self.p_pilot, self.bit_clock, self.last_bit = 0.0, 0.0, 0.0, 0
         self.bit_queue = []
-        # Tighten filter cutoff to BITRATE (1.1875 kHz) to better approximate spec shaping
-        self.taps = dsp_signal.firwin(301, BITRATE * 1.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
+        # Set filter cutoff to 2x bitrate (~2.375 kHz) per RDS spec 2/t_d requirement
+        self.taps = dsp_signal.firwin(301, BITRATE * 2.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
         self.zi = np.zeros(300)
 
     def process_frame(self, outdata, frames, indata=None):
@@ -2015,9 +2103,11 @@ class RDSDSP:
             if self.bit_clock >= 0.5: bb[i] *= -1.0
             
         shaped, self.zi = dsp_signal.lfilter(self.taps, 1.0, bb, zi=self.zi)
+        # Apply gain compensation for filter attenuation to achieve proper DSB-SC modulation depth
+        shaped_boosted = shaped * 2.5
         t = np.arange(frames) / SAMPLE_RATE
-        
-        rds_sig = shaped * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
+
+        rds_sig = shaped_boosted * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
@@ -2302,6 +2392,12 @@ def handle_control(data):
     if data['action'] == 'start':
         state["device_out_idx"] = int(data["dev_out"])
         state["device_in_idx"] = int(data["dev_in"])
+        # Pre-populate resolved_cache to prevent blank PS/RT at startup
+        for k in ["ps_dynamic", "ps_long_32", "rt_text", "rt_a", "rt_b", "ptyn"]:
+            if k in state and "\\" in state[k]:
+                result = parse_text_source(state[k])
+                if result is not None:
+                    resolved_cache[k] = result
         state["running"] = True
         save_config()
         threading.Thread(target=run_audio, daemon=True).start()
@@ -2523,6 +2619,12 @@ def auto_start_if_enabled():
         if "device_out_idx" not in state or state["device_out_idx"] is None:
             print("Auto-start: No output device configured, skipping auto-start")
             return
+        # Pre-populate resolved_cache to prevent blank PS/RT at startup
+        for k in ["ps_dynamic", "ps_long_32", "rt_text", "rt_a", "rt_b", "ptyn"]:
+            if k in state and "\\" in state[k]:
+                result = parse_text_source(state[k])
+                if result is not None:
+                    resolved_cache[k] = result
         state["running"] = True
         print(f"Auto-start: Starting RDS encoder (out={state['device_out_idx']}, in={state.get('device_in_idx', -1)})")
         threading.Thread(target=run_audio, daemon=True).start()
@@ -5401,8 +5503,10 @@ UI_HTML = r"""
                 var html = '<div class="text-xs space-y-1">';
                 for (var i = 0; i < eonServices.length; i++) {
                     var svc = eonServices[i];
+                    var tpBadge = svc.tp ? '<span class="bg-green-600 text-white text-xs px-1 rounded ml-1">TP</span>' : '';
+                    var taBadge = svc.ta ? '<span class="bg-yellow-600 text-black text-xs px-1 rounded font-bold ml-1">TA</span>' : '';
                     html += '<div class="p-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer border border-gray-700 hover:border-pink-600 transition-colors" onclick="openEONModalAndEdit(' + i + ')">';
-                    html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span> - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
+                    html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span>' + tpBadge + taBadge + ' - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
                     if (svc.af_list) html += ' <span class="text-xs text-gray-500">(' + svc.af_list + ')</span>';
                     html += '</div>';
                 }
@@ -5439,12 +5543,23 @@ UI_HTML = r"""
 
                 var info = document.createElement('div');
                 info.className = 'flex-1';
-                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + '</div>' +
+                var tpBadge = svc.tp ? '<span class="bg-green-600 text-white text-xs px-1 rounded">TP</span>' : '';
+                var taBadge = svc.ta ? '<span class="bg-yellow-600 text-black text-xs px-1 rounded font-bold">TA</span>' : '';
+                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + ' ' + tpBadge + ' ' + taBadge + '</div>' +
                                 '<div class="text-sm">' + (svc.ps || 'UNKNOWN') + '</div>' +
                                 '<div class="text-xs text-gray-400">' + (svc.af_list || 'No AFs') + '</div>';
 
                 var actions = document.createElement('div');
                 actions.className = 'flex gap-2';
+
+                // TA Toggle Button (only show if TP=1)
+                if (svc.tp) {
+                    var taToggleBtn = document.createElement('button');
+                    taToggleBtn.textContent = svc.ta ? 'TA OFF' : 'TA ON';
+                    taToggleBtn.className = svc.ta ? 'px-3 py-1 bg-yellow-600 hover:bg-yellow-500 text-black font-bold rounded text-xs' : 'px-3 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs';
+                    taToggleBtn.onclick = (function(idx) { return function() { toggleEONTA(idx); }; })(i);
+                    actions.appendChild(taToggleBtn);
+                }
 
                 var editBtn = document.createElement('button');
                 editBtn.textContent = 'Edit';
@@ -5523,6 +5638,16 @@ UI_HTML = r"""
             renderEONServiceList();
             updateEONDisplay();
             cancelEONEdit();
+        }
+
+        function toggleEONTA(idx) {
+            if (idx >= 0 && idx < eonServices.length) {
+                // Toggle TA flag
+                eonServices[idx].ta = eonServices[idx].ta ? 0 : 1;
+                syncEONServices();
+                renderEONServiceList();
+                updateEONDisplay();
+            }
         }
 
         function syncEONServices() {
