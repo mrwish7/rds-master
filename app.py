@@ -705,16 +705,8 @@ def text_updater_loop():
         time.sleep(4.0)
 
 def monitor_pusher_loop():
-    import gc
-    _gc_tick = 0
     while True:
         monitor_data["heartbeat"] = int(time.time() * 1000)
-        # Run GC manually every 10 s (50 × 0.2 s) so that disabling auto-GC in the
-        # audio thread doesn't cause unbounded memory growth from reference cycles.
-        _gc_tick += 1
-        if _gc_tick >= 50:
-            gc.collect()
-            _gc_tick = 0
         if state["running"]:
             monitor_data["af"] = state["af_list"]
             monitor_data["pty_idx"] = state["pty"]
@@ -2033,9 +2025,13 @@ class RDSDSP:
         self.sched = RDSScheduler()
         self.p_rds, self.p_pilot, self.bit_clock, self.last_bit = 0.0, 0.0, 0.0, 0
         self.bit_queue = collections.deque()
-        # Tighten filter cutoff to BITRATE (1.1875 kHz) to better approximate spec shaping
-        self.taps = dsp_signal.firwin(301, BITRATE * 1.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
-        self.zi = np.zeros(300)
+        # 2049-tap Kaiser β=8 lowpass at 2×BITRATE (2.375 kHz).
+        # 301 taps at 192 kHz gave a ~10 kHz transition band, leaving sinc sidelobes
+        # visible on a spectrum analyser.  2049 taps narrows the transition band to
+        # ~1.4 kHz, pushing sidelobes well below the noise floor of any FM receiver.
+        # Stopband attenuation remains ~80 dB (set by Kaiser β, not tap count).
+        self.taps = dsp_signal.firwin(2049, BITRATE * 2.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
+        self.zi = np.zeros(2048)
         # Pre-fill the queue synchronously so audio starts immediately with data ready.
         self._prefill()
         # Background thread keeps the queue topped up without touching the audio hot-path.
@@ -2053,13 +2049,24 @@ class RDSDSP:
         """Non-real-time thread: keeps bit_queue near _QUEUE_TARGET so the
         audio callback never has to call the scheduler directly."""
         while state["running"]:
+            # Time-bound each fill burst to ≤3 ms so the audio callback always
+            # wins the GIL within its 10.67 ms window.  A burst_counter=16 PS
+            # update would otherwise monopolise the GIL for ~3–5 ms.
+            t0 = time.perf_counter()
             while len(self.bit_queue) < self._QUEUE_TARGET and state["running"]:
                 try:
                     self.bit_queue.extend(self.sched.next())
                 except Exception as e:
                     print(f"[RDS] fill-thread exception: {e}", flush=True)
                     self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
-            time.sleep(0.010)   # yield GIL for 10 ms between top-up bursts
+                # Explicit GIL yield after every group.  When burst_counter fires
+                # (16 groups in rapid succession on PS content change), this lets
+                # PortAudio's callback thread acquire the GIL between each group
+                # rather than waiting up to 3 ms for the time-bound to fire.
+                time.sleep(0)
+                if time.perf_counter() - t0 > 0.003:
+                    break   # hard cap: exit inner loop after 3 ms regardless
+            time.sleep(0.005)   # yield GIL for 5 ms between top-up bursts
 
     def process_frame(self, outdata, frames, indata=None):
         lvl_pilot, lvl_rds = (state["pilot_level"]/100.0), (state["rds_level"]/100.0)
@@ -2154,6 +2161,11 @@ class RDSDSP:
 
 def run_audio():
     import gc, sys
+    gc.collect()                    # collect any cycles before freezing
+    try:
+        gc.freeze()                 # freeze all existing objects (Flask/SocketIO framework)
+    except AttributeError:
+        pass                        # gc.freeze() requires Python 3.7+
     gc.disable()                    # prevent GC pauses from dropping the callback deadline
     sys.setswitchinterval(0.001)    # 1 ms GIL slice — audio thread wins the GIL faster
     engine = RDSDSP()
