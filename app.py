@@ -288,6 +288,8 @@ default_state = {
     "en_dab": 0, "dab_channel": "12B", "dab_eid": "CE15", "dab_mode": 1, "dab_es_flag": 0,
     "dab_sid": "0000", "dab_variant": 0,
     "custom_groups": "[]",  # JSON array of custom group data
+    "dynamic_control_enabled": False,  # Enable dynamic RDS control from JSON
+    "dynamic_control_rules": "[]",  # JSON array of dynamic control rules
 
     # Settings
     "rds_freq": 57000,
@@ -299,6 +301,13 @@ default_state = {
 
 state = default_state.copy()
 resolved_cache = {"ps_dynamic": "", "ps_long_32": "", "rt_text": "", "rt_a": "", "rt_b": "", "ptyn": ""}
+
+# Dynamic Control Overrides - parameters controlled remotely (takes priority over state)
+dynamic_overrides = {}  # {parameter_name: override_value}
+
+def get_effective_value(param):
+    """Get effective value: override if exists, otherwise state value"""
+    return dynamic_overrides.get(param, state.get(param))
 
 # Global Monitor Data
 monitor_data = {
@@ -972,11 +981,11 @@ def monitor_pusher_loop():
             monitor_data["af_list"] = state["af_list"]
             monitor_data["af_method"] = state.get("af_method", "A")
             monitor_data["af_pairs"] = state.get("af_pairs", "[]")
-            monitor_data["pty_idx"] = state["pty"]
-            monitor_data["pi"] = state["pi"]
-            monitor_data["tp"] = state.get("tp", 0)
-            monitor_data["ta"] = state.get("ta", 0)
-            monitor_data["ms"] = state.get("ms", 0)
+            monitor_data["pty_idx"] = get_effective_value("pty")
+            monitor_data["pi"] = get_effective_value("pi")
+            monitor_data["tp"] = get_effective_value("tp")
+            monitor_data["ta"] = get_effective_value("ta")
+            monitor_data["ms"] = get_effective_value("ms")
             monitor_data["di_stereo"] = state.get("di_stereo", 1)
             monitor_data["di_head"] = state.get("di_head", 0)
             monitor_data["di_comp"] = state.get("di_comp", 1)
@@ -1005,8 +1014,164 @@ def monitor_pusher_loop():
              })
         time.sleep(0.2)
 
+# Dynamic Control Worker
+def dynamic_control_loop():
+    """Background worker that fetches JSON data and applies control rules."""
+    import urllib.request
+    import urllib.error
+    
+    rule_next_poll = {}  # Track next poll time for each rule
+    
+    while True:
+        try:
+            if not state.get("dynamic_control_enabled", False):
+                # Clear all overrides when disabled - fall back to dataset values
+                if dynamic_overrides:
+                    dynamic_overrides.clear()
+                time.sleep(5.0)
+                continue
+            
+            # Parse rules from JSON
+            try:
+                rules = json.loads(state.get("dynamic_control_rules", "[]"))
+            except Exception as e:
+                rules = []
+            
+            # Clear overrides for parameters that no longer have active rules
+            active_params = set()
+            for rule in rules:
+                if rule.get("enabled", True):
+                    active_params.add(rule.get("rds_param", ""))
+            
+            # Remove overrides for inactive parameters
+            for param in list(dynamic_overrides.keys()):
+                if param not in active_params:
+                    del dynamic_overrides[param]
+            
+            current_time = time.time()
+            
+            for idx, rule in enumerate(rules):
+                if not rule.get("enabled", True):
+                    continue
+                
+                rule_key = f"{idx}_{rule.get('url', '')}"
+                next_poll_time = rule_next_poll.get(rule_key, 0)
+                
+                if current_time < next_poll_time:
+                    continue
+                
+                # Update next poll time
+                poll_interval = rule.get("poll_interval", 5)
+                rule_next_poll[rule_key] = current_time + poll_interval
+                
+                try:
+                    # Fetch JSON data
+                    url = rule.get("url", "")
+                    if not url:
+                        continue
+                    
+                    req = urllib.request.Request(url)
+                    req.add_header('User-Agent', 'RDS-Encoder-Dynamic-Control/1.0')
+                    
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        json_data = json.loads(response.read().decode('utf-8'))
+                    
+                    # Extract field value using dot notation path
+                    field_path = rule.get("field_path", "")
+                    value = json_data
+                    
+                    for key in field_path.split('.'):
+                        if isinstance(value, dict):
+                            value = value.get(key)
+                        else:
+                            value = None
+                            break
+                    
+                    if value is None:
+                        continue
+                    
+                    # Apply mapping based on type
+                    rds_param = rule.get("rds_param", "")
+                    mapping_type = rule.get("mapping_type", "direct")
+                    custom_mapping = rule.get("custom_mapping")
+                    
+                    new_value = None
+                    
+                    if mapping_type == "direct":
+                        # Direct 0/1 → 0/1
+                        new_value = int(value) if str(value).isdigit() else 0
+                    
+                    elif mapping_type == "boolean":
+                        # true/false → 1/0
+                        new_value = 1 if value in [True, "true", "True", 1, "1"] else 0
+                    
+                    elif mapping_type == "text_match":
+                        # Custom text mapping
+                        if custom_mapping and isinstance(custom_mapping, dict):
+                            new_value = custom_mapping.get(str(value))
+                    
+                    elif mapping_type == "passthrough":
+                        # Pass through as-is (for PTYN, PI)
+                        new_value = str(value)
+                    
+                    elif mapping_type == "pty_name":
+                        # Map PTY name to number
+                        pty_map = {
+                            "None": 0, "News": 1, "Current Affairs": 2, "Information": 3,
+                            "Sport": 4, "Education": 5, "Drama": 6, "Culture": 7,
+                            "Science": 8, "Varied": 9, "Pop Music": 10, "Rock Music": 11,
+                            "Easy Listening": 12, "Light Classical": 13, "Serious Classical": 14,
+                            "Other Music": 15, "Weather": 16, "Finance": 17, "Children's": 18,
+                            "Social Affairs": 19, "Religion": 20, "Phone-In": 21, "Travel": 22,
+                            "Leisure": 23, "Jazz": 24, "Country": 25, "National Music": 26,
+                            "Oldies": 27, "Folk Music": 28, "Documentary": 29, "Alarm Test": 30, "Alarm": 31
+                        }
+                        if custom_mapping and isinstance(custom_mapping, dict):
+                            # Use custom mapping first
+                            new_value = custom_mapping.get(str(value))
+                        else:
+                            # Use standard PTY mapping
+                            new_value = pty_map.get(str(value))
+                    
+                    elif mapping_type == "pty_number":
+                        # Direct PTY number
+                        new_value = int(value) if str(value).isdigit() else 0
+                    
+                    # Apply the new value to state
+                    if new_value is not None and rds_param in state:
+                        # Special handling for certain parameters
+                        if rds_param in ["ms", "tp", "ta"]:
+                            new_value = int(new_value) if isinstance(new_value, (int, float, bool)) else 0
+                        elif rds_param == "pty":
+                            new_value = max(0, min(31, int(new_value))) if isinstance(new_value, (int, float)) else 0
+                        elif rds_param == "pi":
+                            # Validate hex format
+                            try:
+                                new_value = format(int(str(new_value), 16), '04X')
+                            except:
+                                continue
+                        elif rds_param == "ptyn":
+                            # Truncate to 8 characters and apply EBU Latin
+                            new_value = convert_to_ebu_latin(str(new_value)[:8])
+                        
+                        # Store as override (don't modify state - state is the fallback)
+                        dynamic_overrides[rds_param] = new_value
+                        
+                except urllib.error.URLError as e:
+                    # Network error - silently continue
+                    pass
+                except Exception as e:
+                    # Other errors - silently continue
+                    pass
+            
+            time.sleep(1.0)  # Check rules every second (actual polling is per-rule)
+            
+        except Exception as e:
+            time.sleep(5.0)
+
 threading.Thread(target=text_updater_loop, daemon=True).start()
 threading.Thread(target=monitor_pusher_loop, daemon=True).start()
+threading.Thread(target=dynamic_control_loop, daemon=True).start()
 
 class Sanitize:
     @staticmethod
@@ -1021,7 +1186,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -1049,11 +1214,12 @@ class RDSHelper:
         return ((reg >> 16) & 0x3FF) ^ offset
 
     @staticmethod
+    @staticmethod
     def get_group_bits(g_type, ver, b2_tail, b3_val, b4_val):
-        try: pi_v = int(state["pi"], 16)
+        try: pi_v = int(get_effective_value("pi"), 16)
         except: pi_v = 0x0000
         b1 = (pi_v << 10) | RDSHelper.crc(pi_v, OFFSETS['A'])
-        b2_v = (int(g_type) << 12) | (int(ver) << 11) | (int(state["tp"]) << 10) | (int(state["pty"]) << 5) | (int(b2_tail) & 0x1F)
+        b2_v = (int(g_type) << 12) | (int(ver) << 11) | (int(get_effective_value("tp")) << 10) | (int(get_effective_value("pty")) << 5) | (int(b2_tail) & 0x1F)
         b2 = (b2_v << 10) | RDSHelper.crc(b2_v, OFFSETS['B'])
         b3 = (int(b3_val) << 10) | RDSHelper.crc(b3_val, OFFSETS['Cp'] if ver else OFFSETS['C'])
         b4 = (int(b4_val) << 10) | RDSHelper.crc(b4_val, OFFSETS['D'])
@@ -1110,7 +1276,7 @@ class RDSScheduler:
         self._custom_groups_cache_str = None
 
     def get_text(self, key):
-        val = state.get(key, "")
+        val = get_effective_value(key) if key in ["ptyn"] else state.get(key, "")
         return resolved_cache.get(key, val) if "\\" in val else val
 
     def _get_custom_groups(self):
@@ -1715,7 +1881,7 @@ class RDSScheduler:
 
             seg = self.ps_ptr % 4
             self.ps_ptr += 1
-            tail = (state["ta"]<<4)|(state["ms"]<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
+            tail = (get_effective_value("ta")<<4)|(get_effective_value("ms")<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
             b3 = 0xE0E0
             
             if state["en_af"] and g_ver == 0:
@@ -2508,7 +2674,7 @@ class RDSScheduler:
             txt_bytes = text_to_rds_bytes(txt)
             seg = self.ps_ptr % 4
             self.ps_ptr += 1
-            tail = (state["ta"]<<4)|(state["ms"]<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
+            tail = (get_effective_value("ta")<<4)|(get_effective_value("ms")<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
             return RDSHelper.get_group_bits(0, 0, tail, 0xE0E0, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
 
         # Group not implemented - send PS group to prevent recursion and blanks
@@ -2518,7 +2684,7 @@ class RDSScheduler:
         txt_bytes = text_to_rds_bytes(txt)
         seg = self.ps_ptr % 4
         self.ps_ptr += 1
-        tail = (state["ta"]<<4)|(state["ms"]<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
+        tail = (get_effective_value("ta")<<4)|(get_effective_value("ms")<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
         return RDSHelper.get_group_bits(0, 0, tail, 0xE0E0, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
 
 # --- DSP ENGINE ---
@@ -2971,6 +3137,41 @@ def delete_dataset(num):
         save_datasets()
         return jsonify({'success': True})
     return jsonify({'error': 'Cannot delete last dataset'}), 400
+
+# Dynamic Control API Routes
+@app.route('/dynamic_control/fetch_json', methods=['POST'])
+def fetch_json_for_dynamic_control():
+    """Proxy endpoint to fetch JSON URLs and avoid CORS issues"""
+    if not session.get('auth'): 
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    try:
+        data = request.json
+        url = data.get('url', '')
+        
+        if not url:
+            return jsonify({'error': 'URL is required'}), 400
+        
+        import urllib.request
+        import urllib.error
+        
+        req = urllib.request.Request(url)
+        req.add_header('User-Agent', 'RDS-Encoder-Dynamic-Control/1.0')
+        
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                content = response.read().decode('utf-8')
+                json_data = json.loads(content)
+                return jsonify({'success': True, 'data': json_data})
+        except urllib.error.HTTPError as e:
+            return jsonify({'error': f'HTTP {e.code}: {e.reason}'}), 400
+        except urllib.error.URLError as e:
+            return jsonify({'error': f'Connection error: {str(e.reason)}'}), 400
+        except json.JSONDecodeError as e:
+            return jsonify({'error': f'Invalid JSON: {str(e)}'}), 400
+            
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch: {str(e)}'}), 500
 
 # Custom Groups API Routes
 @app.route('/custom_groups/export', methods=['GET'])
@@ -4097,6 +4298,30 @@ UI_HTML = r"""
                          </div>
                     </div>
                  </div>
+
+                 <div class="section">
+                    <div class="section-header">Basic Dynamic Control</div>
+                    <div class="section-body">
+                         <div class="flex justify-between items-center mb-3">
+                             <div>
+                                 <label>Dynamic RDS Parameter Control</label>
+                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN) from JSON data</div>
+                                 <div class="text-[9px] text-amber-600 font-semibold">⚠️ Changes take effect immediately</div>
+                             </div>
+                             <input type="checkbox" class="toggle-checkbox" id="dynamic_control_enabled" {% if state.dynamic_control_enabled %}checked{% endif %} onchange="sync()">
+                         </div>
+
+                         <input type="hidden" id="dynamic_control_rules" value="{{state.dynamic_control_rules}}">
+
+                         <div class="mb-3">
+                             <button onclick="openDynamicControlModal()" class="bg-cyan-600 hover:bg-cyan-500 text-white rounded px-3 py-2 text-sm w-full">Manage Control Rules</button>
+                         </div>
+
+                         <div id="dynamic_control_rules_display" class="text-xs text-gray-400">
+                             No control rules configured
+                         </div>
+                    </div>
+                 </div>
             </div>
 
             <div id="audio" class="content">
@@ -4489,6 +4714,127 @@ UI_HTML = r"""
 
             <div class="flex justify-end mt-4">
                 <button onclick="closeEONModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="dynamic_control_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal-content" style="max-width: 700px;">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="dynamic_control_modal_title" class="text-lg font-bold">Basic Dynamic Control</h3>
+                <button onclick="closeDynamicControlModal()" class="text-2xl leading-none hover:text-pink-600">×</button>
+            </div>
+
+            <div class="mb-4 bg-blue-900 border border-blue-700 rounded p-3">
+                <div class="text-xs text-blue-200 mb-2">📡 Fetch JSON data and map fields to RDS parameters</div>
+                <div class="text-[10px] text-blue-300">Examples: Toggle speech/music based on MS field, change PTY by program type, pass through PTYN text</div>
+            </div>
+
+            <div class="mb-4">
+                <div id="dynamic_control_rule_list" class="space-y-2 mb-3">
+                </div>
+                <button onclick="addDynamicControlRule()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm w-full">+ Add Control Rule</button>
+            </div>
+
+            <div id="dynamic_control_edit_form" style="display: none;" class="border-t border-gray-700 pt-4 mt-4">
+                <input type="hidden" id="dc_edit_idx" value="">
+
+                <div class="space-y-3">
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Rule Name</label>
+                        <input type="text" id="dc_name" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="e.g., Toggle Stereo">
+                        <div class="text-[10px] text-gray-500 mt-1">Descriptive name for this rule</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">JSON URL</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="dc_url" class="flex-1 bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder="http://localhost:8080/metadata.json">
+                            <button onclick="testDynamicControlURL()" class="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1 text-xs whitespace-nowrap">🔍 Test & Browse</button>
+                        </div>
+                        <div class="text-[10px] text-gray-500 mt-1">HTTP/HTTPS endpoint that returns JSON</div>
+                    </div>
+
+                    <div id="dc_json_browser" style="display: none;" class="bg-gray-900 border border-gray-700 rounded p-3 max-h-64 overflow-y-auto">
+                        <div class="flex justify-between items-center mb-2">
+                            <div class="text-xs text-green-400">✓ JSON fetched successfully - Click a field to select it</div>
+                            <button onclick="closeDynamicControlBrowser()" class="text-xs text-gray-400 hover:text-white">✕</button>
+                        </div>
+                        <div id="dc_json_tree" class="text-xs font-mono"></div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Selected JSON Field</label>
+                        <input type="text" id="dc_field_path" readonly class="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 font-mono text-xs text-cyan-400" placeholder="Click 'Test & Browse' to select a field">
+                        <div class="text-[10px] text-gray-500 mt-1">Selected field path (e.g., data.audio.stereo)</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">RDS Parameter</label>
+                        <select id="dc_rds_param" class="w-full bg-black border border-gray-600 rounded px-2 py-1" onchange="updateDynamicControlParamUI()">
+                            <option value="">Select parameter...</option>
+                            <option value="ms">MS (Music/Speech)</option>
+                            <option value="pty">PTY (Programme Type)</option>
+                            <option value="ptyn">PTYN (Programme Type Name)</option>
+                            <option value="tp">TP (Traffic Programme)</option>
+                            <option value="ta">TA (Traffic Announcement)</option>
+                            <option value="pi">PI (Programme Identification)</option>
+                        </select>
+                    </div>
+
+                    <div id="dc_mapping_section">
+                        <div id="dc_quick_setup" style="display: none;" class="bg-gradient-to-r from-blue-900 to-blue-800 border border-blue-600 rounded p-3 mb-3">
+                            <div class="text-sm font-bold text-blue-200 mb-2">⚡ Quick Setup</div>
+                            <div id="dc_quick_suggestions" class="space-y-2"></div>
+                        </div>
+
+                        <div id="dc_mapping_auto" style="display: none;">
+                            <label class="text-xs text-gray-400 mb-1 block">Mapping Type</label>
+                            <select id="dc_mapping_type" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                                <option value="direct">Direct (0/1 → 0/1)</option>
+                                <option value="boolean">Boolean (true/false → 1/0)</option>
+                                <option value="text_match">Text Match (custom mapping)</option>
+                                <option value="passthrough">Pass Through (JSON value → RDS value)</option>
+                            </select>
+                        </div>
+
+                        <div id="dc_pty_mapping" style="display: none;">
+                            <label class="text-xs text-gray-400 mb-1 block">PTY Mapping</label>
+                            <div class="bg-gray-900 border border-gray-700 rounded p-2 max-h-48 overflow-y-auto space-y-1" id="dc_pty_list"></div>
+                            <div class="text-[10px] text-gray-500 mt-1">Map JSON values to PTY codes - click to add mappings</div>
+                        </div>
+
+                        <div id="dc_custom_mapping_section" style="display: none;">
+                            <label class="text-xs text-gray-400 mb-1 block">Value Mappings</label>
+                            <div id="dc_current_mappings" class="mb-2" style="display: none;"></div>
+                            <div id="dc_value_mappings" class="space-y-2 mb-2"></div>
+                            <button onclick="addDynamicControlValueMapping()" class="bg-gray-700 hover:bg-gray-600 text-white rounded px-2 py-1 text-xs w-full">+ Add Mapping</button>
+                            <div class="text-[10px] text-gray-500 mt-1">Map specific JSON values to RDS values</div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Poll Interval (seconds)</label>
+                        <input type="number" id="dc_poll_interval" min="1" max="300" value="5" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                        <div class="text-[10px] text-gray-500 mt-1">How often to fetch JSON (1-300 seconds)</div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between bg-black p-2 rounded">
+                            <label class="text-xs text-gray-400">Enabled</label>
+                            <input type="checkbox" class="toggle-checkbox" id="dc_enabled" checked>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-4">
+                    <button onclick="cancelDynamicControlEdit()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                    <button onclick="saveDynamicControlRule()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm text-white font-bold">Save</button>
+                </div>
+            </div>
+
+            <div class="flex justify-end mt-4">
+                <button onclick="closeDynamicControlModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
             </div>
         </div>
     </div>
@@ -6317,7 +6663,8 @@ UI_HTML = r"""
                 dab_sid: getVal('dab_sid'), dab_variant: getVal('dab_variant'),
                 en_eon: getVal('en_eon'), eon_services: getVal('eon_services'),
                 rds_freq: getVal('rds_freq'),
-                group_sequence: getVal('group_sequence'), scheduler_auto: getVal('scheduler_auto')
+                group_sequence: getVal('group_sequence'), scheduler_auto: getVal('scheduler_auto'),
+                dynamic_control_enabled: getVal('dynamic_control_enabled'), dynamic_control_rules: getVal('dynamic_control_rules')
             };
             socket.emit('update', data);
         }
@@ -6651,6 +6998,654 @@ UI_HTML = r"""
             setTimeout(function() {
                 editEONService(idx);
             }, 100);
+        }
+
+        // Dynamic Control Management
+        var dynamicControlRules = [];
+
+        function loadDynamicControlRules() {
+            try {
+                var hiddenInput = document.getElementById('dynamic_control_rules');
+                if (hiddenInput && hiddenInput.value) {
+                    dynamicControlRules = JSON.parse(hiddenInput.value);
+                }
+            } catch (e) {
+                dynamicControlRules = [];
+            }
+        }
+
+        function openDynamicControlModal() {
+            loadDynamicControlRules();
+            renderDynamicControlRuleList();
+            document.getElementById('dynamic_control_modal').style.display = 'flex';
+            document.getElementById('dynamic_control_edit_form').style.display = 'none';
+        }
+
+        function closeDynamicControlModal() {
+            document.getElementById('dynamic_control_modal').style.display = 'none';
+            document.getElementById('dynamic_control_edit_form').style.display = 'none';
+        }
+
+        function renderDynamicControlRuleList() {
+            var container = document.getElementById('dynamic_control_rule_list');
+            container.innerHTML = '';
+
+            if (dynamicControlRules.length === 0) {
+                container.innerHTML = '<div class="text-xs text-gray-400 text-center py-4">No control rules configured. Click Add Control Rule to create one.</div>';
+                return;
+            }
+
+            for (var i = 0; i < dynamicControlRules.length; i++) {
+                var rule = dynamicControlRules[i];
+                var card = document.createElement('div');
+                card.className = 'bg-black border border-gray-700 rounded p-3 flex justify-between items-center';
+                if (!rule.enabled) {
+                    card.style.opacity = '0.5';
+                }
+
+                var info = document.createElement('div');
+                info.className = 'flex-1';
+                
+                var statusBadge = rule.enabled ? 
+                    '<span class="inline-block bg-green-600 text-white text-[10px] px-2 py-0.5 rounded mr-2">ENABLED</span>' : 
+                    '<span class="inline-block bg-gray-600 text-white text-[10px] px-2 py-0.5 rounded mr-2">DISABLED</span>';
+                
+                var rdsParamDisplay = {
+                    'ms': 'MS',
+                    'pty': 'PTY',
+                    'ptyn': 'PTYN',
+                    'tp': 'TP',
+                    'ta': 'TA',
+                    'pi': 'PI'
+                }[rule.rds_param] || rule.rds_param;
+                
+                var mappingInfo = rule.mapping_type;
+                if (rule.custom_mapping && Object.keys(rule.custom_mapping).length > 0) {
+                    mappingInfo += ' (' + Object.keys(rule.custom_mapping).length + ' mappings)';
+                }
+                
+                info.innerHTML = statusBadge +
+                                '<div class="font-semibold text-sm text-pink-400">' + (rule.name || 'Unnamed Rule') + '</div>' +
+                                '<div class="text-xs text-gray-400 mt-1">' + rule.field_path + ' → ' + rdsParamDisplay + '</div>' +
+                                '<div class="text-[10px] text-gray-500 mt-1">Poll: ' + rule.poll_interval + 's | ' + mappingInfo + '</div>';
+
+                var actions = document.createElement('div');
+                actions.className = 'flex gap-2';
+
+                var editBtn = document.createElement('button');
+                editBtn.textContent = 'Edit';
+                editBtn.className = 'px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs';
+                editBtn.onclick = (function(idx) { return function() { editDynamicControlRule(idx); }; })(i);
+
+                var delBtn = document.createElement('button');
+                delBtn.textContent = 'Delete';
+                delBtn.className = 'px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs';
+                delBtn.onclick = (function(idx) { return function() { deleteDynamicControlRule(idx); }; })(i);
+
+                actions.appendChild(editBtn);
+                actions.appendChild(delBtn);
+                card.appendChild(info);
+                card.appendChild(actions);
+                container.appendChild(card);
+            }
+        }
+
+        function addDynamicControlRule() {
+            document.getElementById('dc_edit_idx').value = '';
+            document.getElementById('dc_name').value = '';
+            document.getElementById('dc_url').value = '';
+            document.getElementById('dc_field_path').value = '';
+            document.getElementById('dc_rds_param').value = '';
+            document.getElementById('dc_mapping_type').value = 'direct';
+            document.getElementById('dc_poll_interval').value = '5';
+            document.getElementById('dc_enabled').checked = true;
+            document.getElementById('dc_value_mappings').innerHTML = '';
+            ptyMappings = {};
+            currentDynamicControlFieldValue = null;
+            currentDynamicControlFieldType = null;
+            document.getElementById('dc_quick_setup').style.display = 'none';
+            closeDynamicControlBrowser();
+            updateDynamicControlParamUI();
+            document.getElementById('dynamic_control_modal_title').textContent = 'Add Control Rule';
+            document.getElementById('dynamic_control_edit_form').style.display = 'block';
+        }
+
+        function editDynamicControlRule(idx) {
+            var rule = dynamicControlRules[idx];
+            document.getElementById('dc_edit_idx').value = idx;
+            document.getElementById('dc_name').value = rule.name || '';
+            document.getElementById('dc_url').value = rule.url || '';
+            document.getElementById('dc_field_path').value = rule.field_path || '';
+            document.getElementById('dc_rds_param').value = rule.rds_param || '';
+            document.getElementById('dc_mapping_type').value = rule.mapping_type || 'direct';
+            document.getElementById('dc_poll_interval').value = rule.poll_interval || 5;
+            document.getElementById('dc_enabled').checked = rule.enabled !== false;
+            
+            // Clear existing mappings
+            document.getElementById('dc_value_mappings').innerHTML = '';
+            ptyMappings = {};
+            currentDynamicControlFieldValue = null;
+            currentDynamicControlFieldType = null;
+            document.getElementById('dc_quick_setup').style.display = 'none';
+            
+            // Load PTY mappings if present
+            if (rule.custom_mapping && rule.rds_param === 'pty') {
+                ptyMappings = rule.custom_mapping;
+            }
+            
+            // Load custom value mappings
+            if (rule.custom_mapping && (rule.mapping_type === 'text_match' || rule.mapping_type === 'boolean')) {
+                var container = document.getElementById('dc_value_mappings');
+                Object.keys(rule.custom_mapping).forEach(function(key) {
+                    addDynamicControlValueMapping();
+                    var rows = container.querySelectorAll('.flex');
+                    var lastRow = rows[rows.length - 1];
+                    lastRow.children[0].value = key;
+                    lastRow.children[1].value = rule.custom_mapping[key];
+                });
+            }
+            
+            updateDynamicControlParamUI();
+            document.getElementById('dynamic_control_modal_title').textContent = 'Edit Control Rule';
+            document.getElementById('dynamic_control_edit_form').style.display = 'block';
+        }
+
+        function deleteDynamicControlRule(idx) {
+            if (!confirm('Delete this control rule?')) return;
+            dynamicControlRules.splice(idx, 1);
+            syncDynamicControlRules();
+            renderDynamicControlRuleList();
+            updateDynamicControlDisplay();
+        }
+
+        function cancelDynamicControlEdit() {
+            document.getElementById('dynamic_control_edit_form').style.display = 'none';
+            document.getElementById('dynamic_control_modal_title').textContent = 'Basic Dynamic Control';
+        }
+
+        function saveDynamicControlRule() {
+            var idx = document.getElementById('dc_edit_idx').value;
+            var rdsParam = document.getElementById('dc_rds_param').value;
+            
+            // Build custom mapping based on parameter type
+            var customMapping = null;
+            var mappingType = document.getElementById('dc_mapping_type').value;
+            
+            if (rdsParam === 'pty' && Object.keys(ptyMappings).length > 0) {
+                // PTY mappings
+                customMapping = ptyMappings;
+                mappingType = 'pty_name';
+            } else if (mappingType === 'text_match') {
+                // Custom value mappings
+                customMapping = {};
+                var rows = document.getElementById('dc_value_mappings').querySelectorAll('.flex');
+                rows.forEach(function(row) {
+                    var jsonVal = row.children[0].value.trim();
+                    var rdsVal = row.children[1].value.trim();
+                    if (jsonVal && rdsVal) {
+                        customMapping[jsonVal] = rdsVal;
+                    }
+                });
+                if (Object.keys(customMapping).length === 0) {
+                    customMapping = null;
+                }
+            }
+            
+            var rule = {
+                name: document.getElementById('dc_name').value || 'Unnamed Rule',
+                url: document.getElementById('dc_url').value || '',
+                field_path: document.getElementById('dc_field_path').value || '',
+                rds_param: rdsParam,
+                mapping_type: mappingType,
+                custom_mapping: customMapping,
+                poll_interval: parseInt(document.getElementById('dc_poll_interval').value) || 5,
+                enabled: document.getElementById('dc_enabled').checked
+            };
+
+            // Validation
+            if (!rule.url) {
+                alert('JSON URL is required');
+                return;
+            }
+            if (!rule.field_path) {
+                alert('Please select a JSON field (click "Test & Browse")');
+                return;
+            }
+            if (!rule.rds_param) {
+                alert('RDS Parameter is required');
+                return;
+            }
+
+            if (idx === '') {
+                dynamicControlRules.push(rule);
+            } else {
+                dynamicControlRules[parseInt(idx)] = rule;
+            }
+
+            syncDynamicControlRules();
+            renderDynamicControlRuleList();
+            updateDynamicControlDisplay();
+            cancelDynamicControlEdit();
+        }
+
+        function syncDynamicControlRules() {
+            var hiddenInput = document.getElementById('dynamic_control_rules');
+            if (hiddenInput) {
+                hiddenInput.value = JSON.stringify(dynamicControlRules);
+            }
+            socket.emit('update', { dynamic_control_rules: JSON.stringify(dynamicControlRules) });
+        }
+
+        function updateDynamicControlDisplay() {
+            var enabledCount = dynamicControlRules.filter(function(r) { return r.enabled !== false; }).length;
+            var totalCount = dynamicControlRules.length;
+            var displayElem = document.getElementById('dynamic_control_rules_display');
+            if (displayElem) {
+                displayElem.textContent = enabledCount + ' active / ' + totalCount + ' total rules';
+            }
+        }
+
+        var currentDynamicControlJSON = null;
+        var currentDynamicControlFieldValue = null;
+        var currentDynamicControlFieldType = null;
+
+        function testDynamicControlURL() {
+            var url = document.getElementById('dc_url').value.trim();
+            if (!url) {
+                alert('Please enter a JSON URL first');
+                return;
+            }
+
+            var browser = document.getElementById('dc_json_browser');
+            var tree = document.getElementById('dc_json_tree');
+            tree.innerHTML = '<div class="text-gray-400">🔄 Fetching JSON...</div>';
+            browser.style.display = 'block';
+
+            // Use backend proxy to avoid CORS issues
+            fetch('/dynamic_control/fetch_json', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: url})
+            })
+                .then(function(response) {
+                    return response.json().then(function(data) {
+                        if (!response.ok) {
+                            throw new Error(data.error || 'HTTP ' + response.status);
+                        }
+                        return data;
+                    });
+                })
+                .then(function(result) {
+                    if (result.success && result.data) {
+                        currentDynamicControlJSON = result.data;
+                        renderDynamicControlJSONTree(result.data, tree, '');
+                    } else {
+                        throw new Error(result.error || 'Unknown error');
+                    }
+                })
+                .catch(function(error) {
+                    tree.innerHTML = '<div class="text-red-400">✗ ' + error.message + '</div>' +
+                                    '<div class="text-[10px] text-gray-500 mt-2">Tips: Check URL is correct and accessible from this server</div>';
+                });
+        }
+
+        function renderDynamicControlJSONTree(obj, container, path) {
+            container.innerHTML = '';
+            
+            function renderNode(value, key, currentPath) {
+                var fullPath = currentPath ? currentPath + '.' + key : key;
+                var div = document.createElement('div');
+                div.className = 'py-0.5';
+                
+                if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                    // Object node (expandable)
+                    var header = document.createElement('div');
+                    header.className = 'text-gray-400 cursor-pointer hover:text-white';
+                    header.innerHTML = '▶ ' + key + ' <span class="text-gray-600">{...}</span>';
+                    
+                    var children = document.createElement('div');
+                    children.className = 'pl-4 border-l border-gray-700 ml-2';
+                    children.style.display = 'none';
+                    
+                    header.onclick = function(e) {
+                        e.stopPropagation();
+                        if (children.style.display === 'none') {
+                            children.style.display = 'block';
+                            header.innerHTML = '▼ ' + key + ' <span class="text-gray-600">{...}</span>';
+                            // Render children on first expand
+                            if (!children.hasChildNodes()) {
+                                Object.keys(value).forEach(function(childKey) {
+                                    children.appendChild(renderNode(value[childKey], childKey, fullPath));
+                                });
+                            }
+                        } else {
+                            children.style.display = 'none';
+                            header.innerHTML = '▶ ' + key + ' <span class="text-gray-600">{...}</span>';
+                        }
+                    };
+                    
+                    div.appendChild(header);
+                    div.appendChild(children);
+                } else if (Array.isArray(value)) {
+                    // Array node
+                    var header = document.createElement('div');
+                    header.className = 'text-gray-400';
+                    header.innerHTML = '▶ ' + key + ' <span class="text-gray-600">[' + value.length + ' items]</span>';
+                    div.appendChild(header);
+                } else {
+                    // Leaf node (clickable)
+                    var leaf = document.createElement('div');
+                    leaf.className = 'cursor-pointer hover:bg-gray-800 px-2 py-1 rounded transition-colors';
+                    
+                    var valueStr = JSON.stringify(value);
+                    if (valueStr.length > 40) valueStr = valueStr.substring(0, 40) + '...';
+                    
+                    var typeColor = typeof value === 'number' ? 'text-blue-400' : 
+                                   typeof value === 'boolean' ? 'text-yellow-400' : 
+                                   value === null ? 'text-gray-500' :
+                                   'text-green-400';
+                    
+                    leaf.innerHTML = '<span class="text-cyan-400">' + key + '</span>: ' +
+                                    '<span class="' + typeColor + '">' + valueStr + '</span> ' +
+                                    '<span class="text-[10px] text-gray-500">(' + typeof value + ')</span>';
+                    
+                    leaf.onclick = function(e) {
+                        e.stopPropagation();
+                        document.getElementById('dc_field_path').value = fullPath;
+                        // Store value and type for smart suggestions
+                        currentDynamicControlFieldValue = value;
+                        currentDynamicControlFieldType = typeof value;
+                        // Visual feedback
+                        leaf.style.backgroundColor = '#065f46';
+                        setTimeout(function() { leaf.style.backgroundColor = ''; }, 300);
+                        // Show quick setup suggestions
+                        showDynamicControlQuickSetup();
+                    };
+                    
+                    div.appendChild(leaf);
+                }
+                
+                return div;
+            }
+            
+            Object.keys(obj).forEach(function(key) {
+                container.appendChild(renderNode(obj[key], key, path));
+            });
+        }
+
+        function suggestDynamicControlMapping(value) {
+            var mappingType = document.getElementById('dc_mapping_type');
+            if (typeof value === 'boolean') {
+                mappingType.value = 'boolean';
+            } else if (typeof value === 'number' && (value === 0 || value === 1)) {
+                mappingType.value = 'direct';
+            } else if (typeof value === 'string') {
+                mappingType.value = 'passthrough';
+            }
+        }
+
+        function closeDynamicControlBrowser() {
+            document.getElementById('dc_json_browser').style.display = 'none';
+        }
+
+        function showDynamicControlQuickSetup() {
+            var quickSetup = document.getElementById('dc_quick_setup');
+            var suggestions = document.getElementById('dc_quick_suggestions');
+            var param = document.getElementById('dc_rds_param').value;
+            
+            suggestions.innerHTML = '';
+            
+            if (!param || currentDynamicControlFieldValue === null) {
+                quickSetup.style.display = 'none';
+                return;
+            }
+            
+            // Generate suggestions based on parameter and value type
+            if (param === 'ms' || param === 'tp' || param === 'ta') {
+                // Binary parameters - suggest both options
+                quickSetup.style.display = 'block';
+                
+                if (currentDynamicControlFieldType === 'boolean') {
+                    suggestions.innerHTML = 
+                        '<div class="text-xs text-blue-200 mb-2">Detected boolean field. Click to set up:</div>' +
+                        '<div class="flex gap-2">' +
+                        '<button onclick="applyQuickMapping(\'boolean\', {\'true\': 1, \'false\': 0})" class="flex-1 bg-green-700 hover:bg-green-600 text-white rounded px-3 py-2 text-xs">' +
+                        '<div class="font-bold">Use Boolean</div>' +
+                        '<div class="text-[10px] opacity-80">true → 1, false → 0</div>' +
+                        '</button>' +
+                        '</div>';
+                } else if (currentDynamicControlFieldType === 'number') {
+                    suggestions.innerHTML = 
+                        '<div class="text-xs text-blue-200 mb-2">Detected numeric field. Click to set up:</div>' +
+                        '<div class="flex gap-2">' +
+                        '<button onclick="applyQuickMapping(\'direct\', null)" class="flex-1 bg-green-700 hover:bg-green-600 text-white rounded px-3 py-2 text-xs">' +
+                        '<div class="font-bold">Direct Mapping</div>' +
+                        '<div class="text-[10px] opacity-80">0 → 0, 1 → 1</div>' +
+                        '</button>' +
+                        '</div>';
+                } else if (currentDynamicControlFieldType === 'string') {
+                    suggestions.innerHTML = 
+                        '<div class="text-xs text-blue-200 mb-2">Detected text field. Set up custom mappings:</div>' +
+                        '<div class="flex gap-2">' +
+                        '<button onclick="applyQuickMapping(\'text_match\', {\'Music\': 0, \'Speech\': 1})" class="flex-1 bg-green-700 hover:bg-green-600 text-white rounded px-3 py-2 text-xs">' +
+                        '<div class="font-bold">Music/Speech</div>' +
+                        '<div class="text-[10px] opacity-80">"Music" → 0, "Speech" → 1</div>' +
+                        '</button>' +
+                        '<button onclick="showCustomMappingBuilder()" class="flex-1 bg-blue-700 hover:bg-blue-600 text-white rounded px-3 py-2 text-xs">' +
+                        '<div class="font-bold">Custom</div>' +
+                        '<div class="text-[10px] opacity-80">Define your own</div>' +
+                        '</button>' +
+                        '</div>';
+                }
+            } else if (param === 'ptyn' || param === 'pi') {
+                quickSetup.style.display = 'block';
+                suggestions.innerHTML = 
+                    '<div class="text-xs text-blue-200 mb-2">Pass-through mode - field value will be used directly</div>' +
+                    '<button onclick="applyQuickMapping(\'passthrough\', null)" class="w-full bg-green-700 hover:bg-green-600 text-white rounded px-3 py-2 text-xs">' +
+                    '<div class="font-bold">✓ Use Pass-Through</div>' +
+                    '<div class="text-[10px] opacity-80">JSON value → RDS parameter</div>' +
+                    '</button>';
+            } else {
+                quickSetup.style.display = 'none';
+            }
+        }
+
+        function applyQuickMapping(mappingType, customMapping) {
+            document.getElementById('dc_mapping_type').value = mappingType;
+            
+            if (customMapping) {
+                // Pre-populate value mappings
+                var container = document.getElementById('dc_value_mappings');
+                container.innerHTML = '';
+                Object.keys(customMapping).forEach(function(key) {
+                    addDynamicControlValueMapping();
+                    var rows = container.querySelectorAll('.flex');
+                    var lastRow = rows[rows.length - 1];
+                    lastRow.children[0].value = key;
+                    lastRow.children[1].value = customMapping[key];
+                });
+                document.getElementById('dc_custom_mapping_section').style.display = 'block';
+            }
+            
+            updateDynamicControlParamUI();
+            document.getElementById('dc_quick_setup').style.display = 'none';
+        }
+
+        function showCustomMappingBuilder() {
+            document.getElementById('dc_mapping_type').value = 'text_match';
+            updateDynamicControlParamUI();
+            document.getElementById('dc_quick_setup').style.display = 'none';
+        }
+
+        function updateDynamicControlParamUI() {
+            var param = document.getElementById('dc_rds_param').value;
+            var autoMapping = document.getElementById('dc_mapping_auto');
+            var ptyMapping = document.getElementById('dc_pty_mapping');
+            var customMapping = document.getElementById('dc_custom_mapping_section');
+            
+            // Hide all
+            autoMapping.style.display = 'none';
+            ptyMapping.style.display = 'none';
+            customMapping.style.display = 'none';
+            
+            if (param === 'pty') {
+                // Show PTY mapping interface
+                ptyMapping.style.display = 'block';
+                renderPTYMappingList();
+            } else if (param === 'ms' || param === 'tp' || param === 'ta') {
+                // Show simple mapping options
+                autoMapping.style.display = 'block';
+                var mappingType = document.getElementById('dc_mapping_type').value;
+                if (mappingType === 'text_match' || document.getElementById('dc_value_mappings').children.length > 0) {
+                    customMapping.style.display = 'block';
+                    updateCurrentMappingsDisplay();
+                }
+                // Show quick setup if field is selected
+                if (currentDynamicControlFieldValue !== null) {
+                    showDynamicControlQuickSetup();
+                }
+            } else if (param === 'ptyn' || param === 'pi') {
+                // Passthrough only
+                autoMapping.style.display = 'block';
+                document.getElementById('dc_mapping_type').value = 'passthrough';
+                // Show quick setup
+                if (currentDynamicControlFieldValue !== null) {
+                    showDynamicControlQuickSetup();
+                }
+            } else if (param) {
+                autoMapping.style.display = 'block';
+                customMapping.style.display = 'block';
+                updateCurrentMappingsDisplay();
+            }
+        }
+
+        function updateCurrentMappingsDisplay() {
+            var container = document.getElementById('dc_current_mappings');
+            var valueMappings = document.getElementById('dc_value_mappings');
+            var rows = valueMappings.querySelectorAll('.flex');
+            
+            if (rows.length > 0) {
+                var mappings = [];
+                rows.forEach(function(row) {
+                    var jsonVal = row.children[0].value.trim();
+                    var rdsVal = row.children[1].value.trim();
+                    if (jsonVal && rdsVal) {
+                        mappings.push('<span class="text-cyan-400">"' + jsonVal + '"</span> → <span class="text-pink-400">' + rdsVal + '</span>');
+                    }
+                });
+                
+                if (mappings.length > 0) {
+                    container.style.display = 'block';
+                    container.className = 'mb-2 bg-green-900 border border-green-700 rounded p-2 text-xs';
+                    container.innerHTML = '<div class="font-bold mb-1 text-green-200">✓ Current Mappings:</div>' + mappings.join('<br>');
+                } else {
+                    container.style.display = 'none';
+                }
+            } else {
+                container.style.display = 'none';
+            }
+        }
+
+        function renderPTYMappingList() {
+            var ptyList = document.getElementById('dc_pty_list');
+            var ptyTypes = [
+                {code: 0, name: "None"}, {code: 1, name: "News"}, {code: 2, name: "Current Affairs"},
+                {code: 3, name: "Information"}, {code: 4, name: "Sport"}, {code: 5, name: "Education"},
+                {code: 6, name: "Drama"}, {code: 7, name: "Culture"}, {code: 8, name: "Science"},
+                {code: 9, name: "Varied"}, {code: 10, name: "Pop Music"}, {code: 11, name: "Rock Music"},
+                {code: 12, name: "Easy Listening"}, {code: 13, name: "Light Classical"}, 
+                {code: 14, name: "Serious Classical"}, {code: 15, name: "Other Music"},
+                {code: 16, name: "Weather"}, {code: 17, name: "Finance"}, {code: 18, name: "Children's"},
+                {code: 19, name: "Social Affairs"}, {code: 20, name: "Religion"}, {code: 21, name: "Phone-In"},
+                {code: 22, name: "Travel"}, {code: 23, name: "Leisure"}, {code: 24, name: "Jazz"},
+                {code: 25, name: "Country"}, {code: 26, name: "National Music"}, {code: 27, name: "Oldies"},
+                {code: 28, name: "Folk Music"}, {code: 29, name: "Documentary"}, {code: 30, name: "Alarm Test"},
+                {code: 31, name: "Alarm"}
+            ];
+            
+            ptyList.innerHTML = '';
+            
+            // Show current mappings if any
+            if (Object.keys(ptyMappings).length > 0) {
+                var summaryDiv = document.createElement('div');
+                summaryDiv.className = 'bg-green-900 border border-green-700 rounded p-2 mb-3 text-xs';
+                var mappingText = Object.keys(ptyMappings).map(function(key) {
+                    var ptyName = ptyTypes.find(function(p) { return p.code === ptyMappings[key]; });
+                    return '"<span class="text-cyan-400">' + key + '</span>" → <span class="text-pink-400">' + 
+                           (ptyName ? ptyName.name : ptyMappings[key]) + '</span>';
+                }).join('<br>');
+                summaryDiv.innerHTML = '<div class="font-bold mb-1">✓ Current Mappings:</div>' + mappingText;
+                ptyList.appendChild(summaryDiv);
+            }
+            
+            var helperDiv = document.createElement('div');
+            helperDiv.className = 'text-[10px] text-gray-400 mb-2 p-2 bg-blue-900 border border-blue-700 rounded';
+            helperDiv.textContent = 'Click a PTY below to map JSON values to it. Example: map "sport" or "Sport" to PTY 4 (Sport)';
+            ptyList.appendChild(helperDiv);
+            
+            ptyTypes.forEach(function(pty) {
+                var item = document.createElement('div');
+                var isMapped = Object.values(ptyMappings).indexOf(pty.code) >= 0;
+                item.className = 'flex items-center justify-between bg-black hover:bg-gray-800 px-2 py-1 rounded cursor-pointer text-xs border border-gray-700' +
+                                (isMapped ? ' bg-green-900 border-green-700' : '');
+                item.innerHTML = '<span><span class="text-pink-400 font-mono w-6 inline-block">' + pty.code + '</span> ' + pty.name + '</span>' +
+                                '<button class="text-green-500 hover:text-green-400 text-xs">+ Map</button>';
+                item.onclick = function() {
+                    promptPTYValueMapping(pty.code, pty.name);
+                };
+                ptyList.appendChild(item);
+            });
+        }
+
+        var ptyMappings = {};
+
+        function promptPTYValueMapping(code, name) {
+            var jsonValue = prompt('What JSON value should map to PTY ' + code + ' (' + name + ')?\n\nExample: "sport", "Sport", "4"');
+            if (jsonValue) {
+                ptyMappings[jsonValue] = code;
+                renderPTYMappingList();
+            }
+        }
+
+        function updateMappingSummary() {
+            // Deprecated - now handled in renderPTYMappingList()
+        }
+
+        function addDynamicControlValueMapping() {
+            var container = document.getElementById('dc_value_mappings');
+            var row = document.createElement('div');
+            row.className = 'flex gap-2';
+            
+            var jsonInput = document.createElement('input');
+            jsonInput.type = 'text';
+            jsonInput.placeholder = 'JSON value';
+            jsonInput.className = 'flex-1 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+            jsonInput.onchange = updateCurrentMappingsDisplay;
+            jsonInput.onkeyup = updateCurrentMappingsDisplay;
+            
+            var rdsInput = document.createElement('input');
+            rdsInput.type = 'text';
+            rdsInput.placeholder = '→ RDS value';
+            rdsInput.className = 'flex-1 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+            rdsInput.onchange = updateCurrentMappingsDisplay;
+            rdsInput.onkeyup = updateCurrentMappingsDisplay;
+            
+            var removeBtn = document.createElement('button');
+            removeBtn.textContent = '✕';
+            removeBtn.className = 'text-red-400 hover:text-red-300 text-xs px-2';
+            removeBtn.onclick = function() {
+                row.remove();
+                updateCurrentMappingsDisplay();
+            };
+            
+            row.appendChild(jsonInput);
+            row.appendChild(rdsInput);
+            row.appendChild(removeBtn);
+            container.appendChild(row);
+            
+            // Focus the first input
+            jsonInput.focus();
+            updateCurrentMappingsDisplay();
         }
 
         // Custom Groups Management
@@ -7542,6 +8537,8 @@ UI_HTML = r"""
         loadEONServices(); // Initialize EON services on page load
         loadCustomGroups(); // Initialize custom groups on page load
         updateCustomGroupsDisplay(); // Update custom groups display
+        loadDynamicControlRules(); // Initialize dynamic control rules on page load
+        updateDynamicControlDisplay(); // Update dynamic control display
 
         // === AF PAIR FUNCTIONS ===
         var afPairs = [];
