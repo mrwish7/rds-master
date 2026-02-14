@@ -1967,9 +1967,9 @@ class RDSScheduler:
                 self.lps_seq_start_time, self.lps_ptr = time.time(), 0
                 dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
             if state['lps_cr']:
-                # Strip trailing spaces, append CR, cap at 32 chars then encode to RDS bytes
+                # Strip trailing spaces, append CR, then encode to UTF-8
                 txt_stripped = txt.rstrip()
-                lps_txt = text_to_rds_bytes((txt_stripped + '\r')[:32])
+                lps_txt = (txt_stripped + '\r').encode('utf-8')
                 if len(lps_txt) < 4:
                     lps_txt = lps_txt.ljust(4, b'\x00')
                 # Reset and restart from seg 0 once all needed segments have been sent
@@ -1978,7 +1978,7 @@ class RDSScheduler:
                 if self.lps_ptr >= segs_needed:
                     self.lps_ptr = 0
             else:
-                lps_txt = text_to_rds_bytes(txt.ljust(32)[:32])
+                lps_txt = txt.encode('utf-8').ljust(32, b'\x00')[:32]
             seg = self.lps_ptr % 8
             self.lps_ptr += 1
             # Pad segment data if needed
