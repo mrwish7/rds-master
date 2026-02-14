@@ -247,15 +247,17 @@ default_state = {
     "rt_cr": True, "rt_centered": False,
     "rt_mode": "2A", "rt_cycle": True, "rt_cycle_time": 5, "rt_active_buffer": 0,
     "rt_ab_cycle_count": 2,
-    "rt_ab_cycle_count": 2,
-    
+    "rt_auto_ab": False,       # AUTO buffer mode: flip A/B only when file/text content changes
+
     # RT+
     "rt_plus_format_a": "{artist} - {title}",
     "rt_plus_format_b": "{artist} - {title}",
     "en_rt_plus": False,
-    "rt_plus_mode": "format",  # "format" (legacy) or "builder" (new modal)
+    "rt_plus_mode": "format",  # "format" (legacy), "builder" (new modal), or "regex"
     "rt_plus_builder_a": "",   # JSON string with builder config
     "rt_plus_builder_b": "",   # JSON string with builder config
+    "rt_plus_regex_rules_a": "[]",  # JSON array of regex rule dicts for buffer A
+    "rt_plus_regex_rules_b": "[]",  # JSON array of regex rule dicts for buffer B
 
     # RT Messages (unified message list - replaces individual RT fields when used)
     "rt_messages": "[]",  # JSON array of message objects
@@ -399,6 +401,56 @@ class RTPlusParser:
                     tag2_len = limit - tag2_start
                 tags.append((tag2_type, tag2_start, tag2_len))
 
+        return tags
+
+    @staticmethod
+    def parse_regex_rules(text, rules_json, offset=0, limit=64):
+        """Apply regex rules in order; first match wins.
+
+        Rule schema: {"pattern": str, "tag1_type": int, "tag2_type": int (optional, default -1)}
+
+        - 0 capture groups: whole match span → tag1_type
+        - 1+ capture groups: group(1) → tag1_type, group(2) → tag2_type (if present)
+
+        Returns list of (content_type, start, length).
+        """
+        tags = []
+        if not text:
+            return tags
+        try:
+            rules = json.loads(rules_json) if isinstance(rules_json, str) else list(rules_json)
+        except Exception:
+            return tags
+        for rule in rules:
+            pattern = rule.get("pattern", "")
+            if not pattern:
+                continue
+            t1 = int(rule.get("tag1_type", -1))
+            t2 = int(rule.get("tag2_type", -1))
+            try:
+                m = re.search(pattern, text)
+            except re.error:
+                continue
+            if not m:
+                continue
+            ng = len(m.groups())
+            if ng == 0:
+                s = m.start() + offset
+                l = len(m.group(0))
+                if t1 >= 0 and s < limit and l > 0:
+                    tags.append((t1, s, min(l, limit - s)))
+            else:
+                if t1 >= 0 and m.group(1) is not None:
+                    s = m.start(1) + offset
+                    l = len(m.group(1))
+                    if s < limit and l > 0:
+                        tags.append((t1, s, min(l, limit - s)))
+                if ng >= 2 and t2 >= 0 and m.group(2) is not None:
+                    s = m.start(2) + offset
+                    l = len(m.group(2))
+                    if s < limit and l > 0:
+                        tags.append((t2, s, min(l, limit - s)))
+            break  # first match wins
         return tags
 
     @staticmethod
@@ -739,7 +791,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -990,18 +1042,43 @@ class RDSScheduler:
 
         # Determine buffer
         buffer_setting = current_msg.get("buffer", "AB")
-        if buffer_setting == "A":
-            buf = 0
-        elif buffer_setting == "B":
-            buf = 1
-        else:  # "AB"
-            buf = self.rt_ab_flag
-
-        # Resolve content (with caching for performance during message duration)
         msg_id = current_msg.get("id", "")
-        if msg_id not in self.rt_msg_cache:
-            self.rt_msg_cache[msg_id] = self.resolve_msg_content(current_msg)
-        resolved_content = self.rt_msg_cache[msg_id]
+
+        if buffer_setting == "AUTO":
+            # AUTO: refresh content every 4 s (same cadence as text_updater_loop).
+            # resolve_msg_content() opens the file directly, so we must NOT call it
+            # on every scheduler tick (~11 /s) — that would cause GIL-holding disk I/O
+            # in the real-time path and produce blank groups.
+            if not hasattr(self, 'rt_msg_auto_content'):
+                self.rt_msg_auto_content = {}
+            if not hasattr(self, 'rt_msg_auto_refresh'):
+                self.rt_msg_auto_refresh = {}
+            now = time.time()
+            if msg_id not in self.rt_msg_cache or \
+                    now - self.rt_msg_auto_refresh.get(msg_id, 0) >= 4.0:
+                new_content = self.resolve_msg_content(current_msg)
+                self.rt_msg_cache[msg_id] = new_content
+                self.rt_msg_auto_refresh[msg_id] = now
+                prev = self.rt_msg_auto_content.get(msg_id)
+                if prev is None:
+                    self.rt_msg_auto_content[msg_id] = new_content  # seed, start on A
+                elif new_content != prev:
+                    self.rt_msg_auto_content[msg_id] = new_content
+                    self.rt_ab_flag = 1 - self.rt_ab_flag  # flip on content change
+            resolved_content = self.rt_msg_cache[msg_id]
+            buf = self.rt_ab_flag
+        else:
+            if buffer_setting == "A":
+                buf = 0
+            elif buffer_setting == "B":
+                buf = 1
+            else:  # "AB"
+                buf = self.rt_ab_flag
+
+            # Resolve content (with caching for performance during message duration)
+            if msg_id not in self.rt_msg_cache:
+                self.rt_msg_cache[msg_id] = self.resolve_msg_content(current_msg)
+            resolved_content = self.rt_msg_cache[msg_id]
 
         # If content is empty, skip to next message immediately
         if not resolved_content or not resolved_content.strip():
@@ -1040,15 +1117,20 @@ class RDSScheduler:
         if not msg.get("rt_plus_enabled"):
             return []
 
+        # Calculate centering offset (shared by all modes below)
+        offset = 0
+        if state.get("rt_centered") and len(resolved_content) < limit:
+            offset = (limit - len(resolved_content)) // 2
+
+        # Regex rules mode: highest priority
+        if msg.get("rt_plus_mode") == "regex":
+            return RTPlusParser.parse_regex_rules(
+                resolved_content, msg.get("rt_plus_regex_rules", "[]"), offset, limit)
+
         tags = []
         tag_config = msg.get("rt_plus_tags", {})
         tag1_type = int(tag_config.get("tag1_type", -1))
         tag2_type = int(tag_config.get("tag2_type", -1))
-
-        # Calculate centering offset
-        offset = 0
-        if state.get("rt_centered") and len(resolved_content) < limit:
-            offset = (limit - len(resolved_content)) // 2
 
         # Check if manual builder mode (has tag1_text field)
         if msg.get("tag1_text"):
@@ -1513,6 +1595,19 @@ class RDSScheduler:
                 # Truncate to limit
                 raw = raw[:limit]
 
+            elif state.get("rt_auto_ab"):
+                # AUTO buffer mode: single source, flip A/B only when content changes.
+                # Starts on buffer A; no time-based cycling.
+                raw_input = self.get_text("rt_text")
+                raw = raw_input.strip()[:limit]
+                if self.last_rt_text_content == "":
+                    self.last_rt_text_content = raw  # seed without flipping (start on A)
+                elif raw != self.last_rt_text_content:
+                    self.last_rt_text_content = raw
+                    self.rt_ab_flag = 1 - self.rt_ab_flag
+                    self.rt_ptr = 0
+                buf = self.rt_ab_flag
+
             elif state["rt_manual_buffers"]:
                 # Legacy manual mode: use traditional cycling
                 buf = int((time.time()-self.start_time)/state["rt_cycle_time"])%2 if state["rt_cycle"] else state["rt_active_buffer"]
@@ -1564,7 +1659,7 @@ class RDSScheduler:
             # Calculate RT+ tags
             if current_msg:
                 # New message system: use per-message RT+ config
-                rt_plus_sig = f"{raw}_{current_msg.get('id')}_{current_msg.get('rt_plus_enabled')}_{current_msg.get('split_delimiter')}"
+                rt_plus_sig = f"{raw}_{current_msg.get('id')}_{current_msg.get('rt_plus_enabled')}_{current_msg.get('split_delimiter')}_{current_msg.get('rt_plus_mode','')}_{current_msg.get('rt_plus_regex_rules','')}"
                 if raw != self.last_rt_clean or rt_plus_sig != getattr(self, 'last_rtplus_sig', ''):
                     self.last_rt_clean = raw
                     self.last_rtplus_sig = rt_plus_sig
@@ -1582,7 +1677,7 @@ class RDSScheduler:
                 # Legacy RT+ handling
                 builder_key = "rt_plus_builder_a" if buf == 0 else "rt_plus_builder_b"
                 builder_state = state.get(builder_key, "")
-                rt_plus_sig = f"{raw}_{state.get('rt_plus_mode')}_{builder_state}_{state.get('rt_plus_format_a')}_{state.get('rt_plus_format_b')}"
+                rt_plus_sig = f"{raw}_{state.get('rt_plus_mode')}_{builder_state}_{state.get('rt_plus_format_a')}_{state.get('rt_plus_format_b')}_{state.get('rt_plus_regex_rules_a')}_{state.get('rt_plus_regex_rules_b')}"
 
                 if raw != self.last_rt_clean or rt_plus_sig != getattr(self, 'last_rtplus_sig', ''):
                     self.last_rt_clean = raw
@@ -1591,6 +1686,10 @@ class RDSScheduler:
 
                     if state.get('rt_plus_mode') == 'builder' and builder_state:
                         self.rt_plus_tags = RTPlusParser.parse(raw, None, centered=state['rt_centered'], limit=limit, builder_state=builder_state)
+                    elif state.get('rt_plus_mode') == 'regex':
+                        rules_key = "rt_plus_regex_rules_a" if buf == 0 else "rt_plus_regex_rules_b"
+                        _offset = (limit - len(raw)) // 2 if state['rt_centered'] and len(raw) < limit else 0
+                        self.rt_plus_tags = RTPlusParser.parse_regex_rules(raw, state.get(rules_key, "[]"), _offset, limit)
                     else:
                         fmt = state["rt_plus_format_a"] if buf == 0 else state["rt_plus_format_b"]
                         self.rt_plus_tags = RTPlusParser.parse(raw, fmt, centered=state['rt_centered'], limit=limit)
@@ -1620,7 +1719,12 @@ class RDSScheduler:
                         cycle_limit = 1
 
                     buffer_setting = current_msg.get("buffer", "AB")
-                    if buffer_setting == "AB":
+                    if buffer_setting == "AUTO":
+                        # AUTO: buffer only flips when content changes (handled in
+                        # get_current_rt_message). Never cycle-advance — keep
+                        # transmitting indefinitely until the source changes.
+                        pass
+                    elif buffer_setting == "AB":
                         # For AB messages: do N cycles on buffer A, then N cycles on buffer B
                         # Check if we've completed N cycles on current buffer
                         if self.rt_msg_cycle_count == cycle_limit:
@@ -2965,6 +3069,7 @@ UI_HTML = r"""
                                     <button type="button" id="rt_msg_buf_a" onclick="setMsgBuffer('A')" class="px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]">A</button>
                                     <button type="button" id="rt_msg_buf_b" onclick="setMsgBuffer('B')" class="px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]">B</button>
                                     <button type="button" id="rt_msg_buf_ab" onclick="setMsgBuffer('AB')" class="px-4 py-2 rounded font-bold text-sm bg-[#7c3aed] text-white">A+B</button>
+                                    <button type="button" id="rt_msg_buf_auto" onclick="setMsgBuffer('AUTO')" class="px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]" title="Flip A&#x2194;B automatically when content changes">AUTO</button>
                                 </div>
                             </div>
 
@@ -3146,21 +3251,43 @@ UI_HTML = r"""
 
                                 <!-- RT+ Options for File/URL -->
                                 <div id="rt_msg_rtplus_options" style="display:none" class="space-y-3">
-                                    <div class="flex gap-2 items-center">
-                                        <label class="w-20 text-xs text-gray-500 shrink-0">Split at:</label>
-                                        <input type="text" id="rt_msg_split" value=" - " class="w-20 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" oninput="updateMsgPreview()">
-                                        <span class="text-[10px] text-gray-500">Delimiter to split into 2 tags</span>
+                                    <!-- Tag method selector -->
+                                    <div class="flex gap-4 items-center">
+                                        <label class="text-[10px] text-gray-500 shrink-0">Tag Method:</label>
+                                        <label class="flex items-center gap-1 cursor-pointer text-xs">
+                                            <input type="radio" name="rt_msg_rtplus_method" value="split" checked class="accent-[#d946ef]" onchange="updateRTPlusMsgMethod()">
+                                            <span class="text-gray-300">Split delimiter</span>
+                                        </label>
+                                        <label class="flex items-center gap-1 cursor-pointer text-xs">
+                                            <input type="radio" name="rt_msg_rtplus_method" value="regex" class="accent-[#d946ef]" onchange="updateRTPlusMsgMethod()">
+                                            <span class="text-gray-300">Regex Rules</span>
+                                        </label>
                                     </div>
 
-                                    <div class="grid grid-cols-2 gap-3">
-                                        <div>
-                                            <label class="text-xs text-orange-400 mb-1 block">Tag 1 Type</label>
-                                            <select id="rt_msg_tag1_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                    <!-- Split mode -->
+                                    <div id="rt_msg_rtplus_split_wrap" class="space-y-3">
+                                        <div class="flex gap-2 items-center">
+                                            <label class="w-20 text-xs text-gray-500 shrink-0">Split at:</label>
+                                            <input type="text" id="rt_msg_split" value=" - " class="w-20 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" oninput="updateMsgPreview()">
+                                            <span class="text-[10px] text-gray-500">Delimiter to split into 2 tags</span>
                                         </div>
-                                        <div>
-                                            <label class="text-xs text-cyan-400 mb-1 block">Tag 2 Type</label>
-                                            <select id="rt_msg_tag2_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                        <div class="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label class="text-xs text-orange-400 mb-1 block">Tag 1 Type</label>
+                                                <select id="rt_msg_tag1_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-cyan-400 mb-1 block">Tag 2 Type</label>
+                                                <select id="rt_msg_tag2_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                            </div>
                                         </div>
+                                    </div>
+
+                                    <!-- Regex Rules mode -->
+                                    <div id="rt_msg_rtplus_regex_wrap" style="display:none;" class="space-y-2">
+                                        <div class="text-[10px] text-gray-500">Rules tried in order; first match wins. Capture groups: group&nbsp;1&nbsp;→&nbsp;Tag&nbsp;1, group&nbsp;2&nbsp;→&nbsp;Tag&nbsp;2.</div>
+                                        <div id="rt_msg_regex_rules_list" class="space-y-1 max-h-36 overflow-y-auto"></div>
+                                        <button onclick="addMsgRegexRule()" class="w-full px-2 py-1 bg-green-900 hover:bg-green-800 rounded text-xs text-white">+ Add Rule</button>
                                     </div>
                                 </div>
                             </div>
@@ -3751,6 +3878,29 @@ UI_HTML = r"""
                         <span class="text-sm text-gray-300">Builder</span>
                         <span class="text-[10px] text-gray-500">(new)</span>
                     </label>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name="rtplus_mode" value="regex" class="accent-[#d946ef]" onchange="updateRTPlusMode()">
+                        <span class="text-sm text-gray-300">Regex Rules</span>
+                        <span class="text-[10px] text-gray-500">(pattern match)</span>
+                    </label>
+                </div>
+
+                <!-- Regex Rules Panel (visible only in Regex mode) -->
+                <div id="regex_rules_panel" style="display:none;" class="bg-[#252525] border border-[#333] rounded p-3 space-y-2">
+                    <div class="flex items-center justify-between mb-1">
+                        <div>
+                            <label class="text-xs text-gray-400 font-bold">REGEX RULES</label>
+                            <div class="text-[10px] text-gray-500 mt-0.5">Rules tried in order; first match wins. Capture groups: group&nbsp;1&nbsp;→&nbsp;Tag&nbsp;1, group&nbsp;2&nbsp;→&nbsp;Tag&nbsp;2. No groups → whole match → Tag&nbsp;1.</div>
+                        </div>
+                        <div class="flex gap-2 items-center">
+                            <div id="regex_buf_tabs" class="flex gap-1" style="display:none;">
+                                <button id="regex_tab_a" onclick="setRegexBuffer('a')" class="px-2 py-1 rounded text-xs font-bold bg-[#d946ef] text-white">A</button>
+                                <button id="regex_tab_b" onclick="setRegexBuffer('b')" class="px-2 py-1 rounded text-xs font-bold bg-[#333] text-gray-400 hover:bg-[#444]">B</button>
+                            </div>
+                            <button onclick="addRegexRule()" class="px-3 py-1 bg-green-800 hover:bg-green-700 rounded text-xs text-white font-bold">+ Add Rule</button>
+                        </div>
+                    </div>
+                    <div id="regex_rules_list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                 </div>
             </div>
 
@@ -4387,6 +4537,18 @@ UI_HTML = r"""
                 document.getElementById('rt_msg_split').value = msg.split_delimiter || ' - ';
                 document.getElementById('rt_msg_tag1_type_auto').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
                 document.getElementById('rt_msg_tag2_type_auto').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                // Load per-message regex rules
+                msgRegexRules = [];
+                try {
+                    if (msg.rt_plus_regex_rules) msgRegexRules = JSON.parse(msg.rt_plus_regex_rules) || [];
+                } catch(e) {}
+                renderMsgRegexRules();
+                // Restore method radio
+                var savedMethod = msg.rt_plus_mode || 'split';
+                document.querySelectorAll('input[name="rt_msg_rtplus_method"]').forEach(function(r) {
+                    r.checked = (r.value === savedMethod);
+                });
+                updateRTPlusMsgMethod();
             }
 
             updateSourceUI();
@@ -4413,10 +4575,12 @@ UI_HTML = r"""
         }
 
         function updateBufferButtons() {
-            ['A', 'B', 'AB'].forEach(function(b) {
+            var activeColors = { A: 'bg-[#dc2626]', B: 'bg-[#2563eb]', AB: 'bg-[#7c3aed]', AUTO: 'bg-[#059669]' };
+            ['A', 'B', 'AB', 'AUTO'].forEach(function(b) {
                 var btn = document.getElementById('rt_msg_buf_' + b.toLowerCase());
+                if (!btn) return;
                 if (b === currentMsgBuffer) {
-                    btn.className = 'px-4 py-2 rounded font-bold text-sm ' + (b === 'A' ? 'bg-[#dc2626]' : b === 'B' ? 'bg-[#2563eb]' : 'bg-[#7c3aed]') + ' text-white';
+                    btn.className = 'px-4 py-2 rounded font-bold text-sm ' + activeColors[b] + ' text-white';
                 } else {
                     btn.className = 'px-4 py-2 rounded font-bold text-sm bg-[#333] text-gray-400 hover:bg-[#444]';
                 }
@@ -4824,12 +4988,21 @@ UI_HTML = r"""
                 msg.content = document.getElementById('rt_msg_content').value;
                 msg.prefix = document.getElementById('rt_msg_prefix_auto').value;
                 msg.suffix = document.getElementById('rt_msg_suffix_auto').value;
-                msg.split_delimiter = document.getElementById('rt_msg_split').value;
                 msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
-                msg.rt_plus_tags = {
-                    tag1_type: parseInt(document.getElementById('rt_msg_tag1_type_auto').value),
-                    tag2_type: parseInt(document.getElementById('rt_msg_tag2_type_auto').value)
-                };
+                var rtplusMethodEl = document.querySelector('input[name="rt_msg_rtplus_method"]:checked');
+                msg.rt_plus_mode = rtplusMethodEl ? rtplusMethodEl.value : 'split';
+                if (msg.rt_plus_mode === 'regex') {
+                    msg.rt_plus_regex_rules = JSON.stringify(msgRegexRules);
+                    msg.split_delimiter = '';
+                    msg.rt_plus_tags = { tag1_type: -1, tag2_type: -1 };
+                } else {
+                    msg.split_delimiter = document.getElementById('rt_msg_split').value;
+                    msg.rt_plus_tags = {
+                        tag1_type: parseInt(document.getElementById('rt_msg_tag1_type_auto').value),
+                        tag2_type: parseInt(document.getElementById('rt_msg_tag2_type_auto').value)
+                    };
+                    msg.rt_plus_regex_rules = '[]';
+                }
                 // Clear manual-only fields
                 msg.tag1_text = '';
                 msg.middle = '';
@@ -5143,6 +5316,13 @@ UI_HTML = r"""
                 if (savedA) builderState.a = JSON.parse(savedA);
                 if (savedB) builderState.b = JSON.parse(savedB);
             } catch (e) {}
+            // Load saved regex rules
+            try {
+                var savedRegA = {{ state.rt_plus_regex_rules_a|tojson }};
+                var savedRegB = {{ state.rt_plus_regex_rules_b|tojson }};
+                regexRules.a = JSON.parse(savedRegA) || [];
+                regexRules.b = JSON.parse(savedRegB) || [];
+            } catch(e) { regexRules.a = []; regexRules.b = []; }
             loadBuilderBufferToUI();
         }
 
@@ -5201,11 +5381,174 @@ UI_HTML = r"""
             var mode = document.querySelector('input[name="rtplus_mode"]:checked').value;
             socket.emit('update', { rt_plus_mode: mode });
 
-            // Show/hide legacy format fields based on mode
             var formatSingle = document.getElementById('rt_format_single');
             var formatDual = document.getElementById('rt_format_dual');
-            if (formatSingle) formatSingle.style.display = (mode === 'builder') ? 'none' : 'block';
-            if (formatDual) formatDual.style.display = (mode === 'builder') ? 'none' : 'flex';
+            var regexPanel = document.getElementById('regex_rules_panel');
+            var isBuilder = (mode === 'builder');
+            var isRegex   = (mode === 'regex');
+            if (formatSingle) formatSingle.style.display = (isBuilder || isRegex) ? 'none' : 'block';
+            if (formatDual)   formatDual.style.display   = (isBuilder || isRegex) ? 'none' : 'flex';
+            if (regexPanel)   regexPanel.style.display   = isRegex ? 'block' : 'none';
+            // Show buffer A/B tabs only in regex mode + manual buffer mode
+            var regexBufTabs = document.getElementById('regex_buf_tabs');
+            if (regexBufTabs) {
+                var rtBufModeEl = document.getElementById('rt_buffer_mode');
+                regexBufTabs.style.display = (isRegex && rtBufModeEl && rtBufModeEl.value === 'manual') ? 'flex' : 'none';
+            }
+            if (isRegex) renderRegexRules();
+        }
+
+        // ── RT Buffer Mode (Single / AUTO / Manual A/B) ───────────────────────
+        function updateRTBufferMode() {
+            var el = document.getElementById('rt_buffer_mode');
+            if (!el) return;
+            var mode = el.value;
+            socket.emit('update', {
+                rt_manual_buffers: (mode === 'manual'),
+                rt_auto_ab:        (mode === 'auto')
+            });
+            // Show A/B regex buffer tabs only in manual mode
+            var regexBufTabs = document.getElementById('regex_buf_tabs');
+            if (regexBufTabs) {
+                var modeEl = document.querySelector('input[name="rtplus_mode"]:checked');
+                regexBufTabs.style.display = (mode === 'manual' && modeEl && modeEl.value === 'regex') ? 'flex' : 'none';
+            }
+        }
+
+        // ── RT+ Regex Rules (legacy builder panel) ────────────────────────────
+        var regexRules = { a: [], b: [] };
+        var currentRegexBuffer = 'a';
+
+        function setRegexBuffer(buf) {
+            currentRegexBuffer = buf;
+            ['a','b'].forEach(function(b) {
+                var tab = document.getElementById('regex_tab_' + b);
+                if (tab) tab.className = (b === buf)
+                    ? 'px-2 py-1 rounded text-xs font-bold bg-[#d946ef] text-white'
+                    : 'px-2 py-1 rounded text-xs font-bold bg-[#333] text-gray-400 hover:bg-[#444]';
+            });
+            renderRegexRules();
+        }
+
+        function addRegexRule() {
+            regexRules[currentRegexBuffer].push({ pattern: '', tag1_type: 4, tag2_type: -1 });
+            renderRegexRules();
+        }
+
+        function removeRegexRule(idx) {
+            regexRules[currentRegexBuffer].splice(idx, 1);
+            renderRegexRules();
+            saveRegexRules();
+        }
+
+        function escHtml(s) {
+            return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function buildRTPlusTypeOptions(selected) {
+            var html = '';
+            for (var i = 0; i <= 63; i++) {
+                var info = RTPLUS_TYPES[i] || ['Unknown',''];
+                html += '<option value="' + i + '"' + (i === parseInt(selected) ? ' selected' : '') + '>' + i + ': ' + info[0] + '</option>';
+            }
+            return html;
+        }
+
+        function renderRegexRules() {
+            var container = document.getElementById('regex_rules_list');
+            if (!container) return;
+            var rules = regexRules[currentRegexBuffer] || [];
+            if (rules.length === 0) {
+                container.innerHTML = '<div class="text-xs text-gray-600 text-center py-2">No rules yet. Click &quot;+ Add Rule&quot;.</div>';
+                return;
+            }
+            container.innerHTML = '';
+            rules.forEach(function(rule, idx) {
+                var row = document.createElement('div');
+                row.className = 'flex gap-2 items-center bg-[#1a1a1a] border border-[#333] rounded p-2';
+                var buf = currentRegexBuffer;
+                row.innerHTML =
+                    '<span class="text-[10px] text-gray-600 w-4 shrink-0">' + (idx+1) + '</span>' +
+                    '<input type="text"' +
+                    ' class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-xs font-mono"' +
+                    ' placeholder="regex (e.g. ^(RADIO \\d+)$  or  ^(.*?) - (.+)$)"' +
+                    ' value="' + escHtml(rule.pattern) + '"' +
+                    ' oninput="regexRules[\'' + buf + '\'][' + idx + '].pattern=this.value; saveRegexRules();">' +
+                    '<div class="flex flex-col gap-1">' +
+                    '<select class="w-28 bg-[#111] border border-[#444] rounded px-1 py-0.5 text-[10px] text-orange-300"' +
+                    ' title="Tag 1 type"' +
+                    ' onchange="regexRules[\'' + buf + '\'][' + idx + '].tag1_type=parseInt(this.value); saveRegexRules();">' +
+                    buildRTPlusTypeOptions(rule.tag1_type) + '</select>' +
+                    '<select class="w-28 bg-[#111] border border-[#444] rounded px-1 py-0.5 text-[10px] text-cyan-300"' +
+                    ' title="Tag 2 type (-1 = none)"' +
+                    ' onchange="regexRules[\'' + buf + '\'][' + idx + '].tag2_type=parseInt(this.value); saveRegexRules();">' +
+                    '<option value="-1"' + (parseInt(rule.tag2_type||'-1') === -1 ? ' selected' : '') + '>No Tag 2</option>' +
+                    buildRTPlusTypeOptions(rule.tag2_type) + '</select>' +
+                    '</div>' +
+                    '<button onclick="removeRegexRule(' + idx + ')"' +
+                    ' class="px-1.5 py-1 bg-red-900 hover:bg-red-700 rounded text-xs text-white shrink-0" title="Remove rule">\u00d7</button>';
+                container.appendChild(row);
+            });
+        }
+
+        function saveRegexRules() {
+            socket.emit('update', {
+                rt_plus_regex_rules_a: JSON.stringify(regexRules.a),
+                rt_plus_regex_rules_b: JSON.stringify(regexRules.b)
+            });
+        }
+
+        // ── Per-message Regex Rules (RT message modal) ────────────────────────
+        var msgRegexRules = [];
+
+        function updateRTPlusMsgMethod() {
+            var el = document.querySelector('input[name="rt_msg_rtplus_method"]:checked');
+            if (!el) return;
+            var splitWrap = document.getElementById('rt_msg_rtplus_split_wrap');
+            var regexWrap = document.getElementById('rt_msg_rtplus_regex_wrap');
+            if (splitWrap) splitWrap.style.display = (el.value === 'split') ? 'block' : 'none';
+            if (regexWrap) regexWrap.style.display  = (el.value === 'regex') ? 'block' : 'none';
+        }
+
+        function addMsgRegexRule() {
+            msgRegexRules.push({ pattern: '', tag1_type: 4, tag2_type: -1 });
+            renderMsgRegexRules();
+        }
+
+        function removeMsgRegexRule(idx) {
+            msgRegexRules.splice(idx, 1);
+            renderMsgRegexRules();
+        }
+
+        function renderMsgRegexRules() {
+            var container = document.getElementById('rt_msg_regex_rules_list');
+            if (!container) return;
+            if (msgRegexRules.length === 0) {
+                container.innerHTML = '<div class="text-xs text-gray-600 text-center py-2">No rules. Click &quot;+ Add Rule&quot;.</div>';
+                return;
+            }
+            container.innerHTML = '';
+            msgRegexRules.forEach(function(rule, idx) {
+                var row = document.createElement('div');
+                row.className = 'flex gap-2 items-center bg-[#0a0a0a] border border-[#333] rounded p-1';
+                row.innerHTML =
+                    '<span class="text-[10px] text-gray-600 shrink-0">' + (idx+1) + '</span>' +
+                    '<input type="text"' +
+                    ' class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-0.5 text-xs font-mono"' +
+                    ' placeholder="regex"' +
+                    ' value="' + escHtml(rule.pattern) + '"' +
+                    ' oninput="msgRegexRules[' + idx + '].pattern=this.value;">' +
+                    '<select class="w-24 bg-[#111] border border-[#444] rounded px-1 text-[10px] text-orange-300"' +
+                    ' title="Tag 1" onchange="msgRegexRules[' + idx + '].tag1_type=parseInt(this.value);">' +
+                    buildRTPlusTypeOptions(rule.tag1_type) + '</select>' +
+                    '<select class="w-24 bg-[#111] border border-[#444] rounded px-1 text-[10px] text-cyan-300"' +
+                    ' title="Tag 2" onchange="msgRegexRules[' + idx + '].tag2_type=parseInt(this.value);">' +
+                    '<option value="-1"' + (parseInt(rule.tag2_type||'-1') === -1 ? ' selected' : '') + '>No Tag 2</option>' +
+                    buildRTPlusTypeOptions(rule.tag2_type) + '</select>' +
+                    '<button onclick="removeMsgRegexRule(' + idx + ')"' +
+                    ' class="px-1 bg-red-900 hover:bg-red-700 rounded text-xs text-white">\u00d7</button>';
+                container.appendChild(row);
+            });
         }
 
         function showSplitPanel() {
@@ -5375,7 +5718,10 @@ UI_HTML = r"""
                 di_stereo: getVal('di_stereo'), di_head: getVal('di_head'), di_comp: getVal('di_comp'), di_dyn: getVal('di_dyn'),
                 en_af: getVal('en_af'), af_list: getVal('af_list'), af_method: getVal('af_method'),
                 ps_dynamic: getVal('ps_dynamic'), ps_centered: getVal('ps_centered'),
-                rt_text: getVal('rt_text'), rt_manual_buffers: getVal('rt_manual_buffers'), rt_cycle_ab: getVal('rt_cycle_ab'),
+                rt_text: getVal('rt_text'),
+                rt_manual_buffers: (function(){ var el = document.getElementById('rt_buffer_mode'); return el ? el.value === 'manual' : getVal('rt_manual_buffers'); })(),
+                rt_auto_ab:        (function(){ var el = document.getElementById('rt_buffer_mode'); return el ? el.value === 'auto'   : false; })(),
+                rt_cycle_ab: getVal('rt_cycle_ab'),
                 rt_a: getVal('rt_a'), rt_b: getVal('rt_b'), rt_mode: getVal('rt_mode'),
                 rt_cycle: getVal('rt_cycle'), rt_centered: getVal('rt_centered'), rt_cr: getVal('rt_cr'),
                 rt_cycle_time: getVal('rt_cycle_time'),
