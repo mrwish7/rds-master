@@ -7,6 +7,7 @@ import sys
 import os
 import signal
 import random
+import collections
 import configparser
 import urllib.request
 import json
@@ -704,8 +705,16 @@ def text_updater_loop():
         time.sleep(4.0)
 
 def monitor_pusher_loop():
+    import gc
+    _gc_tick = 0
     while True:
         monitor_data["heartbeat"] = int(time.time() * 1000)
+        # Run GC manually every 10 s (50 × 0.2 s) so that disabling auto-GC in the
+        # audio thread doesn't cause unbounded memory growth from reference cycles.
+        _gc_tick += 1
+        if _gc_tick >= 50:
+            gc.collect()
+            _gc_tick = 0
         if state["running"]:
             monitor_data["af"] = state["af_list"]
             monitor_data["pty_idx"] = state["pty"]
@@ -822,9 +831,24 @@ class RDSScheduler:
         self.rt_msg_cache = {}  # Cache resolved content per message id
         self.last_rt_messages_sig = ""  # Track changes to message list
 
+        # Cache parsed custom groups to avoid json.loads() on every next() call
+        self._custom_groups_cache = []
+        self._custom_groups_cache_str = None
+
     def get_text(self, key):
         val = state.get(key, "")
         return resolved_cache.get(key, val) if "\\" in val else val
+
+    def _get_custom_groups(self):
+        """Return parsed custom groups list, re-parsing only when the JSON string changes."""
+        raw = state.get("custom_groups", "[]")
+        if raw != self._custom_groups_cache_str:
+            try:
+                self._custom_groups_cache_str = raw
+                self._custom_groups_cache = json.loads(raw) if isinstance(raw, str) else list(raw)
+            except Exception:
+                self._custom_groups_cache = []
+        return self._custom_groups_cache
 
     def get_rt_messages(self):
         """Get enabled RT messages from the unified message list."""
@@ -1229,8 +1253,7 @@ class RDSScheduler:
         # Only add each unique group type once (or multiple times based on schedule_freq)
         # The custom group handler will cycle through all entries of that type
         try:
-            custom_groups_str = state.get("custom_groups", "[]")
-            custom_groups = json.loads(custom_groups_str) if isinstance(custom_groups_str, str) else custom_groups_str
+            custom_groups = self._get_custom_groups()
 
             # Collect unique group types with their max schedule_freq
             unique_groups = {}
@@ -1278,7 +1301,15 @@ class RDSScheduler:
             return RDSHelper.get_group_bits(4, 0, (mjd>>15)&3, ((mjd&0x7FFF)<<1)|((now.hour>>4)&1), b4)
 
         if state["scheduler_auto"]:
-            schedule = self.generate_auto_schedule()
+            # Recompute schedule only when relevant state changes or at the start of each cycle.
+            sched_sig = (state["en_lps"], state.get("en_eon"), state["en_ptyn"], state["en_id"],
+                         state.get("en_dab"), state["en_rt_plus"], self._custom_groups_cache_str)
+            cached = getattr(self, '_auto_schedule_cache', None)
+            if (cached is None or self._auto_schedule_sig != sched_sig or
+                    (self.schedule_ptr > 0 and self.schedule_ptr % len(cached) == 0)):
+                self._auto_schedule_cache = self.generate_auto_schedule()
+                self._auto_schedule_sig = sched_sig
+            schedule = self._auto_schedule_cache
         else:
             schedule = self.parse_schedule_string(state["group_sequence"])
 
@@ -1296,8 +1327,7 @@ class RDSScheduler:
 
         # Check for custom data groups FIRST (allows overriding built-in groups)
         try:
-            custom_groups_str = state.get("custom_groups", "[]")
-            custom_groups = json.loads(custom_groups_str) if isinstance(custom_groups_str, str) else custom_groups_str
+            custom_groups = self._get_custom_groups()
 
             # Debug: print loaded custom groups on first call (summary only)
             if not hasattr(self, '_custom_groups_debug_printed'):
@@ -1307,8 +1337,7 @@ class RDSScheduler:
                     print(f"[Custom Groups] Loaded {enabled_count} enabled custom group(s) out of {len(custom_groups)} total")
         except Exception as e:
             custom_groups = []
-            print(f"[Custom Groups] JSON parse error: {e}")
-            print(f"[Custom Groups] Raw value: {state.get('custom_groups', '[]')}")
+            print(f"[Custom Groups] error: {e}")
 
         # Optional: Enable detailed debug logging with env var RDS_DEBUG_CUSTOM=1
         debug_custom = os.environ.get("RDS_DEBUG_CUSTOM", "0") == "1"
@@ -1344,7 +1373,11 @@ class RDSScheduler:
                     b2_tail = int(custom.get("b2_tail", "0"), 16) & 0x1F
                     b3_val = int(custom.get("b3", "0"), 16) & 0xFFFF
                     b4_val = int(custom.get("b4", "0"), 16) & 0xFFFF
-                    return RDSHelper.get_group_bits(g_type, g_ver, b2_tail, b3_val, b4_val)
+                    # Skip custom groups with all-zero data (would display as "--")
+                    if b2_tail == 0 and b3_val == 0 and b4_val == 0:
+                        pass  # Skip this custom group, fall through to built-in handlers
+                    else:
+                        return RDSHelper.get_group_bits(g_type, g_ver, b2_tail, b3_val, b4_val)
                 except Exception as e:
                     print(f"[Custom Groups] Error creating group: {e}")
                     pass  # Invalid custom data, skip
@@ -1705,7 +1738,7 @@ class RDSScheduler:
              return RDSHelper.get_group_bits(11, 0, b2_tail, b3_val, b4_val)
 
         elif g_type == 14 and (not state["scheduler_auto"] or state.get("en_eon")):
-            # Group 14A/14B: Enhanced Other Networks (EON) - EN 50067 section 3.2.1.8
+            # Group 14A: Enhanced Other Networks (EON) - EN 50067 section 3.2.1.8
             eon_services = []
             eon_services_str = state.get("eon_services", "[]")
 
@@ -1726,47 +1759,10 @@ class RDSScheduler:
             # Initialize EON state tracking
             if not hasattr(self, 'eon_service_idx'):
                 self.eon_service_idx = 0
-                self.eon_variant = 0  # 0=PS, 4/5-9=AF, 13=PTY+TA
+                self.eon_variant = 0  # 0=PS, 4=AF, 13=PTY+TA
                 self.eon_ps_seg = 0   # PS segment (0-3)
-                self.eon_af_idx = -1  # AF index (-1=count code, 0+=freqs)
-                self.eon_14b_burst_count = 0  # Counter for Group 14B bursts
-                self.eon_14b_last_check = {}  # Track last TA state per service
+                self.eon_af_idx = -1  # AF index (-1=count code, 0+=mapped freqs)
 
-            # GROUP 14B: TA Switching (rapid burst when TA=1)
-            # Check if any service has TA=1 and send Group 14B burst
-            if g_ver == 1:
-                # Find first service with TA=1
-                ta_service = None
-                for svc in eon_services:
-                    if svc.get('ta', 0) == 1 and svc.get('tp', 0) == 1:
-                        ta_service = svc
-                        break
-
-                if ta_service:
-                    try:
-                        pi_on = int(ta_service.get('pi_on', 'C000'), 16) & 0xFFFF
-                    except:
-                        pi_on = 0xC000
-
-                    tp_on = ta_service.get('tp', 0) & 1
-                    ta_on = 1  # Always 1 for Group 14B during TA
-
-                    # Block 2 tail: TP(ON)=1, TA(ON)=1, rffu bits (variant code not used in 14B)
-                    b2_tail = (tp_on << 4) | (ta_on << 3)
-
-                    # Block 3: PI(TN) - Programme Identification of Tuned Network
-                    try:
-                        pi_tn = int(state.get("pi", "0000"), 16) & 0xFFFF
-                    except:
-                        pi_tn = 0x0000
-
-                    # Block 3: PI(TN), Block 4: PI(ON) - matching StereoTool implementation
-                    return RDSHelper.get_group_bits(14, 1, b2_tail, pi_tn, pi_on)
-                else:
-                    # No active TA - send empty 14B
-                    return RDSHelper.get_group_bits(14, 1, 0, 0, 0)
-
-            # GROUP 14A: Background EON transmission
             service = eon_services[self.eon_service_idx % len(eon_services)]
 
             # Get PI(ON) for block 4
@@ -1777,9 +1773,6 @@ class RDSScheduler:
 
             # Get TP(ON) for block 2
             tp_on = service.get('tp', 0) & 1
-
-            # Determine AF method from service config (default to Method A)
-            af_method = service.get('af_method', 'A')
 
             # Variant 0: PS(ON) - 2 characters per transmission, 4 segments total
             if self.eon_variant == 0:
@@ -1802,102 +1795,54 @@ class RDSScheduler:
                 self.eon_ps_seg += 1
                 if self.eon_ps_seg >= 4:
                     self.eon_ps_seg = 0
-                    # Move to AF variant based on method
-                    if af_method == 'B':
-                        self.eon_variant = 5  # Method B mapped frequencies
-                    else:
-                        self.eon_variant = 4  # Method A
+                    self.eon_variant = 4  # Next variant: AF
                     self.eon_af_idx = -1
 
-            # Variant 4: AF(ON) - Method A: Send ON frequencies only
+            # Variant 4: AF(ON) - Method A: Send ON frequencies without TN
             elif self.eon_variant == 4:
+                # Get other network's frequencies (ALL frequencies in af_list are ON freqs)
                 af_list = service.get('af_list', '')
                 afs = [f.strip() for f in af_list.split(',') if f.strip()]
 
                 b2_tail = (tp_on << 4) | 0x04  # Variant 4
 
                 if not afs:
-                    b3_val = (205 << 8) | 205
-                    self.eon_variant = 13
+                    # No AFs - send filler and skip
+                    b3_val = (205 << 8) | 205  # Filler codes (not count codes)
+                    self.eon_variant = 13  # Next variant: PTY+TA
                 else:
                     if self.eon_af_idx == -1:
-                        # Count code + first frequency
+                        # First transmission: count code + first frequency (Method A format)
                         b3_val = ((224 + len(afs)) << 8) | self.freq_code(afs[0])
-                        self.eon_af_idx = 1
+                        self.eon_af_idx = 1  # Start at 1 for next transmission
                     else:
+                        # Subsequent transmissions: send two frequencies at a time (Method A)
                         if self.eon_af_idx < len(afs):
                             f1 = self.freq_code(afs[self.eon_af_idx])
                             f2 = self.freq_code(afs[self.eon_af_idx + 1]) if self.eon_af_idx + 1 < len(afs) else 205
                             b3_val = (f1 << 8) | f2
                             self.eon_af_idx += 2
+
+                            # Check if we've sent all AFs
                             if self.eon_af_idx >= len(afs):
-                                self.eon_variant = 13
+                                self.eon_variant = 13  # Next variant: PTY+TA
                         else:
+                            # Shouldn't happen, but safety check
                             b3_val = (205 << 8) | 205
                             self.eon_variant = 13
 
-            # Variants 5-9: AF(ON) - Method B: Mapped frequencies (TN freq -> ON freq)
-            elif 5 <= self.eon_variant <= 9:
-                # Parse af_pairs for Method B
-                # Format: [{"tn_freq": "88.0", "on_freqs": "101.1, 103.3"}, ...]
-                af_pairs_str = service.get('af_pairs', '[]')
-                try:
-                    if isinstance(af_pairs_str, str):
-                        af_pairs = json.loads(af_pairs_str)
-                    else:
-                        af_pairs = af_pairs_str if isinstance(af_pairs_str, list) else []
-                except:
-                    af_pairs = []
-
-                b2_tail = (tp_on << 4) | self.eon_variant
-
-                if not af_pairs:
-                    b3_val = (205 << 8) | 205
-                    self.eon_variant = 13
-                else:
-                    # Build transmission list for Method B if needed
-                    if not hasattr(self, 'eon_af_b_transmissions') or self.eon_af_idx == -1:
-                        self.eon_af_b_transmissions = []
-                        for pair in af_pairs:
-                            tn_freq = pair.get('tn_freq', '')
-                            on_freqs_str = pair.get('on_freqs', '')
-                            on_freqs = [f.strip() for f in on_freqs_str.split(',') if f.strip()]
-
-                            if tn_freq and on_freqs:
-                                # Count code + tuning freq indicator
-                                total_freqs = 1 + len(on_freqs)  # 1 for TN + ON freqs
-                                self.eon_af_b_transmissions.append(
-                                    ((224 + total_freqs) << 8) | self.freq_code(tn_freq)
-                                )
-                                # TN->ON mapping pairs
-                                for on_freq in on_freqs:
-                                    self.eon_af_b_transmissions.append(
-                                        (self.freq_code(tn_freq) << 8) | self.freq_code(on_freq)
-                                    )
-                        self.eon_af_idx = 0
-
-                    if self.eon_af_b_transmissions and self.eon_af_idx < len(self.eon_af_b_transmissions):
-                        b3_val = self.eon_af_b_transmissions[self.eon_af_idx]
-                        self.eon_af_idx += 1
-                        if self.eon_af_idx >= len(self.eon_af_b_transmissions):
-                            self.eon_variant = 13
-                            self.eon_af_idx = -1
-                    else:
-                        b3_val = (205 << 8) | 205
-                        self.eon_variant = 13
-
-            # Variant 13: PTY(ON) + TA(ON)
+            # Variant 13: PTY(ON) + TA
             elif self.eon_variant == 13:
-                b2_tail = (tp_on << 4) | 0x0D
+                b2_tail = (tp_on << 4) | 0x0D  # Variant 13
                 pty_on = service.get('pty', 0) & 0x1F
                 ta_on = service.get('ta', 0) & 1
                 b3_val = (pty_on << 11) | (ta_on << 10)
 
-                # Move to next service
+                # After PTY+TA, move to next service or back to PS
                 self.eon_service_idx += 1
                 if self.eon_service_idx >= len(eon_services):
                     self.eon_service_idx = 0
-                self.eon_variant = 0
+                self.eon_variant = 0  # Start with PS for next service
                 self.eon_ps_seg = 0
                 self.eon_af_idx = -1
 
@@ -1926,20 +1871,20 @@ class RDSScheduler:
                 self.lps_seq_start_time, self.lps_ptr = time.time(), 0
                 dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
             if state['lps_cr']:
-                # Strip padding and append CR, no null padding
+                # Strip trailing spaces, append CR, cap at 32 chars then encode to RDS bytes
                 txt_stripped = txt.rstrip()
-                lps_txt = (txt_stripped + '\r').encode('utf-8')
-                # Pad to at least 4 bytes for segment transmission, but stop at CR
+                lps_txt = text_to_rds_bytes((txt_stripped + '\r')[:32])
                 if len(lps_txt) < 4:
                     lps_txt = lps_txt.ljust(4, b'\x00')
+                # Reset and restart from seg 0 once all needed segments have been sent
+                # (mirrors RT CR behaviour: reset pointer then send seg 0 in the same call)
+                segs_needed = (len(lps_txt) + 3) // 4  # ceiling division, 1-8
+                if self.lps_ptr >= segs_needed:
+                    self.lps_ptr = 0
             else:
-                lps_txt = txt.encode('utf-8').ljust(32)[:32]
+                lps_txt = text_to_rds_bytes(txt.ljust(32)[:32])
             seg = self.lps_ptr % 8
             self.lps_ptr += 1
-            # For CR mode, only send up to the actual length; for normal mode send all 8 segments
-            if state['lps_cr'] and (seg * 4) >= len(lps_txt):
-                # Skip this segment and move to next group
-                return self.next()
             # Pad segment data if needed
             while len(lps_txt) < (seg + 1) * 4:
                 lps_txt += b'\x00'
@@ -2057,20 +2002,64 @@ class RDSScheduler:
             b4_val = 0x4600 | (linkage_code & 0xFF)
             return RDSHelper.get_group_bits(3, 0, b2_tail, b3_val, b4_val)
 
-        # Group not implemented or disabled - skip to next group instead of sending E0E0
-        # This prevents filling the sequence with empty groups
-        # NOTE: Don't increment ptr here - it was already incremented at line 1295
-        return self.next()
+        elif g_type == 8:
+            # Group 8A: Traffic Message Channel (TMC) - not implemented
+            # Send PS group instead of TMC to prevent blanks (TMC requires complex message structure)
+            raw = self.get_text("ps_dynamic") or "RDS_PRO "
+            txt = raw.ljust(8)[:8]
+            txt_bytes = text_to_rds_bytes(txt)
+            seg = self.ps_ptr % 4
+            self.ps_ptr += 1
+            tail = (state["ta"]<<4)|(state["ms"]<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
+            return RDSHelper.get_group_bits(0, 0, tail, 0xE0E0, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
+
+        # Group not implemented - send PS group to prevent recursion and blanks
+        # NOTE: Pointer was already incremented at line 1295
+        raw = self.get_text("ps_dynamic") or "RDS_PRO "
+        txt = raw.ljust(8)[:8]
+        txt_bytes = text_to_rds_bytes(txt)
+        seg = self.ps_ptr % 4
+        self.ps_ptr += 1
+        tail = (state["ta"]<<4)|(state["ms"]<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
+        return RDSHelper.get_group_bits(0, 0, tail, 0xE0E0, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
 
 # --- DSP ENGINE ---
 class RDSDSP:
+    # Number of bits to keep pre-generated in the queue (~170 ms of RDS data).
+    # The fill thread maintains this level; the audio callback never calls the scheduler.
+    _QUEUE_TARGET = 2000
+
     def __init__(self):
         self.sched = RDSScheduler()
         self.p_rds, self.p_pilot, self.bit_clock, self.last_bit = 0.0, 0.0, 0.0, 0
-        self.bit_queue = []
-        # Set filter cutoff to 1.5x bitrate (~1.78 kHz) - compromise between spectral width and amplitude
-        self.taps = dsp_signal.firwin(301, BITRATE * 1.5, fs=SAMPLE_RATE, window=('kaiser', 8.0))
+        self.bit_queue = collections.deque()
+        # Tighten filter cutoff to BITRATE (1.1875 kHz) to better approximate spec shaping
+        self.taps = dsp_signal.firwin(301, BITRATE * 1.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
         self.zi = np.zeros(300)
+        # Pre-fill the queue synchronously so audio starts immediately with data ready.
+        self._prefill()
+        # Background thread keeps the queue topped up without touching the audio hot-path.
+        threading.Thread(target=self._bit_fill_loop, daemon=True).start()
+
+    def _prefill(self):
+        while len(self.bit_queue) < self._QUEUE_TARGET:
+            try:
+                self.bit_queue.extend(self.sched.next())
+            except Exception as e:
+                print(f"[RDS] prefill exception: {e}", flush=True)
+                self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
+
+    def _bit_fill_loop(self):
+        """Non-real-time thread: keeps bit_queue near _QUEUE_TARGET so the
+        audio callback never has to call the scheduler directly."""
+        while state["running"]:
+            while len(self.bit_queue) < self._QUEUE_TARGET and state["running"]:
+                try:
+                    self.bit_queue.extend(self.sched.next())
+                except Exception as e:
+                    print(f"[RDS] fill-thread exception: {e}", flush=True)
+                    self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
+            time.sleep(0.010)   # yield GIL for 10 ms between top-up bursts
 
     def process_frame(self, outdata, frames, indata=None):
         lvl_pilot, lvl_rds = (state["pilot_level"]/100.0), (state["rds_level"]/100.0)
@@ -2078,7 +2067,7 @@ class RDSDSP:
         # Clamp to sensible range
         if rds_freq < 56000: rds_freq = 57000
         if rds_freq > 58000: rds_freq = 57000
-        
+
         # Genlock only valid when RDS is 3x pilot (57kHz)
         use_genlock = state["genlock"] and indata is not None and len(indata) == frames and abs(rds_freq - 3*PILOT_FREQ) < 1e-3
         if use_genlock:
@@ -2089,23 +2078,46 @@ class RDSDSP:
                  phase_19k = np.angle(spectrum[target_bin])
                  self.p_rds = (phase_19k * 3.0) + np.deg2rad(state["genlock_offset"])
              except: pass
-             
-        while len(self.bit_queue) < frames: self.bit_queue.extend(self.sched.next())
-        
-        bb = np.zeros(frames)
-        for i in range(frames):
-            self.bit_clock += BITRATE / SAMPLE_RATE
-            if self.bit_clock >= 1.0:
-                self.bit_clock -= 1.0
-                self.last_bit ^= self.bit_queue.pop(0)
-            bb[i] = 1.0 if self.last_bit else -1.0
-            if self.bit_clock >= 0.5: bb[i] *= -1.0
+
+        # Vectorized biphase-mark (FM0) generation — no Python loop over samples.
+        # cum[i] = accumulated bit-clock after sample i; integer part = bits consumed so far.
+        dr = BITRATE / SAMPLE_RATE
+        cum = self.bit_clock + np.arange(1, frames + 1) * dr
+        n_bits_at = np.floor(cum).astype(np.int32)   # bits consumed up to each sample
+        n_bits_total = int(n_bits_at[-1])
+
+        # Queue is maintained by _bit_fill_loop; emergency fallback only.
+        if len(self.bit_queue) < n_bits_total:
+            print(f"[DSP] queue underrun ({len(self.bit_queue)}/{n_bits_total})", flush=True)
+            while len(self.bit_queue) < n_bits_total:
+                self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
+
+        # Build prefix-XOR array: xor_prefix[k] = XOR of the first k bits from queue.
+        # xor_prefix[0] = 0 (no bits consumed yet).
+        xor_prefix = np.zeros(n_bits_total + 1, dtype=np.int32)
+        if n_bits_total > 0:
+            raw = np.fromiter(
+                (self.bit_queue.popleft() for _ in range(n_bits_total)),
+                dtype=np.int32, count=n_bits_total)
+            xor_prefix[1:] = np.cumsum(raw) & 1
+
+        # State at each sample: last_bit XOR accumulated XOR up to that sample.
+        states = (self.last_bit ^ xor_prefix[n_bits_at]) & 1
+        self.last_bit ^= int(xor_prefix[n_bits_total])
+        self.bit_clock = float(cum[-1] - n_bits_total)
+
+        # +1/-1 carrier; invert the second half of each bit period (FM0 encoding).
+        bb = np.where(states, 1.0, -1.0)
+        frac = cum - n_bits_at
+        bb = np.where(frac >= 0.5, -bb, bb)
             
         shaped, self.zi = dsp_signal.lfilter(self.taps, 1.0, bb, zi=self.zi)
         t = np.arange(frames) / SAMPLE_RATE
-
-        # Apply 0.1x compensation for wider filter bandwidth (1.5x filter passes more energy)
-        rds_sig = shaped * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds * 0.1
+        
+        # Normalise by π/4: the FIR-filtered Manchester biphase signal has a worst-case
+        # peak of 4/π (≈1.27), so multiply by π/4 to make the stated % equal the true peak.
+        # This mirrors the pilot, whose peak is exactly lvl_pilot (pure sine, amplitude 1).
+        rds_sig = shaped * (np.pi / 4.0) * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
@@ -2125,12 +2137,25 @@ class RDSDSP:
              outdata[:] = np.column_stack((mixed, mixed))
 
     def callback_duplex(self, indata, outdata, frames, time, status):
-        self.process_frame(outdata, frames, indata)
+        if status.output_underflow:
+            print("[DSP] output underflow", flush=True)
+        try:
+            self.process_frame(outdata, frames, indata)
+        except Exception as e:
+            print(f"[DSP] callback exception: {e}", flush=True)
 
     def callback_output(self, outdata, frames, time, status):
-        self.process_frame(outdata, frames, None)
+        if status.output_underflow:
+            print("[DSP] output underflow", flush=True)
+        try:
+            self.process_frame(outdata, frames, None)
+        except Exception as e:
+            print(f"[DSP] callback exception: {e}", flush=True)
 
 def run_audio():
+    import gc, sys
+    gc.disable()                    # prevent GC pauses from dropping the callback deadline
+    sys.setswitchinterval(0.001)    # 1 ms GIL slice — audio thread wins the GIL faster
     engine = RDSDSP()
     try:
         sd_in = state["device_in_idx"] if state["device_in_idx"] != -1 else None
@@ -2390,12 +2415,6 @@ def handle_control(data):
     if data['action'] == 'start':
         state["device_out_idx"] = int(data["dev_out"])
         state["device_in_idx"] = int(data["dev_in"])
-        # Pre-populate resolved_cache to prevent blank PS/RT at startup
-        for k in ["ps_dynamic", "ps_long_32", "rt_text", "rt_a", "rt_b", "ptyn"]:
-            if k in state and "\\" in state[k]:
-                result = parse_text_source(state[k])
-                if result is not None:
-                    resolved_cache[k] = result
         state["running"] = True
         save_config()
         threading.Thread(target=run_audio, daemon=True).start()
@@ -2617,12 +2636,6 @@ def auto_start_if_enabled():
         if "device_out_idx" not in state or state["device_out_idx"] is None:
             print("Auto-start: No output device configured, skipping auto-start")
             return
-        # Pre-populate resolved_cache to prevent blank PS/RT at startup
-        for k in ["ps_dynamic", "ps_long_32", "rt_text", "rt_a", "rt_b", "ptyn"]:
-            if k in state and "\\" in state[k]:
-                result = parse_text_source(state[k])
-                if result is not None:
-                    resolved_cache[k] = result
         state["running"] = True
         print(f"Auto-start: Starting RDS encoder (out={state['device_out_idx']}, in={state.get('device_in_idx', -1)})")
         threading.Thread(target=run_audio, daemon=True).start()
@@ -5501,10 +5514,8 @@ UI_HTML = r"""
                 var html = '<div class="text-xs space-y-1">';
                 for (var i = 0; i < eonServices.length; i++) {
                     var svc = eonServices[i];
-                    var tpBadge = svc.tp ? '<span class="bg-green-600 text-white text-xs px-1 rounded ml-1">TP</span>' : '';
-                    var taBadge = svc.ta ? '<span class="bg-yellow-600 text-black text-xs px-1 rounded font-bold ml-1">TA</span>' : '';
                     html += '<div class="p-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer border border-gray-700 hover:border-pink-600 transition-colors" onclick="openEONModalAndEdit(' + i + ')">';
-                    html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span>' + tpBadge + taBadge + ' - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
+                    html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span> - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
                     if (svc.af_list) html += ' <span class="text-xs text-gray-500">(' + svc.af_list + ')</span>';
                     html += '</div>';
                 }
@@ -5541,23 +5552,12 @@ UI_HTML = r"""
 
                 var info = document.createElement('div');
                 info.className = 'flex-1';
-                var tpBadge = svc.tp ? '<span class="bg-green-600 text-white text-xs px-1 rounded">TP</span>' : '';
-                var taBadge = svc.ta ? '<span class="bg-yellow-600 text-black text-xs px-1 rounded font-bold">TA</span>' : '';
-                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + ' ' + tpBadge + ' ' + taBadge + '</div>' +
+                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + '</div>' +
                                 '<div class="text-sm">' + (svc.ps || 'UNKNOWN') + '</div>' +
                                 '<div class="text-xs text-gray-400">' + (svc.af_list || 'No AFs') + '</div>';
 
                 var actions = document.createElement('div');
                 actions.className = 'flex gap-2';
-
-                // TA Toggle Button (only show if TP=1)
-                if (svc.tp) {
-                    var taToggleBtn = document.createElement('button');
-                    taToggleBtn.textContent = svc.ta ? 'TA OFF' : 'TA ON';
-                    taToggleBtn.className = svc.ta ? 'px-3 py-1 bg-yellow-600 hover:bg-yellow-500 text-black font-bold rounded text-xs' : 'px-3 py-1 bg-gray-600 hover:bg-gray-500 rounded text-xs';
-                    taToggleBtn.onclick = (function(idx) { return function() { toggleEONTA(idx); }; })(i);
-                    actions.appendChild(taToggleBtn);
-                }
 
                 var editBtn = document.createElement('button');
                 editBtn.textContent = 'Edit';
@@ -5636,16 +5636,6 @@ UI_HTML = r"""
             renderEONServiceList();
             updateEONDisplay();
             cancelEONEdit();
-        }
-
-        function toggleEONTA(idx) {
-            if (idx >= 0 && idx < eonServices.length) {
-                // Toggle TA flag
-                eonServices[idx].ta = eonServices[idx].ta ? 0 : 1;
-                syncEONServices();
-                renderEONServiceList();
-                updateEONDisplay();
-            }
         }
 
         function syncEONServices() {
@@ -5730,7 +5720,11 @@ UI_HTML = r"""
                 // Group header (clickable to expand/collapse)
                 var groupHeader = document.createElement('div');
                 groupHeader.className = 'bg-gradient-to-r from-purple-900 to-purple-800 border border-purple-600 rounded-t px-3 py-2 mt-3 first:mt-0 cursor-pointer hover:from-purple-800 hover:to-purple-700 transition-colors';
-                groupHeader.innerHTML = '<div class="font-mono text-sm font-bold text-purple-200"><span class="inline-block w-4">' + expandIcon + '</span> Group ' + key + ' <span class="text-xs text-purple-300">(' + items.length + ' item' + (items.length > 1 ? 's' : '') + ')</span></div>';
+                var allEnabled = items.every(function(item) { return item.group.enabled !== false; });
+                var toggleLabel = allEnabled ? 'Disable All' : 'Enable All';
+                var toggleBtnClass = allEnabled ? 'bg-red-700 hover:bg-red-600' : 'bg-green-700 hover:bg-green-600';
+                var toggleTarget = !allEnabled;
+                groupHeader.innerHTML = '<div class="font-mono text-sm font-bold text-purple-200 flex items-center justify-between"><span><span class="inline-block w-4">' + expandIcon + '</span> Group ' + key + ' <span class="text-xs text-purple-300">(' + items.length + ' item' + (items.length > 1 ? 's' : '') + ')</span></span><button class="' + toggleBtnClass + ' text-white text-xs px-2 py-0.5 rounded ml-2 font-normal" onclick="event.stopPropagation(); toggleCustomGroupType(\'' + key + '\', ' + toggleTarget + ')">' + toggleLabel + '</button></div>';
                 groupHeader.onclick = (function(groupKey) {
                     return function() {
                         modalExpandedGroups[groupKey] = !modalExpandedGroups[groupKey];
@@ -5787,6 +5781,19 @@ UI_HTML = r"""
                     container.appendChild(collapsedLine);
                 }
             }
+        }
+
+        function toggleCustomGroupType(typeKey, enabled) {
+            for (var i = 0; i < customGroups.length; i++) {
+                var grp = customGroups[i];
+                var verLabel = grp.version == 1 ? 'B' : 'A';
+                if (grp.type + verLabel === typeKey) {
+                    customGroups[i].enabled = enabled;
+                }
+            }
+            syncCustomGroups();
+            renderCustomGroupsList();
+            updateCustomGroupsDisplay();
         }
 
         function addCustomGroup() {
