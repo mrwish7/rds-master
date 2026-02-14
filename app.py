@@ -1855,9 +1855,10 @@ class RDSScheduler:
             # Initialize EON state tracking
             if not hasattr(self, 'eon_service_idx'):
                 self.eon_service_idx = 0
-                self.eon_variant = 0  # 0=PS, 4=AF, 13=PTY+TA
+                self.eon_variant = 0  # 0=PS, 4=AF list, 5-8=mapped, 9=LF/MF, 10=other band, 13=PTY+TA
                 self.eon_ps_seg = 0   # PS segment (0-3)
-                self.eon_af_idx = -1  # AF index (-1=count code, 0+=mapped freqs)
+                self.eon_af_idx = -1  # AF index (-1=count code, 0+=frequencies)
+                self.eon_mapped_idx = 0  # Index for mapped frequency pairs
 
             service = eon_services[self.eon_service_idx % len(eon_services)]
 
@@ -1891,8 +1892,174 @@ class RDSScheduler:
                 self.eon_ps_seg += 1
                 if self.eon_ps_seg >= 4:
                     self.eon_ps_seg = 0
-                    self.eon_variant = 4  # Next variant: AF
-                    self.eon_af_idx = -1
+                    # After PS, check for mapped frequencies first, then AF list
+                    mapped_freqs = service.get('mapped_freqs', [])
+                    lf_mf_mapped = service.get('lf_mf_mapped', [])
+                    af_list = service.get('af_list', '')
+                    afs = [f.strip() for f in af_list.split(',') if f.strip()]
+                    
+                    # Priority: mapped freqs (variants 5-8) > LF/MF (9) > other band (10) > AF list (4)
+                    if mapped_freqs:
+                        self.eon_variant = 5  # Start with variant 5 (first mapped pair)
+                        self.eon_mapped_idx = 0
+                    elif lf_mf_mapped:
+                        self.eon_variant = 9  # LF/MF mapped
+                        self.eon_mapped_idx = 0
+                    elif afs:
+                        self.eon_variant = 4  # AF list (Method A)
+                        self.eon_af_idx = -1
+                    else:
+                        self.eon_variant = 13  # Skip to PTY+TA if no AF data
+
+            # Variants 5-8: Mapped Frequency Pairs (same band)
+            # Variant 5 = 1st pair, 6 = 2nd pair, 7 = 3rd pair, 8 = 4th pair
+            elif self.eon_variant >= 5 and self.eon_variant <= 8:
+                mapped_freqs = service.get('mapped_freqs', [])
+                
+                if self.eon_mapped_idx < len(mapped_freqs):
+                    pair = mapped_freqs[self.eon_mapped_idx]
+                    tuned_freq = pair.get('tuned', '')
+                    other_freq = pair.get('other', '')
+                    
+                    try:
+                        # Check if frequencies are in the same band (both 87.6-107.9 or both 64.1-88.0)
+                        tuned_f = float(tuned_freq)
+                        other_f = float(other_freq)
+                        
+                        # Determine which band each frequency is in
+                        tuned_band2 = 87.6 <= tuned_f <= 107.9
+                        other_band2 = 87.6 <= other_f <= 107.9
+                        tuned_band1 = 64.1 <= tuned_f <= 88.0
+                        other_band1 = 64.1 <= other_f <= 88.0
+                        
+                        if (tuned_band2 and other_band2) or (tuned_band1 and other_band1):
+                            # Same band - use variants 5-8
+                            b2_tail = (tp_on << 4) | self.eon_variant
+                            
+                            if tuned_band2:
+                                # Both in Band II (87.6-107.9 MHz) - standard coding
+                                tuned_code = self.freq_code(tuned_freq)
+                                other_code = self.freq_code(other_freq)
+                            else:
+                                # Both in Band I (64.1-88.0 MHz) - extended coding minus 256
+                                tuned_code = (round((tuned_f - 64.1) / 0.1) + 257 - 256) & 0xFF
+                                other_code = (round((other_f - 64.1) / 0.1) + 257 - 256) & 0xFF
+                            
+                            b3_val = (tuned_code << 8) | other_code
+                        elif (tuned_band2 and other_band1) or (tuned_band1 and other_band2):
+                            # Different bands - use variant 10
+                            b2_tail = (tp_on << 4) | 0x0A  # Variant 10
+                            
+                            # For variant 10, encode using appropriate method for each band
+                            if tuned_band2:
+                                tuned_code = self.freq_code(tuned_freq)
+                            else:
+                                tuned_code = (round((tuned_f - 64.1) / 0.1) + 257 - 256) & 0xFF
+                            
+                            if other_band2:
+                                other_code = self.freq_code(other_freq)
+                            else:
+                                other_code = (round((other_f - 64.1) / 0.1) + 257 - 256) & 0xFF
+                            
+                            b3_val = (tuned_code << 8) | other_code
+                        else:
+                            # Invalid frequencies
+                            b2_tail = (tp_on << 4) | self.eon_variant
+                            b3_val = (205 << 8) | 205
+                    except:
+                        # Parsing error - send filler
+                        b2_tail = (tp_on << 4) | self.eon_variant
+                        b3_val = (205 << 8) | 205
+                    
+                    # Advance to next mapped pair
+                    self.eon_mapped_idx += 1
+                    if self.eon_mapped_idx < len(mapped_freqs) and self.eon_variant < 8:
+                        self.eon_variant += 1  # Next variant (6, 7, or 8)
+                    else:
+                        # Done with mapped frequencies
+                        # Check for LF/MF mapped or AF list
+                        lf_mf_mapped = service.get('lf_mf_mapped', [])
+                        af_list = service.get('af_list', '')
+                        afs = [f.strip() for f in af_list.split(',') if f.strip()]
+                        
+                        if lf_mf_mapped:
+                            self.eon_variant = 9
+                            self.eon_mapped_idx = 0
+                        elif afs:
+                            self.eon_variant = 4
+                            self.eon_af_idx = -1
+                        else:
+                            self.eon_variant = 13
+                else:
+                    # No more mapped pairs - skip to next variant
+                    lf_mf_mapped = service.get('lf_mf_mapped', [])
+                    af_list = service.get('af_list', '')
+                    afs = [f.strip() for f in af_list.split(',') if f.strip()]
+                    
+                    if lf_mf_mapped:
+                        self.eon_variant = 9
+                        self.eon_mapped_idx = 0
+                        b2_tail = (tp_on << 4) | 0x09
+                        b3_val = 0xE0E0  # This will be overridden in next call
+                    elif afs:
+                        self.eon_variant = 4
+                        self.eon_af_idx = -1
+                        b2_tail = (tp_on << 4) | 0x04
+                        b3_val = 0xE0E0
+                    else:
+                        self.eon_variant = 13
+                        b2_tail = (tp_on << 4) | 0x0D
+                        b3_val = 0xE0E0
+
+            # Variant 9: LF/MF Mapped Frequencies
+            elif self.eon_variant == 9:
+                lf_mf_mapped = service.get('lf_mf_mapped', [])
+                
+                if self.eon_mapped_idx < len(lf_mf_mapped):
+                    pair = lf_mf_mapped[self.eon_mapped_idx]
+                    vhf_freq = pair.get('vhf', '')
+                    lf_mf_freq = pair.get('lf_mf', 0)
+                    
+                    try:
+                        # VHF frequency code (standard AF coding)
+                        vhf_code = self.freq_code(vhf_freq)
+                        
+                        # LF/MF frequency in kHz (16-bit value in block 4 for variant 9)
+                        # But for block 3, we use special encoding
+                        # According to spec: variant 9 uses special format
+                        lf_mf_code = int(lf_mf_freq) & 0xFFFF
+                        
+                        b2_tail = (tp_on << 4) | 0x09
+                        # For variant 9: block 3 contains VHF code + method indicator
+                        b3_val = (vhf_code << 8) | ((lf_mf_code >> 8) & 0xFF)
+                        # Note: full LF/MF freq would need special handling, simplified here
+                    except:
+                        b2_tail = (tp_on << 4) | 0x09
+                        b3_val = (205 << 8) | 205
+                    
+                    self.eon_mapped_idx += 1
+                    if self.eon_mapped_idx >= len(lf_mf_mapped):
+                        # Done with LF/MF - check for AF list next
+                        af_list = service.get('af_list', '')
+                        afs = [f.strip() for f in af_list.split(',') if f.strip()]
+                        if afs:
+                            self.eon_variant = 4
+                            self.eon_af_idx = -1
+                        else:
+                            self.eon_variant = 13
+                else:
+                    # No LF/MF mapped - move to AF list or PTY+TA
+                    af_list = service.get('af_list', '')
+                    afs = [f.strip() for f in af_list.split(',') if f.strip()]
+                    if afs:
+                        self.eon_variant = 4
+                        self.eon_af_idx = -1
+                        b2_tail = (tp_on << 4) | 0x04
+                        b3_val = 0xE0E0
+                    else:
+                        self.eon_variant = 13
+                        b2_tail = (tp_on << 4) | 0x0D
+                        b3_val = 0xE0E0
 
             # Variant 4: AF(ON) - Method A: Send ON frequencies without TN
             elif self.eon_variant == 4:
@@ -1910,22 +2077,26 @@ class RDSScheduler:
                     if self.eon_af_idx == -1:
                         # First transmission: count code + first frequency (Method A format)
                         b3_val = ((224 + len(afs)) << 8) | self.freq_code(afs[0])
-                        self.eon_af_idx = 1  # Start at 1 for next transmission
-                    else:
-                        # Subsequent transmissions: send two frequencies at a time (Method A)
-                        if self.eon_af_idx < len(afs):
-                            f1 = self.freq_code(afs[self.eon_af_idx])
-                            f2 = self.freq_code(afs[self.eon_af_idx + 1]) if self.eon_af_idx + 1 < len(afs) else 205
-                            b3_val = (f1 << 8) | f2
-                            self.eon_af_idx += 2
-
-                            # Check if we've sent all AFs
-                            if self.eon_af_idx >= len(afs):
-                                self.eon_variant = 13  # Next variant: PTY+TA
+                        
+                        # If only 1 AF, skip directly to PTY+TA (per AF Method A examples)
+                        if len(afs) == 1:
+                            self.eon_variant = 13  # Done with AFs
                         else:
-                            # Shouldn't happen, but safety check
-                            b3_val = (205 << 8) | 205
-                            self.eon_variant = 13
+                            self.eon_af_idx = 1  # More AFs to send, start at index 1
+                    elif self.eon_af_idx >= 0 and self.eon_af_idx < len(afs):
+                        # Subsequent transmissions: send two frequencies at a time (Method A)
+                        f1 = self.freq_code(afs[self.eon_af_idx])
+                        f2 = self.freq_code(afs[self.eon_af_idx + 1]) if self.eon_af_idx + 1 < len(afs) else 205
+                        b3_val = (f1 << 8) | f2
+                        self.eon_af_idx += 2
+
+                        # Check if we've sent all AFs
+                        if self.eon_af_idx >= len(afs):
+                            self.eon_variant = 13  # Next variant: PTY+TA
+                    else:
+                        # All AFs sent, shouldn't reach here but move to next variant
+                        b3_val = (205 << 8) | 205
+                        self.eon_variant = 13
 
             # Variant 13: PTY(ON) + TA
             elif self.eon_variant == 13:
@@ -1941,6 +2112,7 @@ class RDSScheduler:
                 self.eon_variant = 0  # Start with PS for next service
                 self.eon_ps_seg = 0
                 self.eon_af_idx = -1
+                self.eon_mapped_idx = 0
 
             else:
                 # Invalid variant - reset
@@ -3962,13 +4134,35 @@ UI_HTML = r"""
                             <option value="13">Light Classical</option>
                             <option value="14">Serious Classical</option>
                             <option value="15">Other Music</option>
+                            <option value="16">Weather</option>
+                            <option value="17">Finance</option>
+                            <option value="18">Children's</option>
+                            <option value="19">Social Affairs</option>
+                            <option value="20">Religion</option>
+                            <option value="21">Phone-In</option>
+                            <option value="22">Travel</option>
+                            <option value="23">Leisure</option>
+                            <option value="24">Jazz</option>
+                            <option value="25">Country</option>
+                            <option value="26">National Music</option>
+                            <option value="27">Oldies</option>
+                            <option value="28">Folk Music</option>
+                            <option value="29">Documentary</option>
+                            <option value="30">Alarm Test</option>
+                            <option value="31">Alarm</option>
                         </select>
                     </div>
 
                     <div>
                         <label class="text-xs text-gray-400 mb-1 block">AF List (ON)</label>
                         <input type="text" id="eon_af" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="88.1, 101.5">
-                        <div class="text-[10px] text-gray-500 mt-1">Comma-separated frequencies in MHz</div>
+                        <div class="text-[10px] text-gray-500 mt-1">Comma-separated frequencies in MHz (Method A)</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Mapped Frequencies (Variants 5-8, 10)</label>
+                        <textarea id="eon_mapped" rows="3" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono" placeholder="90.4 -> 102.5&#10;88.0 -> 95.3"></textarea>
+                        <div class="text-[10px] text-gray-500 mt-1">One pair per line: tuned_freq -> other_freq (max 4 pairs). Supports Band I (64.1-88.0) & II (87.6-107.9)</div>
                     </div>
 
                     <div class="grid grid-cols-2 gap-3">
@@ -5874,7 +6068,7 @@ UI_HTML = r"""
                     var svc = eonServices[i];
                     html += '<div class="p-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer border border-gray-700 hover:border-pink-600 transition-colors" onclick="openEONModalAndEdit(' + i + ')">';
                     html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span> - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
-                    if (svc.af_list) html += ' <span class="text-xs text-gray-500">(' + svc.af_list + ')</span>';
+                    if (svc.af_list) html += '<br><span class="text-xs text-gray-500 break-words">AFs: ' + svc.af_list + '</span>';
                     html += '</div>';
                 }
                 html += '</div>';
@@ -5912,7 +6106,7 @@ UI_HTML = r"""
                 info.className = 'flex-1';
                 info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + '</div>' +
                                 '<div class="text-sm">' + (svc.ps || 'UNKNOWN') + '</div>' +
-                                '<div class="text-xs text-gray-400">' + (svc.af_list || 'No AFs') + '</div>';
+                                '<div class="text-xs text-gray-400 break-words">' + (svc.af_list || 'No AFs') + '</div>';
 
                 var actions = document.createElement('div');
                 actions.className = 'flex gap-2';
@@ -5941,6 +6135,7 @@ UI_HTML = r"""
             document.getElementById('eon_ps').value = '';
             document.getElementById('eon_pty').value = '0';
             document.getElementById('eon_af').value = '';
+            document.getElementById('eon_mapped').value = '';
             document.getElementById('eon_tp').checked = false;
             document.getElementById('eon_ta').checked = false;
             document.getElementById('eon_modal_title').textContent = 'Add EON Service';
@@ -5954,6 +6149,16 @@ UI_HTML = r"""
             document.getElementById('eon_ps').value = svc.ps || '';
             document.getElementById('eon_pty').value = svc.pty || 0;
             document.getElementById('eon_af').value = svc.af_list || '';
+            
+            // Convert mapped_freqs array to text format
+            var mappedText = '';
+            if (svc.mapped_freqs && svc.mapped_freqs.length > 0) {
+                mappedText = svc.mapped_freqs.map(function(pair) {
+                    return pair.tuned + ' -> ' + pair.other;
+                }).join('\n');
+            }
+            document.getElementById('eon_mapped').value = mappedText;
+            
             document.getElementById('eon_tp').checked = svc.tp || false;
             document.getElementById('eon_ta').checked = svc.ta || false;
             document.getElementById('eon_modal_title').textContent = 'Edit EON Service';
@@ -5975,11 +6180,29 @@ UI_HTML = r"""
 
         function saveEONService() {
             var idx = document.getElementById('eon_edit_idx').value;
+            
+            // Parse mapped frequencies from text format
+            var mappedText = document.getElementById('eon_mapped').value.trim();
+            var mappedFreqs = [];
+            if (mappedText) {
+                var lines = mappedText.split('\n');
+                for (var i = 0; i < lines.length && i < 4; i++) {
+                    var line = lines[i].trim();
+                    if (line) {
+                        var parts = line.split('->').map(function(s) { return s.trim(); });
+                        if (parts.length === 2) {
+                            mappedFreqs.push({ tuned: parts[0], other: parts[1] });
+                        }
+                    }
+                }
+            }
+            
             var svc = {
                 pi_on: document.getElementById('eon_pi').value.toUpperCase() || 'C000',
                 ps: document.getElementById('eon_ps').value || 'UNKNOWN',
                 pty: parseInt(document.getElementById('eon_pty').value) || 0,
                 af_list: document.getElementById('eon_af').value || '',
+                mapped_freqs: mappedFreqs,
                 tp: document.getElementById('eon_tp').checked ? 1 : 0,
                 ta: document.getElementById('eon_ta').checked ? 1 : 0
             };
