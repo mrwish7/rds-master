@@ -206,18 +206,37 @@ RTPLUS_CONTENT_TYPES = {
 }
 
 app = Flask(__name__)
-CONFIG_FILE = 'config.ini'
+CONFIG_FILE = 'config.ini'  # Legacy - deprecated
+DATASETS_FILE = os.path.join(os.path.dirname(__file__), 'datasets.json')
 
 def get_or_create_secret():
-    config = configparser.ConfigParser()
-    if os.path.exists(CONFIG_FILE):
-        config.read(CONFIG_FILE)
-        if 'SYSTEM' in config and 'secret_key' in config['SYSTEM']:
-            return config['SYSTEM']['secret_key']
+    """Get or create secret key from datasets.json."""
+    try:
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+                if 'system' in data and 'secret_key' in data['system']:
+                    return data['system']['secret_key']
+    except:
+        pass
+    
+    # Generate new secret
     secret = os.urandom(24).hex()
-    if not config.has_section('SYSTEM'): config.add_section('SYSTEM')
-    config['SYSTEM'] = {'secret_key': secret}
-    with open(CONFIG_FILE, 'w') as f: config.write(f)
+    
+    # Save to datasets.json
+    try:
+        data = {}
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+        if 'system' not in data:
+            data['system'] = {}
+        data['system']['secret_key'] = secret
+        with open(DATASETS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving secret: {e}")
+    
     return secret
 
 app.secret_key = os.environ.get("RDS_SECRET", get_or_create_secret())
@@ -271,7 +290,6 @@ default_state = {
     "custom_groups": "[]",  # JSON array of custom group data
 
     # Settings
-    "auto_start": True,
     "rds_freq": 57000,
     
     # Scheduler
@@ -509,32 +527,154 @@ def get_valid_devices():
     return valid_inputs, valid_outputs
 
 # --- CONFIG ---
-def load_config():
-    global state
-    config = configparser.ConfigParser()
-    if os.path.exists(CONFIG_FILE):
+def migrate_config_ini():
+    """Migrate config.ini to datasets.json format, then delete config.ini."""
+    global auth_config
+    
+    if not os.path.exists(CONFIG_FILE):
+        return  # Nothing to migrate
+    
+    print("Migrating config.ini to datasets.json...")
+    
+    try:
+        config = configparser.ConfigParser()
         config.read(CONFIG_FILE)
+        
+        # Load existing datasets.json or create new structure
+        data = {}
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+        
+        if 'datasets' not in data:
+            data['datasets'] = {}
+        if 'system' not in data:
+            data['system'] = {}
+        if 'auth' not in data:
+            data['auth'] = {}
+        
+        # Migrate RDS state to Dataset 1
+        migrated_state = dict(default_state)
+        auto_start_migrated = True  # Default value
+        
         if 'RDS' in config:
-            for k in state:
+            for k in migrated_state:
                 if k in config['RDS']:
                     val = config['RDS'][k]
-                    if isinstance(default_state[k], bool): state[k] = (val == 'True')
-                    elif isinstance(default_state[k], int) and not isinstance(default_state[k], bool): state[k] = int(val)
-                    elif isinstance(default_state[k], float): state[k] = float(val)
-                    else: state[k] = val
+                    if isinstance(default_state[k], bool):
+                        migrated_state[k] = (val == 'True')
+                    elif isinstance(default_state[k], int) and not isinstance(default_state[k], bool):
+                        migrated_state[k] = int(val)
+                    elif isinstance(default_state[k], float):
+                        migrated_state[k] = float(val)
+                    else:
+                        migrated_state[k] = val
+            
+            # Migrate auto_start if it exists in config.ini
+            if 'auto_start' in config['RDS']:
+                auto_start_migrated = (config['RDS']['auto_start'] == 'True')
+        
+        # Remove auto_start from migrated_state if it exists (it should be global, not per-dataset)
+        migrated_state.pop('auto_start', None)
+        
+        # Create or update Dataset 1
+        if '1' not in data['datasets']:
+            data['datasets']['1'] = {'name': 'Dataset 1 (Migrated)', 'state': migrated_state}
+        else:
+            data['datasets']['1']['state'].update(migrated_state)
+            # Also clean up auto_start from existing dataset state
+            data['datasets']['1']['state'].pop('auto_start', None)
+        
+        if 'current' not in data:
+            data['current'] = 1
+        
+        # Save auto_start as global setting (NOT per-dataset)
+        data['auto_start'] = auto_start_migrated
+        
+        # Migrate AUTH
         if 'AUTH' in config:
-            auth_config['user'] = config['AUTH'].get('user', auth_config['user'])
-            auth_config['pass'] = config['AUTH'].get('pass', auth_config['pass'])
-    print("Config loaded.")
+            data['auth']['user'] = config['AUTH'].get('user', 'admin')
+            data['auth']['pass'] = config['AUTH'].get('pass', 'admin')
+            auth_config['user'] = data['auth']['user']
+            auth_config['pass'] = data['auth']['pass']
+        
+        # Migrate SYSTEM (secret_key)
+        if 'SYSTEM' in config and 'secret_key' in config['SYSTEM']:
+            data['system']['secret_key'] = config['SYSTEM']['secret_key']
+        
+        # Save migrated data
+        with open(DATASETS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        # Delete config.ini after successful migration
+        os.remove(CONFIG_FILE)
+        print(f"✓ Migrated config.ini to datasets.json and removed old file.")
+        print(f"✓ auto_start set to: {auto_start_migrated}")
+        
+    except Exception as e:
+        print(f"Error migrating config.ini: {e}")
+        import traceback
+        traceback.print_exc()
+
+def load_config():
+    """Load configuration from datasets.json."""
+    global state, auth_config, current_dataset, auto_start
+    
+    # First, check if we need to migrate from config.ini
+    migrate_config_ini()
+    
+    # Load from datasets.json
+    auto_start_was_missing = False
+    try:
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+                
+                # Load current dataset
+                current_dataset_str = str(data.get('current', 1))
+                current_dataset = int(current_dataset_str)
+                
+                if 'datasets' in data and current_dataset_str in data['datasets']:
+                    dataset_state = data['datasets'][current_dataset_str].get('state', {})
+                    # Remove auto_start from state if it exists (it should only be at root level)
+                    dataset_state.pop('auto_start', None)
+                    state.update(dataset_state)
+                    # Reset running state - encoder is never running at startup
+                    state["running"] = False
+                    print(f"Loaded state from Dataset {current_dataset_str} (device_out_idx={state.get('device_out_idx')})")
+                
+                # Load auth
+                if 'auth' in data:
+                    auth_config['user'] = data['auth'].get('user', auth_config['user'])
+                    auth_config['pass'] = data['auth'].get('pass', auth_config['pass'])
+                
+                # Load auto_start global setting
+                if 'auto_start' not in data:
+                    auto_start_was_missing = True
+                    print("⚠ auto_start missing from datasets.json, will add it...")
+                auto_start = data.get('auto_start', True)
+        else:
+            print("datasets.json not found, using default state.")
+    except Exception as e:
+        print(f"Error loading config from datasets.json: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("Config loaded from datasets.json.")
     migrate_rt_messages()
 
     # Initialize monitor_data from loaded state to prevent blank display on startup
     global monitor_data
     monitor_data["pi"] = state.get("pi", "0000")
     monitor_data["pty_idx"] = state.get("pty", 0)
-    monitor_data["af"] = state.get("af_list", "")
     monitor_data["ps"] = state.get("ps_dynamic", "RDS PRO")
     monitor_data["rt"] = state.get("rt_text", "")
+    
+    # Fix datasets.json if auto_start was missing
+    if auto_start_was_missing:
+        load_datasets()  # Load datasets into memory
+        save_datasets()  # This will add auto_start to the root level
+        print(f"✓ Added auto_start={auto_start} to datasets.json")
 
 def migrate_rt_messages():
     """Migrate old RT config fields to new unified rt_messages structure."""
@@ -609,17 +749,50 @@ def migrate_rt_messages():
         print(f"Migrated {len(messages)} RT message(s) from legacy config.")
 
 def save_config():
-    config = configparser.ConfigParser()
-    if os.path.exists(CONFIG_FILE):
-        config.read(CONFIG_FILE)
-    config['RDS'] = {k: str(v) for k, v in state.items()}
-    config['AUTH'] = {'user': auth_config.get('user','admin'), 'pass': auth_config.get('pass','admin')}
-    with open(CONFIG_FILE, 'w') as f: config.write(f)
+    """Save configuration to datasets.json."""
+    try:
+        # Load existing data
+        data = {}
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+        
+        # Ensure structure exists
+        if 'datasets' not in data:
+            data['datasets'] = {}
+        if 'auth' not in data:
+            data['auth'] = {}
+        
+        # Get current dataset
+        current = str(data.get('current', 1))
+        
+        # Update current dataset state
+        if current not in data['datasets']:
+            data['datasets'][current] = {'name': f'Dataset {current}', 'state': {}}
+        
+        data['datasets'][current]['state'] = dict(state)
+        
+        # Preserve existing auth - don't overwrite unless missing
+        if 'auth' not in data or not data['auth']:
+            data['auth'] = {
+                'user': auth_config.get('user', 'admin'),
+                'pass': auth_config.get('pass', 'admin')
+            }
+        
+        # Save global auto_start setting
+        data['auto_start'] = auto_start
+        
+        # Save
+        with open(DATASETS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving config: {e}")
 
 # --- DATASETS ---
-DATASETS_FILE = os.path.join(os.path.dirname(__file__), 'datasets.json')
+# DATASETS_FILE already defined above near CONFIG_FILE
 datasets = {}
 current_dataset = 1
+auto_start = True  # Global setting, not per-dataset
 
 def load_datasets():
     global datasets, current_dataset
@@ -628,6 +801,10 @@ def load_datasets():
             with open(DATASETS_FILE, 'r') as f:
                 data = json.load(f)
                 datasets = data.get('datasets', {})
+                # Clean up auto_start from all dataset states
+                for ds_key in datasets:
+                    if 'state' in datasets[ds_key]:
+                        datasets[ds_key]['state'].pop('auto_start', None)
                 current_dataset = data.get('current', 1)
         else:
             datasets = {'1': {'name': 'Dataset 1', 'state': dict(state)}}
@@ -637,9 +814,37 @@ def load_datasets():
         current_dataset = 1
 
 def save_datasets():
+    """Save datasets along with auth and system settings."""
+    global auto_start
     try:
+        # Load existing data to preserve auth and system
+        data = {}
+        if os.path.exists(DATASETS_FILE):
+            with open(DATASETS_FILE, 'r') as f:
+                data = json.load(f)
+        
+        # Clean up: remove auto_start from all dataset states before saving
+        datasets_clean = {}
+        for ds_key, ds_value in datasets.items():
+            datasets_clean[ds_key] = {'name': ds_value.get('name', f'Dataset {ds_key}')}
+            if 'state' in ds_value:
+                state_copy = dict(ds_value['state'])
+                state_copy.pop('auto_start', None)  # Ensure auto_start never in state
+                datasets_clean[ds_key]['state'] = state_copy
+        
+        # Update datasets and current
+        data['datasets'] = datasets_clean
+        data['current'] = current_dataset
+        data['auto_start'] = auto_start  # Save global auto_start setting at root level
+        
+        # Preserve auth and system if they exist
+        if 'auth' not in data:
+            data['auth'] = {'user': auth_config.get('user', 'admin'), 'pass': auth_config.get('pass', 'admin')}
+        if 'system' not in data:
+            data['system'] = {}
+        
         with open(DATASETS_FILE, 'w') as f:
-            json.dump({'datasets': datasets, 'current': current_dataset}, f, indent=2)
+            json.dump(data, f, indent=2)
     except Exception as e:
         print(f"Error saving datasets: {e}")
 
@@ -647,9 +852,13 @@ def switch_dataset(dataset_num):
     global state, current_dataset
     dataset_num = str(dataset_num)
     if dataset_num in datasets:
+        # Save current state (auto_start will be cleaned by save_datasets)
         datasets[str(current_dataset)]['state'] = dict(state)
         save_datasets()
-        state.update(datasets[dataset_num]['state'])
+        # Load new dataset state
+        new_state = datasets[dataset_num]['state'].copy()
+        new_state.pop('auto_start', None)  # Ensure auto_start not in state
+        state.update(new_state)
         current_dataset = int(dataset_num)
         save_config()
         return True
@@ -760,18 +969,39 @@ def monitor_pusher_loop():
     while True:
         monitor_data["heartbeat"] = int(time.time() * 1000)
         if state["running"]:
-            monitor_data["af"] = state["af_list"]
+            monitor_data["af_list"] = state["af_list"]
+            monitor_data["af_method"] = state.get("af_method", "A")
+            monitor_data["af_pairs"] = state.get("af_pairs", "[]")
             monitor_data["pty_idx"] = state["pty"]
             monitor_data["pi"] = state["pi"]
+            monitor_data["tp"] = state.get("tp", 0)
+            monitor_data["ta"] = state.get("ta", 0)
+            monitor_data["ms"] = state.get("ms", 0)
+            monitor_data["di_stereo"] = state.get("di_stereo", 1)
+            monitor_data["di_head"] = state.get("di_head", 0)
+            monitor_data["di_comp"] = state.get("di_comp", 1)
+            monitor_data["di_dyn"] = state.get("di_dyn", 0)
+            monitor_data["rbds"] = state.get("rbds", False)
+            
+            # EON networks list
+            try:
+                eon_services = json.loads(state.get("eon_services", "[]")) if isinstance(state.get("eon_services", "[]"), str) else state.get("eon_services", [])
+                monitor_data["eon_networks"] = [{"pi": svc.get("pi_on", ""), "ps": svc.get("ps", "")} for svc in eon_services] if eon_services else []
+            except:
+                monitor_data["eon_networks"] = []
+            
             # Pilot generation: disabled if pass-through is enabled and an input device is selected, or when genlock is active
             monitor_data["pilot_generated"] = not ((state.get("passthrough") and state.get("device_in_idx") != -1) or state.get("genlock"))
             socketio.emit('monitor', monitor_data)
         else:
              socketio.emit('monitor', {
                  "ps": "OFF AIR", "rt": "Encoder Stopped", 
-                 "lps": "", "ptyn": "", "af": "", "pty_idx": 0, "rt_plus_info": "", "pi": "----",
+                 "lps": "", "ptyn": "", "af_list": "", "af_method": "A", "af_pairs": "[]", "pty_idx": 0, "rt_plus_info": "", "pi": "----",
                  "heartbeat": monitor_data["heartbeat"],
-                 "pilot_generated": False
+                 "pilot_generated": False,
+                 "tp": 0, "ta": 0, "ms": 0,
+                 "di_stereo": 0, "di_head": 0, "di_comp": 0, "di_dyn": 0,
+                 "rbds": False, "eon_networks": []
              })
         time.sleep(0.2)
 
@@ -2464,7 +2694,7 @@ def run_audio():
 def index():
     if not session.get('auth'): return redirect(url_for('login'))
     inputs, outputs = get_valid_devices()
-    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config)
+    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, auto_start=auto_start, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config)
 
 @app.route('/login', methods=['GET','POST'])
 def login():
@@ -2491,7 +2721,8 @@ def update_settings():
     changed = False
 
     if 'auto_start' in data:
-        state['auto_start'] = bool(data['auto_start'])
+        global auto_start
+        auto_start = bool(data['auto_start'])
         changed = True
 
     user = data.get('user')
@@ -2919,7 +3150,7 @@ load_config()
 load_datasets()
 
 def auto_start_if_enabled():
-    if state.get("auto_start") and not state.get("running"):
+    if auto_start and not state.get("running"):
         # Ensure device indices are set from state
         if "device_out_idx" not in state or state["device_out_idx"] is None:
             print("Auto-start: No output device configured, skipping auto-start")
@@ -3019,6 +3250,31 @@ UI_HTML = r"""
         .live-display { background: #000; border: 1px solid #333; color: #0f0; font-family: 'Courier New', monospace; padding: 8px; font-size: 14px; font-weight: bold; border-radius: 2px; letter-spacing: 1px; min-height: 20px; }
         .live-display.lg { font-size: 24px; color: #d946ef; text-align: center; letter-spacing: 4px; background: #110011; border-color: #550055; text-transform: uppercase; }
         .live-display.sub { color: #00ffcc; font-size: 12px; }
+        
+        /* DI Flag checkboxes - red/green indicators */
+        input[type="checkbox"].di-indicator { 
+            appearance: none; 
+            width: 16px; 
+            height: 16px; 
+            border-radius: 3px; 
+            border: 2px solid #666;
+            background: #dc2626;
+            position: relative;
+            cursor: default;
+        }
+        input[type="checkbox"].di-indicator:checked { 
+            background: #10b981;
+            border-color: #059669;
+        }
+        input[type="checkbox"].di-indicator:checked::after {
+            content: '✓';
+            position: absolute;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+            top: -2px;
+            left: 2px;
+        }
 
         /* RT+ Builder Modal */
         .rtplus-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 100; display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -3133,8 +3389,8 @@ UI_HTML = r"""
                              </div>
                              
                              <div>
-                                 <label class="flex justify-between"><span>RT+ Status</span> <span class="text-xs text-gray-400">AID: 4BD7 (Group 11A)</span></label>
-                                 <div class="live-display sub text-orange-300" id="live_rt_plus"></div>
+                                 <label class="flex justify-between"><span>RT+ Tags</span> <span class="text-xs text-gray-400">AID: 4BD7 (Group 11A)</span></label>
+                                 <div class="live-display sub text-orange-300 whitespace-pre-line" id="live_rt_plus"></div>
                              </div>
 
                              <div class="grid grid-cols-3 gap-2">
@@ -3149,6 +3405,58 @@ UI_HTML = r"""
                                  <div>
                                      <label>PTY Name</label>
                                      <div class="live-display sub" id="live_ptyn"></div>
+                                 </div>
+                             </div>
+                             
+                             <div class="grid grid-cols-2 gap-2">
+                                 <div>
+                                     <label>Decoder Flags (DI)</label>
+                                     <div class="live-display sub flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                                         <label class="flex items-center gap-1 cursor-default">
+                                             <input type="checkbox" id="live_di_stereo" disabled class="pointer-events-none di-indicator">
+                                             <span>Stereo</span>
+                                         </label>
+                                         <label class="flex items-center gap-1 cursor-default">
+                                             <input type="checkbox" id="live_di_head" disabled class="pointer-events-none di-indicator">
+                                             <span>Artificial Head</span>
+                                         </label>
+                                         <label class="flex items-center gap-1 cursor-default">
+                                             <input type="checkbox" id="live_di_comp" disabled class="pointer-events-none di-indicator">
+                                             <span>Compressed</span>
+                                         </label>
+                                         <label class="flex items-center gap-1 cursor-default">
+                                             <input type="checkbox" id="live_di_dyn" disabled class="pointer-events-none di-indicator">
+                                             <span>Dynamic PTY</span>
+                                         </label>
+                                     </div>
+                                 </div>
+                                 <div>
+                                     <label>Status Flags</label>
+                                     <div class="live-display sub flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                                         <span class="flex items-center gap-1">
+                                             <span class="inline-block w-2 h-2 rounded-full" id="tp_indicator"></span>
+                                             <span>TP</span>
+                                         </span>
+                                         <span class="flex items-center gap-1">
+                                             <span class="inline-block w-2 h-2 rounded-full" id="ta_indicator"></span>
+                                             <span>TA</span>
+                                         </span>
+                                         <span class="flex items-center gap-1">
+                                             <span class="inline-block w-2 h-2 rounded-full" id="ms_indicator"></span>
+                                             <span>M/S</span>
+                                         </span>
+                                     </div>
+                                 </div>
+                             </div>
+                             
+                             <div class="grid grid-cols-2 gap-2">
+                                 <div>
+                                     <label>Alternative Frequencies</label>
+                                     <div class="live-display sub text-xs whitespace-pre-line" id="live_af"></div>
+                                 </div>
+                                 <div>
+                                     <label>EON Networks</label>
+                                     <div class="live-display sub text-xs whitespace-pre-line" id="live_eon"></div>
                                  </div>
                              </div>
                         </div>
@@ -3901,7 +4209,7 @@ UI_HTML = r"""
                                 <label>Auto-start encoder on launch</label>
                                 <div class="text-[9px] text-gray-500">Default is enabled; uncheck to keep the encoder idle on boot.</div>
                             </div>
-                            <input type="checkbox" class="toggle-checkbox" id="auto_start" {% if state.auto_start %}checked{% endif %}>
+                            <input type="checkbox" class="toggle-checkbox" id="auto_start" {% if auto_start %}checked{% endif %}>
                         </div>
                         <div class="mb-2">
                             <label>Username</label>
@@ -4161,18 +4469,14 @@ UI_HTML = r"""
 
                     <div>
                         <label class="text-xs text-gray-400 mb-1 block">Mapped Frequencies (Variants 5-8, 10)</label>
-                        <textarea id="eon_mapped" rows="3" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono" placeholder="90.4 -> 102.5&#10;88.0 -> 95.3"></textarea>
-                        <div class="text-[10px] text-gray-500 mt-1">One pair per line: tuned_freq -> other_freq (max 4 pairs). Supports Band I (64.1-88.0) & II (87.6-107.9)</div>
+                        <textarea id="eon_mapped" rows="3" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono" placeholder="107.4, 90.4&#10;101.6, 95.3"></textarea>
+                        <div class="text-[10px] text-gray-500 mt-1">One pair per line: tuned, other (max 4 pairs). 87.6-107.9 MHz</div>
                     </div>
 
-                    <div class="grid grid-cols-2 gap-3">
+                    <div>
                         <div class="flex items-center justify-between bg-black p-2 rounded">
                             <label class="text-xs text-gray-400">TP (ON)</label>
                             <input type="checkbox" class="toggle-checkbox" id="eon_tp">
-                        </div>
-                        <div class="flex items-center justify-between bg-black p-2 rounded">
-                            <label class="text-xs text-gray-400">TA (ON)</label>
-                            <input type="checkbox" class="toggle-checkbox" id="eon_ta">
                         </div>
                     </div>
                 </div>
@@ -5818,9 +6122,88 @@ UI_HTML = r"""
             setText('live_rt', data.rt);
             setText('live_lps', data.lps);
             setText('live_ptyn', data.ptyn);
-            setText('live_af', data.af);
-            setText('live_rt_plus', data.rt_plus_info);
-            setText('live_pi', data.pi); // Show current PI
+            setText('live_pi', data.pi);
+            
+            // Format RT+ tags with type names
+            if (data.rt_plus_info && data.rt_plus_info !== "No RT+" && data.rt_plus_info !== "") {
+                const parts = data.rt_plus_info.split(' | ');
+                const formatted = parts.map(p => {
+                    const match = p.match(/^(\d+):(.+)$/);
+                    if (match) {
+                        const typeCode = parseInt(match[1]);
+                        const content = match[2];
+                        const typeName = RTPLUS_TYPES[typeCode] ? RTPLUS_TYPES[typeCode][0] : 'Unknown';
+                        return typeName + ': ' + content;
+                    }
+                    return p;
+                }).join('\n');
+                setText('live_rt_plus', formatted);
+            } else {
+                setText('live_rt_plus', data.rt_plus_info || "No RT+");
+            }
+            
+            // Decoder flags (DI)
+            const setCheck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+            setCheck('live_di_stereo', data.di_stereo);
+            setCheck('live_di_head', data.di_head);
+            setCheck('live_di_comp', data.di_comp);
+            setCheck('live_di_dyn', data.di_dyn);
+            
+            // Status flags
+            const setIndicator = (id, v) => { 
+                const el = document.getElementById(id); 
+                if (el) {
+                    el.className = 'inline-block w-2 h-2 rounded-full ' + (v ? 'bg-green-400' : 'bg-gray-600');
+                }
+            };
+            setIndicator('tp_indicator', data.tp);
+            setIndicator('ta_indicator', data.ta);
+            setIndicator('ms_indicator', data.ms);
+            
+            // Alternative Frequencies - format based on method
+            let afDisplay = "None";
+            if (data.af_list && data.af_list.trim()) {
+                const methodA = data.af_list.trim();
+                let methodB = "";
+                try {
+                    const pairs = JSON.parse(data.af_pairs || "[]");
+                    if (pairs && pairs.length > 0) {
+                        // Format: each pair is {main: "101.1", alts: "96.2, 97.8", regional: false}
+                        const pairLines = [];
+                        pairs.forEach(p => {
+                            const main = p.main || "";
+                            const alts = (p.alts || "").split(',').map(a => a.trim()).filter(a => a);
+                            alts.forEach(alt => {
+                                pairLines.push(main + " → " + alt);
+                            });
+                        });
+                        methodB = pairLines.join("\n");
+                    }
+                } catch(e) {}
+                
+                if (data.af_method === "A") {
+                    afDisplay = "A: " + methodA;
+                } else if (data.af_method === "B") {
+                    afDisplay = methodB ? "B: " + methodB : "None";
+                } else if (data.af_method === "Both") {
+                    const parts = [];
+                    if (methodA) parts.push("A: " + methodA);
+                    if (methodB) parts.push("B:\n" + methodB);
+                    afDisplay = parts.length > 0 ? parts.join("\n\n") : "None";
+                }
+            }
+            setText('live_af', afDisplay);
+            
+            // EON Networks
+            if (data.eon_networks && data.eon_networks.length > 0) {
+                const eonText = data.eon_networks.map(n => n.pi + ' / ' + n.ps).join('\n');
+                setText('live_eon', eonText);
+            } else {
+                setText('live_eon', "None");
+            }
+            
+            // Use RBDS or RDS list based on mode
+            const pty_list = data.rbds ? pty_list_rbds : pty_list_rds;
             setText('live_pty', pty_list[data.pty_idx] || "None");
             if (typeof data.pilot_generated !== 'undefined') setText('pilot_status', data.pilot_generated ? 'Generated' : 'Disabled (Pass-through/Genlock)');
         });
@@ -6067,8 +6450,33 @@ UI_HTML = r"""
                 for (var i = 0; i < eonServices.length; i++) {
                     var svc = eonServices[i];
                     html += '<div class="p-2 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer border border-gray-700 hover:border-pink-600 transition-colors" onclick="openEONModalAndEdit(' + i + ')">';
-                    html += '<span class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</span> - <span class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</span>';
-                    if (svc.af_list) html += '<br><span class="text-xs text-gray-500 break-words">AFs: ' + svc.af_list + '</span>';
+                    
+                    // Line 1: PI code
+                    html += '<div class="font-mono text-pink-400">' + (svc.pi_on || 'C000') + '</div>';
+                    
+                    // Line 2: PS name
+                    html += '<div class="text-gray-200">' + (svc.ps || 'UNKNOWN') + '</div>';
+                    
+                    // Line 3: AF info (A: method A list, B: mapped frequencies)
+                    var afInfo = [];
+                    
+                    // A: Method A AF list
+                    if (svc.af_list && svc.af_list.trim()) {
+                        afInfo.push('A: ' + svc.af_list.trim());
+                    }
+                    
+                    // B: Mapped frequencies
+                    if (svc.mapped_freqs && svc.mapped_freqs.length > 0) {
+                        var mappedStr = svc.mapped_freqs.map(function(pair) {
+                            return pair.tuned + ' → ' + pair.other;
+                        }).join(', ');
+                        afInfo.push('B: ' + mappedStr);
+                    }
+                    
+                    if (afInfo.length > 0) {
+                        html += '<div class="text-xs text-gray-500 break-words">' + afInfo.join(' | ') + '</div>';
+                    }
+                    
                     html += '</div>';
                 }
                 html += '</div>';
@@ -6104,9 +6512,23 @@ UI_HTML = r"""
 
                 var info = document.createElement('div');
                 info.className = 'flex-1';
+                
+                // Build AF info string
+                var afParts = [];
+                if (svc.af_list && svc.af_list.trim()) {
+                    afParts.push('A: ' + svc.af_list.trim());
+                }
+                if (svc.mapped_freqs && svc.mapped_freqs.length > 0) {
+                    var mappedStr = svc.mapped_freqs.map(function(pair) {
+                        return pair.tuned + ' → ' + pair.other;
+                    }).join(', ');
+                    afParts.push('B: ' + mappedStr);
+                }
+                var afDisplay = afParts.length > 0 ? afParts.join(' | ') : 'No AFs';
+                
                 info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + '</div>' +
                                 '<div class="text-sm">' + (svc.ps || 'UNKNOWN') + '</div>' +
-                                '<div class="text-xs text-gray-400 break-words">' + (svc.af_list || 'No AFs') + '</div>';
+                                '<div class="text-xs text-gray-400 break-words">' + afDisplay + '</div>';
 
                 var actions = document.createElement('div');
                 actions.className = 'flex gap-2';
@@ -6137,7 +6559,6 @@ UI_HTML = r"""
             document.getElementById('eon_af').value = '';
             document.getElementById('eon_mapped').value = '';
             document.getElementById('eon_tp').checked = false;
-            document.getElementById('eon_ta').checked = false;
             document.getElementById('eon_modal_title').textContent = 'Add EON Service';
             document.getElementById('eon_edit_form').style.display = 'block';
         }
@@ -6150,17 +6571,16 @@ UI_HTML = r"""
             document.getElementById('eon_pty').value = svc.pty || 0;
             document.getElementById('eon_af').value = svc.af_list || '';
             
-            // Convert mapped_freqs array to text format
+            // Convert mapped_freqs array to text format (comma-separated)
             var mappedText = '';
             if (svc.mapped_freqs && svc.mapped_freqs.length > 0) {
                 mappedText = svc.mapped_freqs.map(function(pair) {
-                    return pair.tuned + ' -> ' + pair.other;
+                    return pair.tuned + ', ' + pair.other;
                 }).join('\n');
             }
             document.getElementById('eon_mapped').value = mappedText;
             
             document.getElementById('eon_tp').checked = svc.tp || false;
-            document.getElementById('eon_ta').checked = svc.ta || false;
             document.getElementById('eon_modal_title').textContent = 'Edit EON Service';
             document.getElementById('eon_edit_form').style.display = 'block';
         }
@@ -6181,7 +6601,7 @@ UI_HTML = r"""
         function saveEONService() {
             var idx = document.getElementById('eon_edit_idx').value;
             
-            // Parse mapped frequencies from text format
+            // Parse mapped frequencies from text format (one pair per line, comma-separated)
             var mappedText = document.getElementById('eon_mapped').value.trim();
             var mappedFreqs = [];
             if (mappedText) {
@@ -6189,7 +6609,7 @@ UI_HTML = r"""
                 for (var i = 0; i < lines.length && i < 4; i++) {
                     var line = lines[i].trim();
                     if (line) {
-                        var parts = line.split('->').map(function(s) { return s.trim(); });
+                        var parts = line.split(',').map(function(s) { return s.trim(); });
                         if (parts.length === 2) {
                             mappedFreqs.push({ tuned: parts[0], other: parts[1] });
                         }
@@ -6203,8 +6623,7 @@ UI_HTML = r"""
                 pty: parseInt(document.getElementById('eon_pty').value) || 0,
                 af_list: document.getElementById('eon_af').value || '',
                 mapped_freqs: mappedFreqs,
-                tp: document.getElementById('eon_tp').checked ? 1 : 0,
-                ta: document.getElementById('eon_ta').checked ? 1 : 0
+                tp: document.getElementById('eon_tp').checked ? 1 : 0
             };
 
             if (idx === '') {
