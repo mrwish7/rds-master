@@ -138,72 +138,132 @@ PTY_LIST_RBDS = ["None", "News", "Information", "Sport", "Talk", "Rock", "Classi
 PTY_LIST = PTY_LIST_RDS
 
 # --- RT+ CONTENT TYPES (EN 62106 / IEC 62106) ---
+# Organized by logical hierarchy for better UX
 RTPLUS_CONTENT_TYPES = {
-    0: ("Dummy", "No content type"),
-    1: ("Title", "Item title"),
-    2: ("Album", "Album/CD name"),
-    3: ("Track", "Track number"),
-    4: ("Artist", "Artist name"),
-    5: ("Composition", "Composition name"),
-    6: ("Movement", "Movement name"),
-    7: ("Conductor", "Conductor"),
-    8: ("Composer", "Composer"),
-    9: ("Band", "Band/Orchestra"),
-    10: ("Comment", "Free text comment"),
-    11: ("Genre", "Genre"),
-    12: ("News", "News headlines"),
-    13: ("News.Local", "Local news"),
-    14: ("Stock", "Stock market"),
-    15: ("Sport", "Sport news"),
-    16: ("Lottery", "Lottery numbers"),
-    17: ("Horoscope", "Horoscope"),
-    18: ("Daily", "Daily diversion"),
-    19: ("Health", "Health tips"),
-    20: ("Event", "Event info"),
-    21: ("Scene", "Scene/Film info"),
-    22: ("Cinema", "Cinema info"),
-    23: ("TV", "TV info"),
-    24: ("DateTime", "Date/Time"),
-    25: ("Weather", "Weather info"),
-    26: ("Traffic", "Traffic info"),
-    27: ("Alarm", "Alarm/Emergency"),
-    28: ("Advert", "Advertisement"),
-    29: ("URL", "Website URL"),
-    30: ("Other", "Other info"),
-    31: ("Stn.Short", "Station name short"),
-    32: ("Stn.Long", "Station name long"),
-    33: ("Prog.Now", "Current program"),
-    34: ("Prog.Next", "Next program"),
-    35: ("Prog.Part", "Program part"),
-    36: ("Host", "Host name"),
-    37: ("Editorial", "Editorial staff"),
-    38: ("Frequency", "Frequency info"),
-    39: ("Homepage", "Homepage URL"),
-    40: ("Subchannel", "Sub-channel"),
-    41: ("Phone.Hotline", "Hotline phone"),
-    42: ("Phone.Studio", "Studio phone"),
-    43: ("Phone.Other", "Other phone"),
-    44: ("SMS.Studio", "Studio SMS"),
-    45: ("SMS.Other", "Other SMS"),
-    46: ("Email.Hotline", "Hotline email"),
-    47: ("Email.Studio", "Studio email"),
-    48: ("Email.Other", "Other email"),
-    49: ("MMS.Phone", "MMS number"),
-    50: ("Chat", "Chat"),
-    51: ("Chat.Centre", "Chat centre"),
-    52: ("Vote.Question", "Vote question"),
-    53: ("Vote.Centre", "Vote centre"),
-    54: ("RFU", "Reserved"),
-    55: ("RFU", "Reserved"),
-    56: ("RFU", "Reserved"),
-    57: ("RFU", "Reserved"),
-    58: ("RFU", "Reserved"),
-    59: ("Place", "Place/Location"),
-    60: ("Appointment", "Appointment"),
-    61: ("Identifier", "Identifier"),
-    62: ("Purchase", "Purchase info"),
-    63: ("GetData", "Get Data"),
+    0: ("Dummy", "No content type", "system"),
+    1: ("Title", "Item title", "music"),
+    2: ("Album", "Album/CD name", "music"),
+    3: ("Track", "Track number", "music"),
+    4: ("Artist", "Artist name", "music"),
+    5: ("Composition", "Composition name", "music"),
+    6: ("Movement", "Movement name", "music"),
+    7: ("Conductor", "Conductor", "music"),
+    8: ("Composer", "Composer", "music"),
+    9: ("Band", "Band/Orchestra", "music"),
+    10: ("Comment", "Free text comment", "system"),
+    11: ("Genre", "Genre", "music"),
+    12: ("News", "News headlines", "news"),
+    13: ("News.Local", "Local news", "news"),
+    14: ("Stock", "Stock market", "news"),
+    15: ("Sport", "Sport news", "news"),
+    16: ("Lottery", "Lottery numbers", "news"),
+    17: ("Horoscope", "Horoscope", "news"),
+    18: ("Daily", "Daily diversion", "news"),
+    19: ("Health", "Health tips", "news"),
+    20: ("Event", "Event info", "news"),
+    21: ("Scene", "Scene/Film info", "media"),
+    22: ("Cinema", "Cinema info", "media"),
+    23: ("TV", "TV info", "media"),
+    24: ("DateTime", "Date/Time", "utility"),
+    25: ("Weather", "Weather info", "utility"),
+    26: ("Traffic", "Traffic info", "utility"),
+    27: ("Alarm", "Alarm/Emergency", "utility"),
+    28: ("Advert", "Advertisement", "utility"),
+    29: ("URL", "Website URL", "utility"),
+    30: ("Other", "Other info", "utility"),
+    31: ("Stn.Short", "Station name short", "station"),
+    32: ("Stn.Long", "Station name long", "station"),
+    33: ("Prog.Now", "Current program", "station"),
+    34: ("Prog.Next", "Next program", "station"),
+    35: ("Prog.Part", "Program part", "station"),
+    36: ("Host", "Host name", "station"),
+    37: ("Editorial", "Editorial staff", "station"),
+    38: ("Frequency", "Frequency info", "station"),
+    39: ("Homepage", "Homepage URL", "station"),
+    40: ("Subchannel", "Sub-channel", "station"),
+    41: ("Phone.Hotline", "Hotline phone", "contact"),
+    42: ("Phone.Studio", "Studio phone", "contact"),
+    43: ("Phone.Other", "Other phone", "contact"),
+    44: ("SMS.Studio", "Studio SMS", "contact"),
+    45: ("SMS.Other", "Other SMS", "contact"),
+    46: ("Email.Hotline", "Hotline email", "contact"),
+    47: ("Email.Studio", "Studio email", "contact"),
+    48: ("Email.Other", "Other email", "contact"),
+    49: ("MMS.Phone", "MMS number", "contact"),
+    50: ("Chat", "Chat", "contact"),
+    51: ("Chat.Centre", "Chat centre", "contact"),
+    52: ("Vote.Question", "Vote question", "contact"),
+    53: ("Vote.Centre", "Vote centre", "contact"),
+    54: ("RFU", "Reserved", "system"),
+    55: ("RFU", "Reserved", "system"),
+    56: ("RFU", "Reserved", "system"),
+    57: ("RFU", "Reserved", "system"),
+    58: ("RFU", "Reserved", "system"),
+    59: ("Place", "Place/Location", "location"),
+    60: ("Appointment", "Appointment", "location"),
+    61: ("Identifier", "Identifier", "location"),
+    62: ("Purchase", "Purchase info", "location"),
+    63: ("GetData", "Get Data", "location"),
 }
+
+# RT+ Tag Categories for hierarchical organization
+RTPLUS_CATEGORIES = {
+    "music": {
+        "name": "🎵 Music & Audio",
+        "description": "Musical content identification",
+        "color": "text-purple-400"
+    },
+    "news": {
+        "name": "📰 News & Information",
+        "description": "News, events, and informational content",
+        "color": "text-blue-400"
+    },
+    "media": {
+        "name": "📺 Media & Entertainment", 
+        "description": "Film, TV, and entertainment content",
+        "color": "text-red-400"
+    },
+    "station": {
+        "name": "📻 Station Information",
+        "description": "Radio station and program details",
+        "color": "text-green-400"
+    },
+    "contact": {
+        "name": "📞 Contact & Interaction",
+        "description": "Communication and voting services",
+        "color": "text-cyan-400"
+    },
+    "utility": {
+        "name": "🔧 Utility & Services",
+        "description": "General purpose and utility information",
+        "color": "text-yellow-400"
+    },
+    "location": {
+        "name": "📍 Location & Services",
+        "description": "Location-based and commercial services",
+        "color": "text-pink-400"
+    },
+    "system": {
+        "name": "⚙️ System & Reserved",
+        "description": "System types and reserved entries",
+        "color": "text-gray-400"
+    }
+}
+
+def get_rtplus_type_info(type_code):
+    """Get RT+ type information including category."""
+    if type_code not in RTPLUS_CONTENT_TYPES:
+        return {"name": "Unknown", "description": "", "category": "system", "category_info": RTPLUS_CATEGORIES["system"]}
+    
+    type_data = RTPLUS_CONTENT_TYPES[type_code]
+    category = type_data[2] if len(type_data) > 2 else "system"
+    
+    return {
+        "name": type_data[0],
+        "description": type_data[1],
+        "category": category,
+        "category_info": RTPLUS_CATEGORIES.get(category, RTPLUS_CATEGORIES["system"])
+    }
 
 app = Flask(__name__)
 CONFIG_FILE = 'config.ini'  # Legacy - deprecated
@@ -1328,15 +1388,13 @@ class RDSScheduler:
             except:
                 resolved = ""
         elif source_type == "json":
-            # JSON source - fetch and build message with prefix/field1/delimiter/field2/suffix
+            # JSON source - fetch and extract fields
             try:
                 url = content
-                delimiter = msg.get("split_delimiter", " - ")
                 field1_path = msg.get("json_field1", "")
                 field2_path = msg.get("json_field2", "")
-                hide_empty = msg.get("json_hide_empty", True)
-                tag1_type = msg.get("rt_plus_tags", {}).get("tag1_type", 4)
-                tag2_type = msg.get("rt_plus_tags", {}).get("tag2_type", 1)
+                delimiter = msg.get("split_delimiter", " - ")
+                hide_if_blank = msg.get("json_hide_if_blank", False)
 
                 req = urllib.request.Request(url, headers={'User-Agent': 'RDS-Encoder/1.0'})
                 with urllib.request.urlopen(req, timeout=5) as resp:
@@ -1360,7 +1418,6 @@ class RDSScheduler:
                             current = current[part]
                         else:
                             return ''
-                    # Ensure proper UTF-8 encoding
                     if current is None:
                         return ''
                     elif isinstance(current, str):
@@ -1371,42 +1428,14 @@ class RDSScheduler:
                 field1_value = get_value_by_path(json_data, field1_path)
                 field2_value = get_value_by_path(json_data, field2_path) if field2_path else ''
 
-                # Build resolved string with smart hiding
-                resolved = prefix
-                tag_positions = {}
-                current_pos = len(prefix)
-
-                if field1_value:
-                    tag_positions['field1'] = {
-                        'start': current_pos,
-                        'length': len(field1_value),
-                        'tag_type': tag1_type
-                    }
-                    resolved += field1_value
-                    current_pos += len(field1_value)
-
+                # Build message
+                if hide_if_blank and not field1_value:
+                    # If Field 1 is blank and hide_if_blank is enabled, only show Field 2
+                    resolved = field2_value
+                else:
+                    resolved = field1_value
                     if field2_value:
-                        # Add delimiter only if both fields have values
-                        resolved += delimiter
-                        current_pos += len(delimiter)
-                    elif not hide_empty and field2_path:
-                        # Add delimiter even if field2 is empty (when hide_empty is false)
-                        resolved += delimiter
-                        current_pos += len(delimiter)
-
-                if field2_value:
-                    tag_positions['field2'] = {
-                        'start': current_pos,
-                        'length': len(field2_value),
-                        'tag_type': tag2_type
-                    }
-                    resolved += field2_value
-                    current_pos += len(field2_value)
-
-                resolved += suffix
-
-                # Store tag positions in message for later retrieval
-                msg['_cached_tag_positions'] = tag_positions
+                        resolved += delimiter + field2_value
             except Exception:
                 resolved = ""
         else:
@@ -1508,6 +1537,135 @@ class RDSScheduler:
         if toggle_buffer:
             self.rt_ab_flag = 1 - self.rt_ab_flag
 
+    def apply_tagging_policies_to_tags(self, content, tags, policies, offset, limit):
+        """Apply tagging policies to modify or override RT+ tags."""
+        import re
+        
+        for policy in policies:
+            if not policy.get("enabled", True):
+                continue
+            
+            policy_type = policy.get("type", "default")
+            settings = policy.get("settings", {})
+            
+            if policy_type == "default":
+                # Default policy: override tag types and apply split pattern
+                tag1_type = int(settings.get("tag1_type", -1))
+                tag2_type = int(settings.get("tag2_type", -1))
+                split_pattern = settings.get("split_pattern", " - ")
+                prefix = settings.get("prefix", "")
+                suffix = settings.get("suffix", "")
+                
+                # Clear existing tags and recalculate with new types
+                tags = []
+                
+                # Apply prefix/suffix to content for calculation
+                working_content = prefix + content + suffix
+                
+                if split_pattern and split_pattern in content:
+                    parts = content.split(split_pattern, 1)
+                    if len(parts) >= 1 and tag1_type >= 0:
+                        tag1_start = offset + len(prefix)
+                        tag1_len = min(len(parts[0]), limit - tag1_start)
+                        if tag1_start < limit and tag1_len > 0:
+                            tags.append((tag1_type, tag1_start, tag1_len))
+                    
+                    if len(parts) >= 2 and tag2_type >= 0:
+                        tag2_start = offset + len(prefix) + len(parts[0]) + len(split_pattern)
+                        tag2_len = min(len(parts[1]), limit - tag2_start)
+                        if tag2_start < limit and tag2_len > 0:
+                            tags.append((tag2_type, tag2_start, tag2_len))
+                else:
+                    # No split, tag entire content
+                    if tag1_type >= 0 and content:
+                        tag1_start = offset + len(prefix)
+                        tag1_len = min(len(content), limit - tag1_start)
+                        if tag1_start < limit and tag1_len > 0:
+                            tags.append((tag1_type, tag1_start, tag1_len))
+            
+            elif policy_type == "sub":
+                # Sub-tagging policy: check trigger and condition, then apply tag
+                trigger_type = settings.get("trigger_type", "none")
+                trigger_pattern = settings.get("trigger_pattern", "")
+                
+                # Check trigger condition first
+                if trigger_type and trigger_type != "none" and trigger_pattern:
+                    trigger_matches = False
+                    try:
+                        if trigger_type == "contains":
+                            trigger_matches = trigger_pattern.lower() in content.lower()
+                        elif trigger_type == "starts_with":
+                            trigger_matches = content.lower().startswith(trigger_pattern.lower())
+                        elif trigger_type == "ends_with":
+                            trigger_matches = content.lower().endswith(trigger_pattern.lower())
+                        elif trigger_type == "equals":
+                            trigger_matches = content.lower() == trigger_pattern.lower()
+                        elif trigger_type == "regex":
+                            trigger_matches = bool(re.search(trigger_pattern, content, re.IGNORECASE))
+                    except:
+                        pass
+                    
+                    if not trigger_matches:
+                        continue  # Skip this policy if trigger doesn't match
+                
+                # Check main condition
+                condition = settings.get("condition", "starts_with")
+                pattern = settings.get("pattern", "")
+                action = settings.get("action", "tag_all")
+                tag_type = int(settings.get("tag_type", -1))
+                strip_pattern = settings.get("strip_pattern", False)
+                
+                if not pattern or tag_type < 0:
+                    continue
+                
+                matches = False
+                try:
+                    if condition == "contains":
+                        matches = pattern.lower() in content.lower()
+                    elif condition == "starts_with":
+                        matches = content.lower().startswith(pattern.lower())
+                    elif condition == "ends_with":
+                        matches = content.lower().endswith(pattern.lower())
+                    elif condition == "equals":
+                        matches = content.lower() == pattern.lower()
+                    elif condition == "regex":
+                        matches = bool(re.search(pattern, content, re.IGNORECASE))
+                except:
+                    pass
+                
+                if matches:
+                    # Calculate tag position based on action
+                    tag_start = offset
+                    tag_content = content
+                    
+                    if action == "tag_after":
+                        idx = content.lower().find(pattern.lower())
+                        if idx != -1:
+                            tag_start = offset + idx + len(pattern)
+                            tag_content = content[idx + len(pattern):]
+                    elif action == "tag_before":
+                        idx = content.lower().find(pattern.lower())
+                        if idx != -1:
+                            tag_start = offset
+                            tag_content = content[:idx]
+                    elif action == "tag_match":
+                        idx = content.lower().find(pattern.lower())
+                        if idx != -1:
+                            tag_start = offset + idx
+                            tag_content = content[idx:idx + len(pattern)]
+                    # else: tag_all uses full content
+                    
+                    if strip_pattern and action != "tag_match":
+                        tag_content = tag_content.replace(pattern, "")
+                    
+                    tag_len = min(len(tag_content), limit - tag_start)
+                    if tag_start < limit and tag_len > 0:
+                        # Replace first tag or add new one
+                        tags = [(tag_type, tag_start, tag_len)]
+                        break  # Sub-tagging stops processing
+        
+        return tags
+
     def get_rt_plus_tags_for_message(self, msg, resolved_content, limit):
         """Calculate RT+ tags for a message based on its configuration."""
         if not msg.get("rt_plus_enabled"):
@@ -1550,23 +1708,75 @@ class RDSScheduler:
                 if tag2_start < limit and tag2_len > 0:
                     tags.append((tag2_type, tag2_start, tag2_len))
         elif msg.get("source_type") == "json":
-            # JSON mode: use cached tag positions from resolve_msg_content
-            tag_positions = msg.get("_cached_tag_positions", {})
-
-            if tag_positions:
-                # Convert tag positions to tags list
-                tag_list = []
-                for tag_info in tag_positions.values():
-                    tag_type = int(tag_info.get('tag_type', -1))
-                    tag_start = offset + tag_info.get('start', 0)
-                    tag_len = tag_info.get('length', 0)
-
-                    if tag_type >= 0 and tag_start < limit and tag_len > 0:
-                        tag_list.append((tag_type, tag_start, tag_len))
-
-                # Sort by position and add to tags
-                tag_list.sort(key=lambda x: x[1])
-                tags.extend(tag_list)
+            # JSON mode: calculate tag positions from field mapping
+            field1_path = msg.get("json_field1", "")
+            field2_path = msg.get("json_field2", "")
+            delimiter = msg.get("split_delimiter", " - ")
+            hide_if_blank = msg.get("json_hide_if_blank", False)
+            
+            # Need to extract field values from resolved content to calculate positions
+            # The resolved_content is already "field1 + delimiter + field2" or just field1/field2
+            
+            # Try to fetch JSON and extract fields to calculate actual positions
+            try:
+                url = msg.get("content", "")
+                if url and field1_path:
+                    import urllib.request
+                    req = urllib.request.Request(url, headers={'User-Agent': 'RDS-Encoder/1.0'})
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        response_bytes = resp.read()
+                        try:
+                            response_text = response_bytes.decode('utf-8')
+                        except UnicodeDecodeError:
+                            response_text = response_bytes.decode('latin-1')
+                        json_data = json.loads(response_text)
+                    
+                    # Extract values by path
+                    def get_value_by_path(obj, path):
+                        if not path:
+                            return ''
+                        parts = path.replace('[0]', '').split('.')
+                        current = obj
+                        for part in parts:
+                            if isinstance(current, list) and len(current) > 0:
+                                current = current[0]
+                            if isinstance(current, dict) and part in current:
+                                current = current[part]
+                            else:
+                                return ''
+                        if current is None:
+                            return ''
+                        elif isinstance(current, str):
+                            return current
+                        else:
+                            return str(current)
+                    
+                    field1_value = get_value_by_path(json_data, field1_path)
+                    field2_value = get_value_by_path(json_data, field2_path) if field2_path else ''
+                    
+                    # Calculate tag positions
+                    if hide_if_blank and not field1_value:
+                        # Only field2 is shown
+                        if field2_value and tag2_type >= 0:
+                            tag_start = offset
+                            tag_len = min(len(field2_value), limit - tag_start)
+                            if tag_start < limit and tag_len > 0:
+                                tags.append((tag2_type, tag_start, tag_len))
+                    else:
+                        # Field1 + delimiter + field2 or just field1
+                        if field1_value and tag1_type >= 0:
+                            tag1_start = offset
+                            tag1_len = min(len(field1_value), limit - tag1_start)
+                            if tag1_start < limit and tag1_len > 0:
+                                tags.append((tag1_type, tag1_start, tag1_len))
+                        
+                        if field2_value and tag2_type >= 0:
+                            tag2_start = offset + len(field1_value) + len(delimiter)
+                            tag2_len = min(len(field2_value), limit - tag2_start)
+                            if tag2_start < limit and tag2_len > 0:
+                                tags.append((tag2_type, tag2_start, tag2_len))
+            except Exception as e:
+                print(f"[RDS] Error extracting JSON fields for RT+ tags: {e}", flush=True)
         else:
             # Auto mode: split by delimiter (file/URL sources)
             # For file/URL, we need to account for prefix and suffix in the resolved_content
@@ -1603,6 +1813,14 @@ class RDSScheduler:
                     tag1_len = min(len(content_without_prefix_or_suffix), limit - tag1_start)
                     if tag1_start < limit and tag1_len > 0:
                         tags.append((tag1_type, tag1_start, tag1_len))
+
+        # Apply tagging policies (for JSON and manual modes)
+        if msg.get("source_type") in ["json", "manual"] and msg.get("tagging_policies"):
+            try:
+                policies = json.loads(msg.get("tagging_policies", "[]"))
+                tags = self.apply_tagging_policies_to_tags(resolved_content, tags, policies, offset, limit)
+            except Exception as e:
+                print(f"[RDS] Error applying tagging policies: {e}", flush=True)
 
         return tags
 
@@ -1886,7 +2104,6 @@ class RDSScheduler:
             
             if state["en_af"] and g_ver == 0:
                  # Split by comma or space, accept both separators
-                 import re
                  afs = [x.strip() for x in re.split(r'[,\s]+', state["af_list"]) if x.strip()]
                  af_method = state.get("af_method", "A")
 
@@ -2991,17 +3208,13 @@ def resolve_content():
             with urllib.request.urlopen(req, timeout=5) as resp:
                 resolved = resp.read().decode('utf-8', errors='replace').strip()
         elif source_type == 'json':
-            # Fetch JSON and build message with prefix/field1/delimiter/field2/suffix
+            # Fetch JSON and extract fields
             url = content
-            prefix = data.get('prefix', '')
-            suffix = data.get('suffix', '')
-            delimiter = data.get('split_delimiter', ' - ')
             field1_path = data.get('json_field1', '')
             field2_path = data.get('json_field2', '')
-            hide_empty = data.get('json_hide_empty', True)
-            tag1_type = data.get('rt_plus_tags', {}).get('tag1_type', 4)
-            tag2_type = data.get('rt_plus_tags', {}).get('tag2_type', 1)
-
+            delimiter = data.get('split_delimiter', ' - ')
+            hide_if_blank = data.get('json_hide_if_blank', False)
+            
             req = urllib.request.Request(url, headers={'User-Agent': 'RDS-Encoder/1.0'})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 response_bytes = resp.read()
@@ -3010,7 +3223,7 @@ def resolve_content():
                 except UnicodeDecodeError:
                     response_text = response_bytes.decode('latin-1')
                 json_data = json.loads(response_text)
-
+            
             # Extract values by path
             def get_value_by_path(obj, path):
                 if not path:
@@ -3024,7 +3237,6 @@ def resolve_content():
                         current = current[part]
                     else:
                         return ''
-                # Ensure proper UTF-8 encoding
                 if current is None:
                     return ''
                 elif isinstance(current, str):
@@ -3035,44 +3247,14 @@ def resolve_content():
             field1_value = get_value_by_path(json_data, field1_path)
             field2_value = get_value_by_path(json_data, field2_path) if field2_path else ''
 
-            # Debug: Log JSON values
-            if 'ä' in field1_value or 'ö' in field1_value or 'å' in field1_value:
-                print(f"DEBUG JSON: field1_value = {repr(field1_value)}")
-                print(f"DEBUG JSON: field1 bytes = {[hex(ord(c)) for c in field1_value]}")
-
-            # Build resolved string with smart hiding
-            resolved = prefix
-            tag_positions = {}
-            current_pos = len(prefix)
-
-            if field1_value:
-                tag_positions['field1'] = {
-                    'start': current_pos,
-                    'length': len(field1_value),
-                    'tag_type': tag1_type
-                }
-                resolved += field1_value
-                current_pos += len(field1_value)
-
+            # Build message
+            if hide_if_blank and not field1_value:
+                # If Field 1 is blank and hide_if_blank is enabled, only show Field 2
+                resolved = field2_value
+            else:
+                resolved = field1_value
                 if field2_value:
-                    # Add delimiter only if both fields have values
-                    resolved += delimiter
-                    current_pos += len(delimiter)
-                elif not hide_empty and field2_path:
-                    # Add delimiter even if field2 is empty (when hide_empty is false)
-                    resolved += delimiter
-                    current_pos += len(delimiter)
-
-            if field2_value:
-                tag_positions['field2'] = {
-                    'start': current_pos,
-                    'length': len(field2_value),
-                    'tag_type': tag2_type
-                }
-                resolved += field2_value
-                current_pos += len(field2_value)
-
-            resolved += suffix
+                    resolved += delimiter + field2_value
 
         elif source_type == 'manual':
             # Check for inline dynamic patterns
@@ -3081,12 +3263,12 @@ def resolve_content():
             else:
                 resolved = content
     except Exception as e:
+        print(f"[RDS] /resolve-content exception: {e}", flush=True)
+        import traceback
+        print(traceback.format_exc(), flush=True)
         return {"ok": False, "error": str(e), "resolved": ""}
 
     result = {"ok": True, "resolved": resolved}
-    # Include tag positions for JSON sources
-    if source_type == 'json' and 'tag_positions' in locals():
-        result['tag_positions'] = tag_positions
     return result
 
 @socketio.on('update')
@@ -3824,50 +4006,47 @@ UI_HTML = r"""
                                         </div>
                                     </div>
 
-                                    <!-- Simple Field Configuration -->
-                                    <div id="rt_msg_json_config" style="display:none" class="space-y-3">
-                                        <div class="grid grid-cols-2 gap-2">
+                                    <!-- JSON Field Mapping -->
+                                    <div id="rt_msg_json_config" style="display:none" class="space-y-3 bg-[#0a0a0a] border border-[#333] rounded p-3">
+                                        <div class="text-xs text-cyan-400 font-bold mb-2">📍 Map JSON Fields to Tags</div>
+                                        <div class="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label class="text-xs text-gray-400 mb-1 block">Prefix (optional)</label>
-                                                <input type="text" id="rt_msg_json_prefix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text before" oninput="updateMsgPreview()">
+                                                <label class="text-xs text-orange-400 font-bold">Field 1</label>
+                                                <select id="rt_msg_json_field1" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs" onchange="updateMsgPreview()">
+                                                    <option value="">Select field...</option>
+                                                </select>
                                             </div>
                                             <div>
-                                                <label class="text-xs text-gray-400 mb-1 block">Suffix (optional)</label>
-                                                <input type="text" id="rt_msg_json_suffix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after" oninput="updateMsgPreview()">
+                                                <label class="text-xs text-orange-400 font-bold">Tag Type</label>
+                                                <select id="rt_msg_json_tag1_type" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs" onchange="updateMsgPreview()">
+                                                    <option value="4" selected>4: Artist</option>
+                                                </select>
                                             </div>
                                         </div>
-
-                                        <div class="bg-[#1a1a1a] border border-orange-900/50 rounded p-3 space-y-2">
-                                            <div class="flex justify-between items-center mb-1">
-                                                <label class="text-xs text-orange-400 font-bold">Field 1 (Tag 1)</label>
-                                                <select id="rt_msg_json_tag1_type" class="bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" onchange="updateMsgPreview()"></select>
-                                            </div>
-                                            <select id="rt_msg_json_field1" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-sm text-orange-300" onchange="updateMsgPreview()">
-                                                <option value="">Select field...</option>
-                                            </select>
+                                        <div class="flex items-center gap-2 pl-1">
+                                            <input type="checkbox" id="rt_msg_json_hide_if_blank" class="accent-orange-600" onchange="updateMsgPreview()">
+                                            <label class="text-xs text-gray-400">Hide Field 1 if blank (won't show separator)</label>
                                         </div>
-
-                                        <div class="grid grid-cols-2 gap-4 items-center">
-                                            <div class="flex items-center gap-2">
-                                                <label class="text-xs text-gray-400">Delimiter:</label>
-                                                <input type="text" id="rt_msg_json_delimiter" value=" - " class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" oninput="updateMsgPreview()">
+                                        <div class="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label class="text-xs text-cyan-400 font-bold">Field 2</label>
+                                                <select id="rt_msg_json_field2" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs" onchange="updateMsgPreview()">
+                                                    <option value="">None (single field)</option>
+                                                </select>
                                             </div>
-                                            <div class="flex items-center gap-2 justify-end">
-                                                <span class="text-xs text-gray-400">Hide if field empty</span>
-                                                <input type="checkbox" id="rt_msg_json_hide_empty" class="toggle-checkbox" checked onchange="updateMsgPreview()">
+                                            <div>
+                                                <label class="text-xs text-cyan-400 font-bold">Tag Type</label>
+                                                <select id="rt_msg_json_tag2_type" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs" onchange="updateMsgPreview()">
+                                                    <option value="1" selected>1: Title</option>
+                                                </select>
                                             </div>
                                         </div>
-
-                                        <div class="bg-[#1a1a1a] border border-cyan-900/50 rounded p-3 space-y-2">
-                                            <div class="flex justify-between items-center mb-1">
-                                                <label class="text-xs text-cyan-400 font-bold">Field 2 (Tag 2) - Optional</label>
-                                                <select id="rt_msg_json_tag2_type" class="bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" onchange="updateMsgPreview()"></select>
-                                            </div>
-                                            <select id="rt_msg_json_field2" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-sm text-cyan-300" onchange="updateMsgPreview()">
-                                                <option value="">None (single field)</option>
-                                            </select>
+                                        <div>
+                                            <label class="text-xs text-gray-400">Separator (between fields)</label>
+                                            <input type="text" id="rt_msg_json_delimiter" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" value=" - " onchange="updateMsgPreview()">
                                         </div>
                                     </div>
+
                                 </div>
                             </div>
 
@@ -3880,43 +4059,12 @@ UI_HTML = r"""
                                 </div>
                             </div>
 
-                            <!-- Manual Mode: RT+ Builder (when RT+ enabled) -->
+                            <!-- Manual Mode: Sample Text Input (when RT+ enabled) -->
                             <div id="rt_msg_manual_builder" style="display:none" class="space-y-3">
-                                <div class="flex gap-2 items-center">
-                                    <label class="w-16 text-xs text-gray-500 shrink-0">Prefix:</label>
-                                    <input type="text" id="rt_msg_prefix" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text before tags" oninput="updateMsgPreview()">
-                                </div>
-
-                                <div class="bg-[#1a1a1a] border border-orange-900/50 rounded p-2 space-y-2">
-                                    <div class="flex gap-2 items-center">
-                                        <label class="w-16 text-xs text-orange-400 font-bold shrink-0">Tag 1:</label>
-                                        <select id="rt_msg_tag1_type" class="w-32 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
-                                    </div>
-                                    <div class="flex gap-2 items-center">
-                                        <label class="w-16 text-xs text-gray-500 shrink-0">Content:</label>
-                                        <input type="text" id="rt_msg_tag1_text" class="flex-1 bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-sm text-orange-300" placeholder="Tag 1 text" oninput="updateMsgPreview()">
-                                    </div>
-                                </div>
-
-                                <div class="flex gap-2 items-center">
-                                    <label class="w-16 text-xs text-gray-500 shrink-0">Between:</label>
-                                    <input type="text" id="rt_msg_middle" class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" value=" - " oninput="updateMsgPreview()">
-                                </div>
-
-                                <div class="bg-[#1a1a1a] border border-cyan-900/50 rounded p-2 space-y-2">
-                                    <div class="flex gap-2 items-center">
-                                        <label class="w-16 text-xs text-cyan-400 font-bold shrink-0">Tag 2:</label>
-                                        <select id="rt_msg_tag2_type" class="w-32 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
-                                    </div>
-                                    <div class="flex gap-2 items-center">
-                                        <label class="w-16 text-xs text-gray-500 shrink-0">Content:</label>
-                                        <input type="text" id="rt_msg_tag2_text" class="flex-1 bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-sm text-cyan-300" placeholder="Tag 2 text (optional)" oninput="updateMsgPreview()">
-                                    </div>
-                                </div>
-
-                                <div class="flex gap-2 items-center">
-                                    <label class="w-16 text-xs text-gray-500 shrink-0">Suffix:</label>
-                                    <input type="text" id="rt_msg_suffix" class="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="Text after tags" oninput="updateMsgPreview()">
+                                <div>
+                                    <label class="text-xs text-gray-400 mb-1 block">Sample Text for Rule Testing</label>
+                                    <input type="text" id="rt_msg_sample_text" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="e.g. Adele - Rolling in the Deep" oninput="updateSampleText(); updateMsgPreview()">
+                                    <div class="text-[10px] text-gray-500 mt-1">💡 Enter sample text to see how your tagging rules will work</div>
                                 </div>
                             </div>
 
@@ -3930,45 +4078,173 @@ UI_HTML = r"""
                                     </label>
                                 </div>
 
-                                <!-- RT+ Options for File/URL -->
-                                <div id="rt_msg_rtplus_options" style="display:none" class="space-y-3">
-                                    <!-- Tag method selector -->
-                                    <div class="flex gap-4 items-center">
-                                        <label class="text-[10px] text-gray-500 shrink-0">Tag Method:</label>
-                                        <label class="flex items-center gap-1 cursor-pointer text-xs">
-                                            <input type="radio" name="rt_msg_rtplus_method" value="split" checked class="accent-[#d946ef]" onchange="updateRTPlusMsgMethod()">
-                                            <span class="text-gray-300">Split delimiter</span>
-                                        </label>
-                                        <label class="flex items-center gap-1 cursor-pointer text-xs">
-                                            <input type="radio" name="rt_msg_rtplus_method" value="regex" class="accent-[#d946ef]" onchange="updateRTPlusMsgMethod()">
-                                            <span class="text-gray-300">Regex Rules</span>
-                                        </label>
+                                <!-- RT+ Tagging Policies -->
+                                <div id="rt_msg_rtplus_options" style="display:none" class="space-y-4">
+                                    <!-- Policy Manager Header -->
+                                    <div class="bg-[#252525] border border-blue-600/50 rounded p-3">
+                                        <div class="flex items-center justify-between mb-3">
+                                            <div class="flex items-center gap-2">
+                                                <div class="text-blue-400 font-bold">🎯 Tagging Policies</div>
+                                                <div class="text-xs text-blue-300">Define how content gets tagged</div>
+                                            </div>
+                                            <button onclick="addTaggingPolicy()" class="px-3 py-1 bg-blue-800 hover:bg-blue-700 rounded text-xs text-white font-bold">+ Add Policy</button>
+                                        </div>
+                                        
+                                        <!-- Policies List -->
+                                        <div id="tagging_policies_list" class="space-y-2">
+                                            <!-- Policies will be rendered here -->
+                                        </div>
+                                        
+                                        <div class="text-[9px] text-gray-500 mt-3 border-t border-gray-700 pt-2">
+                                            💡 <strong>Default</strong>: Base tagging settings • <strong>Sub-tagging</strong>: Conditional rules for specific patterns • Evaluated top-to-bottom
+                                        </div>
                                     </div>
 
-                                    <!-- Split mode -->
-                                    <div id="rt_msg_rtplus_split_wrap" class="space-y-3">
-                                        <div class="flex gap-2 items-center">
-                                            <label class="w-20 text-xs text-gray-500 shrink-0">Split at:</label>
-                                            <input type="text" id="rt_msg_split" value=" - " class="w-20 bg-[#111] border border-[#444] rounded px-2 py-1 text-sm text-center" oninput="updateMsgPreview()">
-                                            <span class="text-[10px] text-gray-500">Delimiter to split into 2 tags</span>
+                                    <!-- Policy Editor Modal (will be shown when editing) -->
+                                    <div id="policy_editor" style="display:none" class="bg-[#1a1a1a] border border-purple-600/50 rounded p-4 space-y-3">
+                                        <div class="flex items-center justify-between">
+                                            <h3 class="text-purple-400 font-bold" id="policy_editor_title">Edit Policy</h3>
+                                            <button onclick="closePolicyEditor()" class="text-gray-400 hover:text-white">✕</button>
                                         </div>
+                                        
                                         <div class="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label class="text-xs text-orange-400 mb-1 block">Tag 1 Type</label>
-                                                <select id="rt_msg_tag1_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                                <label class="text-xs text-gray-400 block mb-1">Policy Name</label>
+                                                <input type="text" id="policy_name" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="e.g. Default Music, Breaking News">
                                             </div>
                                             <div>
-                                                <label class="text-xs text-cyan-400 mb-1 block">Tag 2 Type</label>
-                                                <select id="rt_msg_tag2_type_auto" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateMsgPreview()"></select>
+                                                <label class="text-xs text-gray-400 block mb-1">Policy Type</label>
+                                                <select id="policy_type" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updatePolicyEditor()">
+                                                    <option value="default">Default</option>
+                                                    <option value="sub">Sub-tagging</option>
+                                                </select>
                                             </div>
                                         </div>
-                                    </div>
 
-                                    <!-- Regex Rules mode -->
-                                    <div id="rt_msg_rtplus_regex_wrap" style="display:none;" class="space-y-2">
-                                        <div class="text-[10px] text-gray-500">Rules tried in order; first match wins. Capture groups: group&nbsp;1&nbsp;→&nbsp;Tag&nbsp;1, group&nbsp;2&nbsp;→&nbsp;Tag&nbsp;2.</div>
-                                        <div id="rt_msg_regex_rules_list" class="space-y-1 max-h-36 overflow-y-auto"></div>
-                                        <button onclick="addMsgRegexRule()" class="w-full px-2 py-1 bg-green-900 hover:bg-green-800 rounded text-xs text-white">+ Add Rule</button>
+                                        <!-- Default Policy Settings -->
+                                        <div id="default_policy_settings" class="space-y-3">
+                                            <div class="text-xs text-green-400 font-bold">📍 Default Tagging Settings</div>
+                                            <div class="grid grid-cols-2 gap-3">
+                                                <div>
+                                                    <label class="text-xs text-orange-400">Tag 1 Type</label>
+                                                    <select id="policy_default_tag1" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs">
+                                                        <option value="1">1: Title</option>
+                                                        <option value="4" selected>4: Artist</option>
+                                                        <option value="2">2: Album</option>
+                                                        <option value="33">33: Prog.Now</option>
+                                                        <option value="31">31: Stn.Short</option>
+                                                        <option value="32">32: Stn.Long</option>
+                                                        <option value="-1">No Tag</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs text-cyan-400">Tag 2 Type</label>
+                                                    <select id="policy_default_tag2" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs">
+                                                        <option value="1" selected>1: Title</option>
+                                                        <option value="4">4: Artist</option>
+                                                        <option value="2">2: Album</option>
+                                                        <option value="33">33: Prog.Now</option>
+                                                        <option value="32">32: Stn.Long</option>
+                                                        <option value="36">36: Host</option>
+                                                        <option value="-1">No Tag</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div class="grid grid-cols-3 gap-3">
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Split Pattern</label>
+                                                    <input type="text" id="policy_default_split" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" value=" - " placeholder="e.g. ' - '">
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Prefix</label>
+                                                    <input type="text" id="policy_default_prefix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text before">
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Suffix</label>
+                                                    <input type="text" id="policy_default_suffix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text after">
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Sub-tagging Policy Settings -->
+                                        <div id="sub_policy_settings" style="display:none" class="space-y-3">
+                                            <!-- Content Trigger (optional pre-condition) -->
+                                            <div class="text-xs text-cyan-400 font-bold">🎯 Content Trigger (Optional)</div>
+                                            <div class="bg-[#1a1a1a] p-3 rounded border border-cyan-900/30 space-y-2">
+                                                <div class="text-xs text-gray-400 mb-2">Only apply this policy if the content matches this trigger:</div>
+                                                <div class="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label class="text-xs text-gray-400">Trigger Type</label>
+                                                        <select id="policy_sub_trigger_type" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs">
+                                                            <option value="none">No Trigger (Always Apply)</option>
+                                                            <option value="contains">Content contains text</option>
+                                                            <option value="starts_with">Content starts with text</option>
+                                                            <option value="ends_with">Content ends with text</option>
+                                                            <option value="equals">Content exactly equals</option>
+                                                            <option value="regex">Content matches regex</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label class="text-xs text-gray-400">Trigger Pattern</label>
+                                                        <input type="text" id="policy_sub_trigger_pattern" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="e.g. Station Name, Live">
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            
+                                            <!-- Pattern Matching -->
+                                            <div class="text-xs text-purple-400 font-bold">⚡ Sub-tagging Condition</div>
+                                            <div class="grid grid-cols-3 gap-3">
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Condition</label>
+                                                    <select id="policy_sub_condition" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs">
+                                                        <option value="starts_with">Starts with</option>
+                                                        <option value="ends_with">Ends with</option>
+                                                        <option value="contains">Contains</option>
+                                                        <option value="equals">Exactly equals</option>
+                                                        <option value="regex">Regex pattern</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Pattern</label>
+                                                    <input type="text" id="policy_sub_pattern" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="e.g. +++, Live:, News">
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Tag Action</label>
+                                                    <select id="policy_sub_action" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs">
+                                                        <option value="tag_all">Tag entire content</option>
+                                                        <option value="tag_after">Tag content after pattern</option>
+                                                        <option value="tag_before">Tag content before pattern</option>
+                                                        <option value="tag_match">Tag only the match</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-3">
+                                                <div>
+                                                    <label class="text-xs text-orange-400">Tag Type</label>
+                                                    <select id="policy_sub_tag_type" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs">
+                                                        <option value="1">1: Title</option>
+                                                        <option value="4">4: Artist</option>
+                                                        <option value="2">2: Album</option>
+                                                        <option value="33">33: Prog.Now</option>
+                                                        <option value="31">31: Stn.Short</option>
+                                                        <option value="32">32: Stn.Long</option>
+                                                        <option value="36">36: Host</option>
+                                                        <option value="12">12: Info.News</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs text-gray-400">Strip Pattern</label>
+                                                    <input type="checkbox" id="policy_sub_strip_pattern" class="accent-purple-600">
+                                                    <span class="text-xs text-gray-300 ml-1">Remove pattern from tagged text</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Policy Actions -->
+                                        <div class="flex gap-2 pt-3 border-t border-gray-700">
+                                            <button onclick="savePolicyEditor()" class="px-4 py-2 bg-green-800 hover:bg-green-700 rounded text-sm text-white font-bold">Save Policy</button>
+                                            <button onclick="closePolicyEditor()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm text-white">Cancel</button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -3976,7 +4252,11 @@ UI_HTML = r"""
                             <!-- Preview -->
                             <div class="bg-[#000] border border-[#333] rounded p-3">
                                 <div class="flex justify-between items-center mb-2">
-                                    <label class="text-xs text-gray-400 font-bold">PREVIEW</label>
+                                    <div class="flex items-center gap-2">
+                                        <label class="text-xs text-gray-400 font-bold">PREVIEW</label>
+                                        <span class="text-gray-500">-</span>
+                                        <span id="rt_msg_rule_applied" class="text-gray-400 text-xs">Current policy: Field Mapping</span>
+                                    </div>
                                     <div class="text-xs">
                                         <span id="rt_msg_char_count" class="text-green-400">0</span>
                                         <span class="text-gray-500">/</span>
@@ -3984,12 +4264,12 @@ UI_HTML = r"""
                                         <span class="text-gray-600 ml-1">chars</span>
                                     </div>
                                 </div>
-                                <div id="rt_msg_preview" class="font-mono text-sm text-gray-300 min-h-[24px] whitespace-pre"></div>
+                                <div id="rt_msg_preview" class="font-mono text-base text-gray-300 min-h-[24px] whitespace-pre leading-relaxed"></div>
                                 <div class="mt-2 grid grid-cols-2 gap-2 text-xs" id="rt_msg_tag_info">
                                     <div class="text-orange-400">Tag 1: <span id="rt_msg_tag1_info" class="text-orange-300">-</span></div>
                                     <div class="text-cyan-400">Tag 2: <span id="rt_msg_tag2_info" class="text-cyan-300">-</span></div>
                                 </div>
-                                <div class="mt-1 font-mono text-[9px] text-gray-600 overflow-x-auto whitespace-nowrap">
+                                <div class="mt-1 font-mono text-base text-gray-600 overflow-x-auto whitespace-nowrap">
                                     0----5----10---15---20---25---30---35---40---45---50---55---60---
                                 </div>
                             </div>
@@ -4547,6 +4827,47 @@ UI_HTML = r"""
                     </div>
                 </div>
 
+                <!-- RT+ Categories Reference -->
+                <div class="bg-[#1a1a1a] border border-[#333] rounded p-3">
+                    <div class="flex items-center justify-between mb-2">
+                        <label class="text-xs text-purple-400 font-bold">RT+ CATEGORIES</label>
+                        <button onclick="toggleCategoryReference()" id="toggle_categories" class="px-2 py-1 bg-[#333] hover:bg-[#444] rounded text-xs text-gray-300">Show Reference</button>
+                    </div>
+                    <div id="category_reference" class="hidden space-y-2">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                            <div class="space-y-1">
+                                <div class="text-purple-400 font-bold">🎵 Music & Audio</div>
+                                <div class="text-gray-400 text-[10px] ml-3">Title, Artist, Album, Track, Composer, Genre...</div>
+                                
+                                <div class="text-green-400 font-bold">📻 Station Information</div>
+                                <div class="text-gray-400 text-[10px] ml-3">Station names, programs, host, frequency...</div>
+                                
+                                <div class="text-blue-400 font-bold">📰 News & Information</div>
+                                <div class="text-gray-400 text-[10px] ml-3">News, sports, weather, events, horoscope...</div>
+                                
+                                <div class="text-red-400 font-bold">📺 Media & Entertainment</div>
+                                <div class="text-gray-400 text-[10px] ml-3">Cinema, TV, scene information...</div>
+                            </div>
+                            <div class="space-y-1">
+                                <div class="text-cyan-400 font-bold">📞 Contact & Interaction</div>
+                                <div class="text-gray-400 text-[10px] ml-3">Phone, SMS, email, chat, voting...</div>
+                                
+                                <div class="text-yellow-400 font-bold">🔧 Utility & Services</div>
+                                <div class="text-gray-400 text-[10px] ml-3">DateTime, weather, traffic, URLs, ads...</div>
+                                
+                                <div class="text-pink-400 font-bold">📍 Location & Services</div>
+                                <div class="text-gray-400 text-[10px] ml-3">Places, appointments, purchases...</div>
+                                
+                                <div class="text-gray-400 font-bold">⚙️ System & Reserved</div>
+                                <div class="text-gray-400 text-[10px] ml-3">Dummy, comment, reserved types...</div>
+                            </div>
+                        </div>
+                        <div class="text-[10px] text-gray-500 border-t border-gray-700 pt-2 mt-2">
+                            Select tag types from the dropdowns above to see detailed descriptions. Hierarchical organization helps you find the right content type quickly.
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Preview -->
                 <div class="bg-[#000] border border-[#333] rounded p-4">
                     <div class="flex justify-between items-center mb-2">
@@ -4565,7 +4886,7 @@ UI_HTML = r"""
                         <div class="text-cyan-400">Tag 2: <span id="builder_tag2_info" class="text-cyan-300">-</span></div>
                         <div class="text-cyan-400">Type: <span id="builder_tag2_typename" class="text-cyan-300">-</span></div>
                     </div>
-                    <div class="mt-2 font-mono text-[9px] text-gray-600 overflow-x-auto whitespace-nowrap">
+                    <div class="mt-2 font-mono text-base text-gray-600 overflow-x-auto whitespace-nowrap">
                         0----5----10---15---20---25---30---35---40---45---50---55---60---
                     </div>
                 </div>
@@ -5084,72 +5405,116 @@ UI_HTML = r"""
         var pty_list_rds = {{ pty_list_rds|tojson }};
         var pty_list_rbds = {{ pty_list_rbds|tojson }};
 
-        // RT+ Content Types Dictionary
+        // RT+ Content Types Dictionary with category information
         var RTPLUS_TYPES = {
-            0: ["Dummy", "No content type"],
-            1: ["Title", "Item title"],
-            2: ["Album", "Album/CD name"],
-            3: ["Track", "Track number"],
-            4: ["Artist", "Artist name"],
-            5: ["Composition", "Composition name"],
-            6: ["Movement", "Movement name"],
-            7: ["Conductor", "Conductor"],
-            8: ["Composer", "Composer"],
-            9: ["Band", "Band/Orchestra"],
-            10: ["Comment", "Free text comment"],
-            11: ["Genre", "Genre"],
-            12: ["News", "News headlines"],
-            13: ["News.Local", "Local news"],
-            14: ["Stock", "Stock market"],
-            15: ["Sport", "Sport news"],
-            16: ["Lottery", "Lottery numbers"],
-            17: ["Horoscope", "Horoscope"],
-            18: ["Daily", "Daily diversion"],
-            19: ["Health", "Health tips"],
-            20: ["Event", "Event info"],
-            21: ["Scene", "Scene/Film info"],
-            22: ["Cinema", "Cinema info"],
-            23: ["TV", "TV info"],
-            24: ["DateTime", "Date/Time"],
-            25: ["Weather", "Weather info"],
-            26: ["Traffic", "Traffic info"],
-            27: ["Alarm", "Alarm/Emergency"],
-            28: ["Advert", "Advertisement"],
-            29: ["URL", "Website URL"],
-            30: ["Other", "Other info"],
-            31: ["Stn.Short", "Station name short"],
-            32: ["Stn.Long", "Station name long"],
-            33: ["Prog.Now", "Current program"],
-            34: ["Prog.Next", "Next program"],
-            35: ["Prog.Part", "Program part"],
-            36: ["Host", "Host name"],
-            37: ["Editorial", "Editorial staff"],
-            38: ["Frequency", "Frequency info"],
-            39: ["Homepage", "Homepage URL"],
-            40: ["Subchannel", "Sub-channel"],
-            41: ["Phone.Hotline", "Hotline phone"],
-            42: ["Phone.Studio", "Studio phone"],
-            43: ["Phone.Other", "Other phone"],
-            44: ["SMS.Studio", "Studio SMS"],
-            45: ["SMS.Other", "Other SMS"],
-            46: ["Email.Hotline", "Hotline email"],
-            47: ["Email.Studio", "Studio email"],
-            48: ["Email.Other", "Other email"],
-            49: ["MMS.Phone", "MMS number"],
-            50: ["Chat", "Chat"],
-            51: ["Chat.Centre", "Chat centre"],
-            52: ["Vote.Question", "Vote question"],
-            53: ["Vote.Centre", "Vote centre"],
-            54: ["RFU", "Reserved"],
-            55: ["RFU", "Reserved"],
-            56: ["RFU", "Reserved"],
-            57: ["RFU", "Reserved"],
-            58: ["RFU", "Reserved"],
-            59: ["Place", "Place/Location"],
-            60: ["Appointment", "Appointment"],
-            61: ["Identifier", "Identifier"],
-            62: ["Purchase", "Purchase info"],
-            63: ["GetData", "Get Data"]
+            0: ["Dummy", "No content type", "system"],
+            1: ["Title", "Item title", "music"],
+            2: ["Album", "Album/CD name", "music"],
+            3: ["Track", "Track number", "music"],
+            4: ["Artist", "Artist name", "music"],
+            5: ["Composition", "Composition name", "music"],
+            6: ["Movement", "Movement name", "music"],
+            7: ["Conductor", "Conductor", "music"],
+            8: ["Composer", "Composer", "music"],
+            9: ["Band", "Band/Orchestra", "music"],
+            10: ["Comment", "Free text comment", "system"],
+            11: ["Genre", "Genre", "music"],
+            12: ["News", "News headlines", "news"],
+            13: ["News.Local", "Local news", "news"],
+            14: ["Stock", "Stock market", "news"],
+            15: ["Sport", "Sport news", "news"],
+            16: ["Lottery", "Lottery numbers", "news"],
+            17: ["Horoscope", "Horoscope", "news"],
+            18: ["Daily", "Daily diversion", "news"],
+            19: ["Health", "Health tips", "news"],
+            20: ["Event", "Event info", "news"],
+            21: ["Scene", "Scene/Film info", "media"],
+            22: ["Cinema", "Cinema info", "media"],
+            23: ["TV", "TV info", "media"],
+            24: ["DateTime", "Date/Time", "utility"],
+            25: ["Weather", "Weather info", "utility"],
+            26: ["Traffic", "Traffic info", "utility"],
+            27: ["Alarm", "Alarm/Emergency", "utility"],
+            28: ["Advert", "Advertisement", "utility"],
+            29: ["URL", "Website URL", "utility"],
+            30: ["Other", "Other info", "utility"],
+            31: ["Stn.Short", "Station name short", "station"],
+            32: ["Stn.Long", "Station name long", "station"],
+            33: ["Prog.Now", "Current program", "station"],
+            34: ["Prog.Next", "Next program", "station"],
+            35: ["Prog.Part", "Program part", "station"],
+            36: ["Host", "Host name", "station"],
+            37: ["Editorial", "Editorial staff", "station"],
+            38: ["Frequency", "Frequency info", "station"],
+            39: ["Homepage", "Homepage URL", "station"],
+            40: ["Subchannel", "Sub-channel", "station"],
+            41: ["Phone.Hotline", "Hotline phone", "contact"],
+            42: ["Phone.Studio", "Studio phone", "contact"],
+            43: ["Phone.Other", "Other phone", "contact"],
+            44: ["SMS.Studio", "Studio SMS", "contact"],
+            45: ["SMS.Other", "Other SMS", "contact"],
+            46: ["Email.Hotline", "Hotline email", "contact"],
+            47: ["Email.Studio", "Studio email", "contact"],
+            48: ["Email.Other", "Other email", "contact"],
+            49: ["MMS.Phone", "MMS number", "contact"],
+            50: ["Chat", "Chat", "contact"],
+            51: ["Chat.Centre", "Chat centre", "contact"],
+            52: ["Vote.Question", "Vote question", "contact"],
+            53: ["Vote.Centre", "Vote centre", "contact"],
+            54: ["RFU", "Reserved", "system"],
+            55: ["RFU", "Reserved", "system"],
+            56: ["RFU", "Reserved", "system"],
+            57: ["RFU", "Reserved", "system"],
+            58: ["RFU", "Reserved", "system"],
+            59: ["Place", "Place/Location", "location"],
+            60: ["Appointment", "Appointment", "location"],
+            61: ["Identifier", "Identifier", "location"],
+            62: ["Purchase", "Purchase info", "location"],
+            63: ["GetData", "Get Data", "location"]
+        };
+
+        // RT+ Categories for hierarchical organization
+        var RTPLUS_CATEGORIES = {
+            "music": {
+                name: "🎵 Music & Audio",
+                description: "Musical content identification",
+                color: "text-purple-400"
+            },
+            "news": {
+                name: "📰 News & Information", 
+                description: "News, events, and informational content",
+                color: "text-blue-400"
+            },
+            "media": {
+                name: "📺 Media & Entertainment",
+                description: "Film, TV, and entertainment content", 
+                color: "text-red-400"
+            },
+            "station": {
+                name: "📻 Station Information",
+                description: "Radio station and program details",
+                color: "text-green-400"
+            },
+            "contact": {
+                name: "📞 Contact & Interaction",
+                description: "Communication and voting services",
+                color: "text-cyan-400"
+            },
+            "utility": {
+                name: "🔧 Utility & Services",
+                description: "General purpose and utility information",
+                color: "text-yellow-400"
+            },
+            "location": {
+                name: "📍 Location & Services",
+                description: "Location-based and commercial services",
+                color: "text-pink-400"
+            },
+            "system": {
+                name: "⚙️ System & Reserved",
+                description: "System types and reserved entries",
+                color: "text-gray-400"
+            }
         };
 
         // RT Messages State
@@ -5275,19 +5640,17 @@ UI_HTML = r"""
                 buffer: 'AB',
                 cycles: 2,
                 source_type: 'manual',
-                content: '',
+                content: 'Artist - Song Title',
                 split_delimiter: ' - ',
                 rt_plus_enabled: false,
                 rt_plus_tags: { tag1_type: 4, tag2_type: 1 },
                 enabled: true,
                 prefix: '',
                 suffix: '',
-                tag1_text: '',
-                middle: ' - ',
-                tag2_text: '',
-                json_field1: '',
-                json_field2: '',
-                json_hide_empty: true
+                tagging_policies: '[]',
+                case_sensitive: false,
+                whole_words: false,
+                sample_text: 'Artist - Song Title'
             };
             openMessageModal(pendingNewMessage, true);
         }
@@ -5311,35 +5674,63 @@ UI_HTML = r"""
             // Load fields based on source type
             if (msg.source_type === 'manual') {
                 if (msg.content && !msg.rt_plus_enabled) {
+                    // Simple text mode
                     document.getElementById('rt_msg_simple_text').value = msg.content || '';
                 } else {
-                    document.getElementById('rt_msg_prefix').value = msg.prefix || '';
-                    document.getElementById('rt_msg_tag1_text').value = msg.tag1_text || '';
-                    document.getElementById('rt_msg_middle').value = msg.middle || ' - ';
-                    document.getElementById('rt_msg_tag2_text').value = msg.tag2_text || '';
-                    document.getElementById('rt_msg_suffix').value = msg.suffix || '';
-                    document.getElementById('rt_msg_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
-                    document.getElementById('rt_msg_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                    // Load intelligent tagging settings
+                    if (document.getElementById('rt_msg_prefix')) 
+                        document.getElementById('rt_msg_prefix').value = msg.prefix || '';
+                    if (document.getElementById('rt_msg_suffix')) 
+                        document.getElementById('rt_msg_suffix').value = msg.suffix || '';
+                    if (document.getElementById('rt_msg_split_pattern')) 
+                        document.getElementById('rt_msg_split_pattern').value = msg.split_delimiter || ' - ';
+                    if (document.getElementById('rt_msg_before_tag')) 
+                        document.getElementById('rt_msg_before_tag').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
+                    if (document.getElementById('rt_msg_after_tag')) 
+                        document.getElementById('rt_msg_after_tag').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                    if (document.getElementById('rt_msg_case_sensitive')) 
+                        document.getElementById('rt_msg_case_sensitive').checked = msg.case_sensitive || false;
+                    if (document.getElementById('rt_msg_whole_words')) 
+                        document.getElementById('rt_msg_whole_words').checked = msg.whole_words || false;
+                    
+                    // Load sample text for manual mode
+                    if (document.getElementById('rt_msg_sample_text'))
+                        document.getElementById('rt_msg_sample_text').value = msg.sample_text || 'Artist - Song Title';
+                    globalSampleText = msg.sample_text || 'Artist - Song Title';
+                    
+                    // Load smart rules
+                    taggingPolicies = [];
+                    try {
+                        if (msg.tagging_policies) taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                    } catch(e) {}
+                    renderTaggingPolicies();
                 }
             } else if (msg.source_type === 'json') {
                 document.getElementById('rt_msg_json_url').value = msg.content || '';
-                document.getElementById('rt_msg_json_prefix').value = msg.prefix || '';
-                document.getElementById('rt_msg_json_suffix').value = msg.suffix || '';
-                document.getElementById('rt_msg_json_delimiter').value = msg.split_delimiter || ' - ';
-                document.getElementById('rt_msg_json_hide_empty').checked = msg.json_hide_empty !== false; // Default to true
+                
+                // Restore field and tag selections
+                if (document.getElementById('rt_msg_json_field1'))
+                    document.getElementById('rt_msg_json_field1').value = msg.json_field1 || '';
+                if (document.getElementById('rt_msg_json_field2'))
+                    document.getElementById('rt_msg_json_field2').value = msg.json_field2 || '';
+                if (document.getElementById('rt_msg_json_hide_if_blank'))
+                    document.getElementById('rt_msg_json_hide_if_blank').checked = msg.json_hide_if_blank || false;
+                if (document.getElementById('rt_msg_json_tag1_type'))
+                    document.getElementById('rt_msg_json_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || '4';
+                if (document.getElementById('rt_msg_json_tag2_type'))
+                    document.getElementById('rt_msg_json_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || '1';
+                if (document.getElementById('rt_msg_json_delimiter'))
+                    document.getElementById('rt_msg_json_delimiter').value = msg.split_delimiter || ' - ';
 
-                // Show config section immediately so elements exist
-                document.getElementById('rt_msg_json_config').style.display = 'block';
-
-                // Initialize tag selects
-                initJSONTagSelects();
-                document.getElementById('rt_msg_json_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
-                document.getElementById('rt_msg_json_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                // Load tagging policies
+                taggingPolicies = [];
+                try {
+                    if (msg.tagging_policies) taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                } catch(e) {}
+                renderTaggingPolicies();
 
                 // Auto-fetch JSON structure first to populate the field cache
                 var url = msg.content;
-                var savedField1 = msg.json_field1;
-                var savedField2 = msg.json_field2;
 
                 if (url) {
                     fetch('/fetch-json-structure', {
@@ -5352,51 +5743,51 @@ UI_HTML = r"""
                         if (data.ok) {
                             jsonFieldsCache = data.fields;
                             displayJSONFields(data.fields, data.sample);
-                            // Pass saved values to populate function
-                            populateJSONFieldDropdowns(data.fields, savedField1, savedField2);
-
+                            populateJSONFieldDropdowns(data.fields, msg.json_field1, msg.json_field2);
                             document.getElementById('rt_msg_json_structure').style.display = 'block';
                             document.getElementById('rt_msg_json_config').style.display = 'block';
-
-                            // Trigger preview update
                             updateMsgPreview();
                         } else {
-                            // If fetch fails, still show config but with manual field entry
-                            initJSONTagSelects();
-                            document.getElementById('rt_msg_json_config').style.display = 'block';
+                            document.getElementById('rt_msg_json_structure').style.display = 'none';
+                            document.getElementById('rt_msg_json_config').style.display = 'none';
                             updateMsgPreview();
                         }
                     })
                     .catch(function(err) {
-                        // If fetch fails, still show config
-                        initJSONTagSelects();
-                        document.getElementById('rt_msg_json_config').style.display = 'block';
+                        document.getElementById('rt_msg_json_structure').style.display = 'none';
+                        document.getElementById('rt_msg_json_config').style.display = 'none';
                         updateMsgPreview();
                     });
                 }
             } else {
+                // File/URL source with intelligent tagging
                 document.getElementById('rt_msg_content').value = msg.content || '';
-                document.getElementById('rt_msg_prefix_auto').value = msg.prefix || '';
-                document.getElementById('rt_msg_suffix_auto').value = msg.suffix || '';
-                document.getElementById('rt_msg_split').value = msg.split_delimiter || ' - ';
-                document.getElementById('rt_msg_tag1_type_auto').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
-                document.getElementById('rt_msg_tag2_type_auto').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
-                // Load per-message regex rules
-                msgRegexRules = [];
+                if (document.getElementById('rt_msg_prefix'))
+                    document.getElementById('rt_msg_prefix').value = msg.prefix || '';
+                if (document.getElementById('rt_msg_suffix'))
+                    document.getElementById('rt_msg_suffix').value = msg.suffix || '';
+                if (document.getElementById('rt_msg_split_pattern'))
+                    document.getElementById('rt_msg_split_pattern').value = msg.split_delimiter || ' - ';
+                if (document.getElementById('rt_msg_before_tag'))
+                    document.getElementById('rt_msg_before_tag').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
+                if (document.getElementById('rt_msg_after_tag'))
+                    document.getElementById('rt_msg_after_tag').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                if (document.getElementById('rt_msg_case_sensitive'))
+                    document.getElementById('rt_msg_case_sensitive').checked = msg.case_sensitive || false;
+                if (document.getElementById('rt_msg_whole_words'))
+                    document.getElementById('rt_msg_whole_words').checked = msg.whole_words || false;
+
+                // Load tagging policies
+                taggingPolicies = [];
                 try {
-                    if (msg.rt_plus_regex_rules) msgRegexRules = JSON.parse(msg.rt_plus_regex_rules) || [];
+                    if (msg.tagging_policies) taggingPolicies = JSON.parse(msg.tagging_policies) || [];
                 } catch(e) {}
-                renderMsgRegexRules();
-                // Restore method radio
-                var savedMethod = msg.rt_plus_mode || 'split';
-                document.querySelectorAll('input[name="rt_msg_rtplus_method"]').forEach(function(r) {
-                    r.checked = (r.value === savedMethod);
-                });
-                updateRTPlusMsgMethod();
+                renderTaggingPolicies();
             }
 
             updateSourceUI();
             updateRTPlusUI();
+            renderTaggingPolicies(); // Render policies list
             updateMsgPreview();
             document.getElementById('rt_msg_modal').style.display = 'flex';
         }
@@ -5483,21 +5874,17 @@ UI_HTML = r"""
             var manualSimple = document.getElementById('rt_msg_manual_simple');
             var manualBuilder = document.getElementById('rt_msg_manual_builder');
 
-            // For manual mode: show simple text input or RT+ builder based on toggle
+            // Show/hide RT+ options based on enabled state (for all modes)
+            if (opts) opts.style.display = enabled ? 'block' : 'none';
+
+            // For manual mode: show simple text input or sample text based on toggle
             if (sourceType === 'manual') {
                 if (manualSimple) manualSimple.style.display = enabled ? 'none' : 'block';
                 if (manualBuilder) manualBuilder.style.display = enabled ? 'block' : 'none';
-                if (opts) opts.style.display = 'none';
-            } else if (sourceType === 'json') {
-                // For JSON: hide manual inputs and RT+ options (handled in JSON config)
-                if (manualSimple) manualSimple.style.display = 'none';
-                if (manualBuilder) manualBuilder.style.display = 'none';
-                if (opts) opts.style.display = 'none';
             } else {
-                // For file/URL: hide manual inputs, show RT+ options if enabled
+                // Hide manual builders for non-manual modes
                 if (manualSimple) manualSimple.style.display = 'none';
                 if (manualBuilder) manualBuilder.style.display = 'none';
-                if (opts) opts.style.display = enabled ? 'block' : 'none';
             }
             updateMsgPreview();
         }
@@ -5520,10 +5907,6 @@ UI_HTML = r"""
             }
 
             var cacheKey = content + sourceType;
-            if (sourceType === 'json') {
-                cacheKey += document.getElementById('rt_msg_json_field1').value +
-                            document.getElementById('rt_msg_json_field2').value;
-            }
 
             if (cacheKey === lastResolvePath && resolvedContentCache) {
                 renderPreviewWithContent(resolvedContentCache, resolvedTagPositions);
@@ -5535,34 +5918,16 @@ UI_HTML = r"""
 
             var previewEl = document.getElementById('rt_msg_preview');
             previewEl.innerHTML = '<span class="text-gray-500">Loading...</span>';
-
             var requestData = { source_type: sourceType, content: content };
 
             if (sourceType === 'json') {
-                var prefixEl = document.getElementById('rt_msg_json_prefix');
-                var suffixEl = document.getElementById('rt_msg_json_suffix');
-                var delimiterEl = document.getElementById('rt_msg_json_delimiter');
-                var field1El = document.getElementById('rt_msg_json_field1');
-                var field2El = document.getElementById('rt_msg_json_field2');
-                var hideEmptyEl = document.getElementById('rt_msg_json_hide_empty');
-                var tag1El = document.getElementById('rt_msg_json_tag1_type');
-                var tag2El = document.getElementById('rt_msg_json_tag2_type');
-
-                if (!field1El || !field2El) {
-                    // Elements not ready yet
-                    return;
-                }
-
-                requestData.prefix = prefixEl ? prefixEl.value : '';
-                requestData.suffix = suffixEl ? suffixEl.value : '';
-                requestData.split_delimiter = delimiterEl ? delimiterEl.value : ' - ';
-                requestData.json_field1 = field1El.value;
-                requestData.json_field2 = field2El.value;
-                requestData.json_hide_empty = hideEmptyEl ? hideEmptyEl.checked : true;
-                requestData.rt_plus_tags = {
-                    tag1_type: tag1El ? parseInt(tag1El.value) : 4,
-                    tag2_type: tag2El ? parseInt(tag2El.value) : 1
-                };
+                requestData.json_field1 = document.getElementById('rt_msg_json_field1') ? document.getElementById('rt_msg_json_field1').value : '';
+                requestData.json_field2 = document.getElementById('rt_msg_json_field2') ? document.getElementById('rt_msg_json_field2').value : '';
+                requestData.json_hide_if_blank = document.getElementById('rt_msg_json_hide_if_blank') ? document.getElementById('rt_msg_json_hide_if_blank').checked : false;
+                requestData.split_delimiter = document.getElementById('rt_msg_json_delimiter') ? document.getElementById('rt_msg_json_delimiter').value : ' - ';
+                var rtPlusEnabledEl = document.getElementById('rt_msg_rtplus_enabled');
+                requestData.rt_plus_enabled = rtPlusEnabledEl ? rtPlusEnabledEl.checked : false;
+                requestData.tagging_policies = JSON.stringify(taggingPolicies || []);
             }
 
             fetch('/resolve-content', {
@@ -5579,13 +5944,15 @@ UI_HTML = r"""
                 } else {
                     resolvedContentCache = '';
                     resolvedTagPositions = null;
+                    console.error('Resolve content error:', data.error);
                     previewEl.innerHTML = '<span class="text-red-400">Error: ' + escapeHtml(data.error || 'Failed') + '</span>';
                 }
             })
             .catch(function(err) {
                 resolvedContentCache = '';
                 resolvedTagPositions = null;
-                previewEl.innerHTML = '<span class="text-red-400">Error loading content</span>';
+                console.error('Fetch error:', err);
+                previewEl.innerHTML = '<span class="text-red-400">Error loading content: ' + escapeHtml(err.message || 'Unknown error') + '</span>';
             });
         }
 
@@ -5603,6 +5970,10 @@ UI_HTML = r"""
             }
         }
 
+        // Global variable to store tagging policies and current editing
+        var taggingPolicies = [];
+        var currentEditingPolicyId = null;
+
         function renderPreviewWithContent(resolvedContent, tagPositions) {
             var sourceType = document.querySelector('input[name="rt_msg_source"]:checked').value;
             var limit = document.getElementById('rt_mode').value === '2B' ? 32 : 64;
@@ -5610,6 +5981,7 @@ UI_HTML = r"""
             var tag1Start = -1, tag1Len = 0, tag1Type = 0;
             var tag2Start = -1, tag2Len = 0, tag2Type = 0;
             var rtPlusEnabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+            var appliedRuleName = '';
 
             if (sourceType === 'manual') {
                 if (!rtPlusEnabled) {
@@ -5619,86 +5991,95 @@ UI_HTML = r"""
                     var countElem = document.getElementById('rt_msg_simple_count');
                     if (countElem) countElem.textContent = preview.length;
                 } else {
-                    // RT+ builder mode
-                    var prefix = document.getElementById('rt_msg_prefix').value || '';
-                    var tag1Text = document.getElementById('rt_msg_tag1_text').value || '';
-                    var middle = document.getElementById('rt_msg_middle').value || '';
-                    var tag2Text = document.getElementById('rt_msg_tag2_text').value || '';
-                    var suffix = document.getElementById('rt_msg_suffix').value || '';
-                    tag1Type = parseInt(document.getElementById('rt_msg_tag1_type').value) || 0;
-                    tag2Type = parseInt(document.getElementById('rt_msg_tag2_type').value) || 0;
-
-                    preview = prefix + tag1Text;
-                    tag1Start = prefix.length;
-                    tag1Len = tag1Text.length;
-
-                    if (tag2Text) {
-                        preview += middle + tag2Text;
-                        tag2Start = prefix.length + tag1Text.length + middle.length;
-                        tag2Len = tag2Text.length;
+                    // Intelligent tagging mode
+                    var sampleText = 'Artist - Song Title';  // Default sample
+                    
+                    // Get sample input if available
+                    if (typeof globalSampleText !== 'undefined' && globalSampleText) {
+                        sampleText = globalSampleText;
                     }
-                    preview += suffix;
+                    
+                    var result = applyTaggingPolicies(sampleText);
+                    preview = result.text;
+                    tag1Start = result.tag1Start;
+                    tag1Len = result.tag1Len;
+                    tag1Type = result.tag1Type;
+                    tag2Start = result.tag2Start;
+                    tag2Len = result.tag2Len;
+                    tag2Type = result.tag2Type;
+                    appliedRuleName = result.appliedRule;
                 }
             } else if (sourceType === 'json') {
-                // JSON source type
+                // JSON source type with tagging policies
                 var url = document.getElementById('rt_msg_json_url').value || '';
-                var prefix = document.getElementById('rt_msg_json_prefix').value || '';
-                var suffix = document.getElementById('rt_msg_json_suffix').value || '';
-                var delimiter = document.getElementById('rt_msg_json_delimiter').value || ' - ';
-                var field1 = document.getElementById('rt_msg_json_field1').value;
-                var field2 = document.getElementById('rt_msg_json_field2').value;
-                tag1Type = parseInt(document.getElementById('rt_msg_json_tag1_type').value) || 0;
-                tag2Type = parseInt(document.getElementById('rt_msg_json_tag2_type').value) || 0;
 
                 if (!url) {
                     preview = '(enter JSON URL and click Fetch & Analyze)';
-                } else if (!field1) {
-                    preview = '(select Field 1)';
                 } else {
-                    // Build preview from resolved content if available
                     if (resolvedContent) {
                         preview = resolvedContent;
-
-                        // Use RT+ tag positions from server if available
-                        if (rtPlusEnabled && tagPositions && tagPositions.field1) {
-                            tag1Start = tagPositions.field1.start;
-                            tag1Len = tagPositions.field1.length;
-
-                            if (tagPositions.field2) {
-                                tag2Start = tagPositions.field2.start;
-                                tag2Len = tagPositions.field2.length;
+                        
+                        // Get tag types from field mapping
+                        var tag1TypeField = parseInt(document.getElementById('rt_msg_json_tag1_type') ? document.getElementById('rt_msg_json_tag1_type').value : '4');
+                        var tag2TypeField = parseInt(document.getElementById('rt_msg_json_tag2_type') ? document.getElementById('rt_msg_json_tag2_type').value : '1');
+                        var delimiter = document.getElementById('rt_msg_json_delimiter') ? document.getElementById('rt_msg_json_delimiter').value : ' - ';
+                        
+                        // Calculate base tag positions from delimiter split
+                        var delimiterPos = resolvedContent.indexOf(delimiter);
+                        if (delimiterPos !== -1) {
+                            // Two fields present
+                            tag1Start = 0;
+                            tag1Len = delimiterPos;
+                            tag1Type = tag1TypeField;
+                            tag2Start = delimiterPos + delimiter.length;
+                            tag2Len = resolvedContent.length - tag2Start;
+                            tag2Type = tag2TypeField;
+                            appliedRuleName = 'Field Mapping';
+                        } else {
+                            // Single field
+                            tag1Start = 0;
+                            tag1Len = resolvedContent.length;
+                            tag1Type = tag1TypeField;
+                            appliedRuleName = 'Field Mapping';
+                        }
+                        
+                        // Apply tagging policies (may override base tags)
+                        if (taggingPolicies && taggingPolicies.length > 0) {
+                            var result = applyTaggingPolicies(resolvedContent);
+                            
+                            // If a policy was applied (has appliedPolicy set), use its tags
+                            if (result.appliedPolicy) {
+                                preview = result.text;
+                                tag1Start = result.tag1Start;
+                                tag1Len = result.tag1Len;
+                                tag1Type = result.tag1Type;
+                                tag2Start = result.tag2Start;
+                                tag2Len = result.tag2Len;
+                                tag2Type = result.tag2Type;
+                                appliedRuleName = result.appliedPolicy;
                             }
+                            // else: keep base field mapping tags
                         }
                     } else {
                         preview = '(loading...)';
                     }
                 }
             } else {
+                // File/URL source with intelligent tagging
                 var path = document.getElementById('rt_msg_content').value || '';
-                var delimiter = document.getElementById('rt_msg_split').value || ' - ';
-                tag1Type = parseInt(document.getElementById('rt_msg_tag1_type_auto').value) || 0;
-                tag2Type = parseInt(document.getElementById('rt_msg_tag2_type_auto').value) || 0;
 
                 if (!path) {
                     preview = '(enter file path or URL)';
                 } else if (resolvedContent) {
-                    // Get prefix/suffix
-                    var prefix = document.getElementById('rt_msg_prefix_auto').value || '';
-                    var suffix = document.getElementById('rt_msg_suffix_auto').value || '';
-
-                    // Calculate RT+ tags BEFORE adding suffix (so suffix isn't included in tag2)
-                    if (document.getElementById('rt_msg_rtplus_enabled').checked && delimiter && resolvedContent.indexOf(delimiter) !== -1) {
-                        var parts = resolvedContent.split(delimiter, 2);
-                        tag1Start = prefix.length;
-                        tag1Len = parts[0].length;
-                        if (parts.length > 1) {
-                            tag2Start = prefix.length + parts[0].length + delimiter.length;
-                            tag2Len = parts[1].length; // This is correct - parts[1] doesn't include suffix yet
-                        }
-                    }
-
-                    // Apply prefix/suffix to preview
-                    preview = prefix + resolvedContent + suffix;
+                    var result = applyTaggingPolicies(resolvedContent);
+                    preview = result.text;
+                    tag1Start = result.tag1Start;
+                    tag1Len = result.tag1Len;
+                    tag1Type = result.tag1Type;
+                    tag2Start = result.tag2Start;
+                    tag2Len = result.tag2Len;
+                    tag2Type = result.tag2Type;
+                    appliedRuleName = result.appliedPolicy;
                 } else {
                     preview = '(no content)';
                 }
@@ -5707,6 +6088,13 @@ UI_HTML = r"""
             // Truncate preview
             if (preview.length > limit) {
                 preview = preview.substring(0, limit);
+                // Adjust tag positions if they exceed limit
+                if (tag1Start + tag1Len > limit) {
+                    tag1Len = Math.max(0, limit - tag1Start);
+                }
+                if (tag2Start + tag2Len > limit) {
+                    tag2Len = Math.max(0, limit - tag2Start);
+                }
             }
 
             // Update char count
@@ -5716,7 +6104,7 @@ UI_HTML = r"""
             limitEl.textContent = limit;
             countEl.className = preview.length > limit ? 'text-red-400' : (preview.length > limit - 5 ? 'text-yellow-400' : 'text-green-400');
 
-            // Build preview HTML with highlighted tags (only if RT+ enabled)
+            // Build preview HTML with highlighted tags
             var previewEl = document.getElementById('rt_msg_preview');
             var html = '';
             if (rtPlusEnabled && (tag1Len > 0 || tag2Len > 0)) {
@@ -5731,21 +6119,33 @@ UI_HTML = r"""
                     }
                 }
             } else {
-                // No highlighting when RT+ disabled or no tags
                 html = escapeHtml(preview);
             }
             previewEl.innerHTML = html || '<span class="text-gray-600">(empty)</span>';
 
-            // Update tag info (hide if RT+ disabled in manual mode)
+            // Update tag info
             var tag1Info = document.getElementById('rt_msg_tag1_info');
             var tag2Info = document.getElementById('rt_msg_tag2_info');
             var tagInfoContainer = document.getElementById('rt_msg_tag_info');
 
             if (sourceType === 'manual' && !rtPlusEnabled) {
-                // Hide tag info in manual mode when RT+ is disabled
                 if (tagInfoContainer) tagInfoContainer.style.display = 'none';
             } else {
                 if (tagInfoContainer) tagInfoContainer.style.display = 'grid';
+                
+                // Show applied policy info
+                var ruleInfoEl = document.getElementById('rt_msg_rule_applied');
+                if (ruleInfoEl) {
+                    if (appliedRuleName) {
+                        ruleInfoEl.textContent = 'Current policy: ' + appliedRuleName;
+                        ruleInfoEl.className = 'text-blue-400 text-xs';
+                    } else {
+                        ruleInfoEl.textContent = 'Current policy: Field Mapping';
+                        ruleInfoEl.className = 'text-gray-400 text-xs';
+                    }
+                }
+                
+                // Update tag info
                 if (tag1Len > 0) {
                     var t1Name = RTPLUS_TYPES[tag1Type] ? RTPLUS_TYPES[tag1Type][0] : 'Unknown';
                     tag1Info.textContent = t1Name + ' [' + tag1Start + '-' + (tag1Start + tag1Len - 1) + ']';
@@ -5759,6 +6159,565 @@ UI_HTML = r"""
                     tag2Info.textContent = '-';
                 }
             }
+        }
+
+        function applyTaggingPolicies(content) {
+            var result = {
+                text: content,
+                tag1Start: -1,
+                tag1Len: 0,
+                tag1Type: 0,
+                tag2Start: -1,
+                tag2Len: 0,
+                tag2Type: 0,
+                appliedPolicy: ''
+            };
+
+            // Apply policies in order (first match wins for sub-tagging)
+            for (var i = 0; i < taggingPolicies.length; i++) {
+                var policy = taggingPolicies[i];
+                if (!policy.enabled) continue;
+
+                if (policy.type === 'default') {
+                    // Apply default policy settings
+                    var prefix = policy.settings.prefix || '';
+                    var suffix = policy.settings.suffix || '';
+                    var splitPattern = policy.settings.split_pattern || ' - ';
+                    
+                    result.text = prefix + content + suffix;
+                    result.appliedPolicy = policy.name;
+                    result.tag1Type = parseInt(policy.settings.tag1_type) || 0;
+                    result.tag2Type = parseInt(policy.settings.tag2_type) || 0;
+                    
+                    // Apply split tagging if pattern exists
+                    if (splitPattern && content.indexOf(splitPattern) !== -1) {
+                        var parts = content.split(splitPattern, 2);
+                        if (parts.length >= 2) {
+                            result.tag1Start = prefix.length;
+                            result.tag1Len = parts[0].length;
+                            result.tag2Start = prefix.length + parts[0].length + splitPattern.length;
+                            result.tag2Len = parts[1].length;
+                        }
+                    } else {
+                        // Tag entire content if no split pattern match
+                        result.tag1Start = prefix.length;
+                        result.tag1Len = content.length;
+                    }
+                    
+                    continue; // Default policies don't stop processing
+                } else if (policy.type === 'sub') {
+                    // Check trigger condition first (if specified)
+                    if (policy.settings.trigger_type && policy.settings.trigger_type !== 'none') {
+                        var triggerMatches = false;
+                        var triggerPattern = policy.settings.trigger_pattern || '';
+                        
+                        if (!triggerPattern) continue; // Skip if trigger type set but no pattern
+                        
+                        switch (policy.settings.trigger_type) {
+                            case 'contains':
+                                triggerMatches = content.toLowerCase().includes(triggerPattern.toLowerCase());
+                                break;
+                            case 'starts_with':
+                                triggerMatches = content.toLowerCase().startsWith(triggerPattern.toLowerCase());
+                                break;
+                            case 'ends_with':
+                                triggerMatches = content.toLowerCase().endsWith(triggerPattern.toLowerCase());
+                                break;
+                            case 'equals':
+                                triggerMatches = content.toLowerCase() === triggerPattern.toLowerCase();
+                                break;
+                            case 'regex':
+                                try {
+                                    var triggerRegex = new RegExp(triggerPattern, 'i');
+                                    triggerMatches = triggerRegex.test(content);
+                                } catch (e) {
+                                    console.warn('Invalid trigger regex in policy:', policy.name);
+                                }
+                                break;
+                        }
+                        
+                        if (!triggerMatches) continue; // Skip this policy if trigger doesn't match
+                    }
+                    
+                    // Check sub-tagging condition
+                    var matches = false;
+                    var pattern = policy.settings.pattern || '';
+                    
+                    switch (policy.settings.condition) {
+                        case 'starts_with':
+                            matches = content.toLowerCase().startsWith(pattern.toLowerCase());
+                            break;
+                        case 'ends_with':
+                            matches = content.toLowerCase().endsWith(pattern.toLowerCase());
+                            break;
+                        case 'contains':
+                            matches = content.toLowerCase().includes(pattern.toLowerCase());
+                            break;
+                        case 'equals':
+                            matches = content.toLowerCase() === pattern.toLowerCase();
+                            break;
+                        case 'regex':
+                            try {
+                                var regex = new RegExp(pattern, 'i');
+                                matches = regex.test(content);
+                            } catch (e) {
+                                console.warn('Invalid regex in policy:', policy.name);
+                            }
+                            break;
+                    }
+                    
+                    if (matches) {
+                        // Apply sub-tagging
+                        result.appliedPolicy = policy.name;
+                        result.tag1Type = parseInt(policy.settings.tag_type) || 0;
+                        result.tag2Type = 0; // Sub-tagging uses only one tag
+                        
+                        var tagContent = content;
+                        var tagStart = 0;
+                        
+                        // Apply tag action
+                        switch (policy.settings.action) {
+                            case 'tag_all':
+                                tagStart = 0;
+                                break;
+                            case 'tag_after':
+                                var afterIndex = content.indexOf(pattern);
+                                if (afterIndex !== -1) {
+                                    tagStart = afterIndex + pattern.length;
+                                    tagContent = content.substring(tagStart);
+                                }
+                                break;
+                            case 'tag_before':
+                                var beforeIndex = content.indexOf(pattern);
+                                if (beforeIndex !== -1) {
+                                    tagStart = 0;
+                                    tagContent = content.substring(0, beforeIndex);
+                                }
+                                break;
+                            case 'tag_match':
+                                var matchIndex = content.indexOf(pattern);
+                                if (matchIndex !== -1) {
+                                    tagStart = matchIndex;
+                                    tagContent = pattern;
+                                }
+                                break;
+                        }
+                        
+                        // Strip pattern if requested
+                        if (policy.settings.strip_pattern && policy.settings.action !== 'tag_match') {
+                            tagContent = tagContent.replace(new RegExp(escapeRegex(pattern), 'gi'), '');
+                        }
+                        
+                        result.tag1Start = tagStart;
+                        result.tag1Len = tagContent.length;
+                        
+                        return result; // Sub-tagging stops processing
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        function escapeRegex(string) {
+            return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        // Global variable for sample text
+        var globalSampleText = 'Artist - Song Title';
+
+        function updateSampleText() {
+            var sampleInput = document.getElementById('rt_msg_sample_text');
+            if (sampleInput) {
+                globalSampleText = sampleInput.value || 'Artist - Song Title';
+            }
+        }
+
+        // Smart Rules Management Functions
+        function addSmartRule() {
+            var rule = {
+                id: Date.now(),
+                name: 'New Rule',
+                condition: 'contains',
+                pattern: '',
+                tag1Type: 1,
+                tag2Type: -1,
+                enabled: true
+            };
+            smartRules.push(rule);
+            renderSmartRules();
+            updateMsgPreview();
+        }
+
+        function removeSmartRule(ruleId) {
+            smartRules = smartRules.filter(function(r) { return r.id !== ruleId; });
+            renderSmartRules();
+            updateMsgPreview();
+        }
+
+        function updateSmartRule(ruleId, field, value) {
+            var rule = smartRules.find(function(r) { return r.id === ruleId; });
+            if (rule) {
+                if (field === 'tag1Type' || field === 'tag2Type') {
+                    rule[field] = parseInt(value);
+                } else if (field === 'enabled') {
+                    rule[field] = value;
+                } else {
+                    rule[field] = value;
+                }
+                updateMsgPreview();
+            }
+        }
+
+        function moveSmartRule(ruleId, direction) {
+            var index = smartRules.findIndex(function(r) { return r.id === ruleId; });
+            if (index === -1) return;
+
+            if (direction === 'up' && index > 0) {
+                var temp = smartRules[index];
+                smartRules[index] = smartRules[index - 1];
+                smartRules[index - 1] = temp;
+            } else if (direction === 'down' && index < smartRules.length - 1) {
+                var temp = smartRules[index];
+                smartRules[index] = smartRules[index + 1];
+                smartRules[index + 1] = temp;
+            }
+            
+            renderSmartRules();
+            updateMsgPreview();
+        }
+
+        function renderSmartRules() {
+            var container = document.getElementById('smart_rules_container');
+            if (!container) return;
+
+            container.innerHTML = '';
+
+            if (smartRules.length === 0) {
+                container.innerHTML = '<div class="text-center text-gray-500 text-xs py-4 border border-gray-700 rounded">No smart rules defined. Click "+ Add" to create your first rule.</div>';
+                return;
+            }
+
+            smartRules.forEach(function(rule, index) {
+                var ruleHtml = `
+                    <div class="bg-[#1a1a1a] border border-purple-800/50 rounded p-2 space-y-2">
+                        <div class="flex items-center gap-2">
+                            <label class="flex items-center gap-1 cursor-pointer">
+                                <input type="checkbox" ${rule.enabled ? 'checked' : ''} 
+                                       onchange="updateSmartRule(${rule.id}, 'enabled', this.checked)"
+                                       class="accent-purple-600">
+                                <input type="text" value="${escapeHtml(rule.name)}" 
+                                       onchange="updateSmartRule(${rule.id}, 'name', this.value)"
+                                       class="bg-transparent border-none text-xs text-white font-bold outline-none"
+                                       style="min-width: 80px;">
+                            </label>
+                            <div class="flex gap-1 ml-auto">
+                                <button onclick="moveSmartRule(${rule.id}, 'up')" ${index === 0 ? 'disabled' : ''}
+                                        class="w-5 h-5 text-xs bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded">↑</button>
+                                <button onclick="moveSmartRule(${rule.id}, 'down')" ${index === smartRules.length - 1 ? 'disabled' : ''}
+                                        class="w-5 h-5 text-xs bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded">↓</button>
+                                <button onclick="removeSmartRule(${rule.id})" 
+                                        class="w-5 h-5 text-xs bg-red-800 hover:bg-red-700 rounded text-white">×</button>
+                            </div>
+                        </div>
+                        
+                        <div class="grid grid-cols-1 lg:grid-cols-4 gap-2 text-xs">
+                            <!-- Condition -->
+                            <div class="space-y-1">
+                                <label class="text-gray-400">When text</label>
+                                <select onchange="updateSmartRule(${rule.id}, 'condition', this.value)" 
+                                        class="w-full bg-[#111] border border-[#444] rounded px-1 py-1 text-xs">
+                                    <option value="contains" ${rule.condition === 'contains' ? 'selected' : ''}>Contains</option>
+                                    <option value="startswith" ${rule.condition === 'startswith' ? 'selected' : ''}>Starts with</option>
+                                    <option value="endswith" ${rule.condition === 'endswith' ? 'selected' : ''}>Ends with</option>
+                                    <option value="regex" ${rule.condition === 'regex' ? 'selected' : ''}>Regex</option>
+                                </select>
+                            </div>
+                            
+                            <!-- Pattern -->
+                            <div class="space-y-1">
+                                <label class="text-gray-400">Pattern</label>
+                                <input type="text" value="${escapeHtml(rule.pattern)}" 
+                                       onchange="updateSmartRule(${rule.id}, 'pattern', this.value)"
+                                       placeholder="e.g. 'Live:', 'News'"
+                                       class="w-full bg-[#111] border border-[#444] rounded px-1 py-1 text-xs">
+                            </div>
+                            
+                            <!-- Tag 1 -->
+                            <div class="space-y-1">
+                                <label class="text-orange-400">Tag Type</label>
+                                <select onchange="updateSmartRule(${rule.id}, 'tag1Type', this.value)" 
+                                        class="w-full bg-[#111] border border-orange-900/50 rounded px-1 py-1 text-xs">
+                                    <option value="-1" ${rule.tag1Type === -1 ? 'selected' : ''}>No Tag</option>
+                                    <option value="1" ${rule.tag1Type === 1 ? 'selected' : ''}>1: Title</option>
+                                    <option value="4" ${rule.tag1Type === 4 ? 'selected' : ''}>4: Artist</option>
+                                    <option value="2" ${rule.tag1Type === 2 ? 'selected' : ''}>2: Album</option>
+                                    <option value="33" ${rule.tag1Type === 33 ? 'selected' : ''}>33: Prog.Now</option>
+                                    <option value="31" ${rule.tag1Type === 31 ? 'selected' : ''}>31: Stn.Short</option>
+                                    <option value="32" ${rule.tag1Type === 32 ? 'selected' : ''}>32: Stn.Long</option>
+                                    <option value="36" ${rule.tag1Type === 36 ? 'selected' : ''}>36: Host</option>
+                                </select>
+                            </div>
+                            
+                            <!-- Tag 2 -->
+                            <div class="space-y-1">
+                                <label class="text-cyan-400">Extra Tag (opt)</label>
+                                <select onchange="updateSmartRule(${rule.id}, 'tag2Type', this.value)" 
+                                        class="w-full bg-[#111] border border-cyan-900/50 rounded px-1 py-1 text-xs">
+                                    <option value="-1" ${rule.tag2Type === -1 ? 'selected' : ''}>No Tag</option>
+                                    <option value="1" ${rule.tag2Type === 1 ? 'selected' : ''}>1: Title</option>
+                                    <option value="4" ${rule.tag2Type === 4 ? 'selected' : ''}>4: Artist</option>
+                                    <option value="2" ${rule.tag2Type === 2 ? 'selected' : ''}>2: Album</option>
+                                    <option value="33" ${rule.tag2Type === 33 ? 'selected' : ''}>33: Prog.Now</option>
+                                    <option value="32" ${rule.tag2Type === 32 ? 'selected' : ''}>32: Stn.Long</option>
+                                    <option value="36" ${rule.tag2Type === 36 ? 'selected' : ''}>36: Host</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += ruleHtml;
+            });
+        }
+
+        // Tagging Policy Management Functions
+        function addTaggingPolicy() {
+            var policy = {
+                id: Date.now(),
+                name: 'New Policy',
+                type: 'default',
+                enabled: true,
+                settings: {
+                    // Default policy settings
+                    tag1_type: 4,
+                    tag2_type: 1,
+                    split_pattern: ' - ',
+                    prefix: '',
+                    suffix: '',
+                    // Sub-tagging settings
+                    trigger_type: 'none',
+                    trigger_pattern: '',
+                    condition: 'starts_with',
+                    pattern: '',
+                    action: 'tag_all',
+                    tag_type: 1,
+                    strip_pattern: false
+                }
+            };
+            taggingPolicies.push(policy);
+            renderTaggingPolicies();
+            editTaggingPolicy(policy.id);
+        }
+
+        function editTaggingPolicy(policyId) {
+            var policy = taggingPolicies.find(function(p) { return p.id === policyId; });
+            if (!policy) return;
+
+            currentEditingPolicyId = policyId;
+            
+            // Populate editor
+            document.getElementById('policy_name').value = policy.name;
+            document.getElementById('policy_type').value = policy.type;
+            
+            // Populate tag type selectors with hierarchical categories
+            populateRTPlusSelect(document.getElementById('policy_default_tag1'), policy.settings.tag1_type || 4);
+            populateRTPlusSelect(document.getElementById('policy_default_tag2'), policy.settings.tag2_type || 1);
+            populateRTPlusSelect(document.getElementById('policy_sub_tag_type'), policy.settings.tag_type || 1);
+            
+            // Default settings
+            document.getElementById('policy_default_split').value = policy.settings.split_pattern || ' - ';
+            document.getElementById('policy_default_prefix').value = policy.settings.prefix || '';
+            document.getElementById('policy_default_suffix').value = policy.settings.suffix || '';
+            
+            // Sub-tagging settings
+            document.getElementById('policy_sub_trigger_type').value = policy.settings.trigger_type || 'none';
+            document.getElementById('policy_sub_trigger_pattern').value = policy.settings.trigger_pattern || '';
+            document.getElementById('policy_sub_condition').value = policy.settings.condition || 'starts_with';
+            document.getElementById('policy_sub_pattern').value = policy.settings.pattern || '';
+            document.getElementById('policy_sub_action').value = policy.settings.action || 'tag_all';
+            document.getElementById('policy_sub_strip_pattern').checked = policy.settings.strip_pattern || false;
+            
+            updatePolicyEditor();
+            document.getElementById('policy_editor').style.display = 'block';
+            document.getElementById('policy_editor_title').textContent = 'Edit Policy: ' + policy.name;
+        }
+
+        function updatePolicyEditor() {
+            var type = document.getElementById('policy_type').value;
+            var defaultSettings = document.getElementById('default_policy_settings');
+            var subSettings = document.getElementById('sub_policy_settings');
+            
+            if (type === 'default') {
+                defaultSettings.style.display = 'block';
+                subSettings.style.display = 'none';
+            } else {
+                defaultSettings.style.display = 'none';
+                subSettings.style.display = 'block';
+            }
+        }
+
+        function savePolicyEditor() {
+            if (!currentEditingPolicyId) return;
+            
+            var policy = taggingPolicies.find(function(p) { return p.id === currentEditingPolicyId; });
+            if (!policy) return;
+
+            policy.name = document.getElementById('policy_name').value;
+            policy.type = document.getElementById('policy_type').value;
+            
+            // Save settings based on type
+            if (policy.type === 'default') {
+                policy.settings.tag1_type = parseInt(document.getElementById('policy_default_tag1').value);
+                policy.settings.tag2_type = parseInt(document.getElementById('policy_default_tag2').value);
+                policy.settings.split_pattern = document.getElementById('policy_default_split').value;
+                policy.settings.prefix = document.getElementById('policy_default_prefix').value;
+                policy.settings.suffix = document.getElementById('policy_default_suffix').value;
+            } else {
+                policy.settings.trigger_type = document.getElementById('policy_sub_trigger_type').value;
+                policy.settings.trigger_pattern = document.getElementById('policy_sub_trigger_pattern').value;
+                policy.settings.condition = document.getElementById('policy_sub_condition').value;
+                policy.settings.pattern = document.getElementById('policy_sub_pattern').value;
+                policy.settings.action = document.getElementById('policy_sub_action').value;
+                policy.settings.tag_type = parseInt(document.getElementById('policy_sub_tag_type').value);
+                policy.settings.strip_pattern = document.getElementById('policy_sub_strip_pattern').checked;
+            }
+
+            closePolicyEditor();
+            renderTaggingPolicies();
+            updateMsgPreview();
+        }
+
+        function closePolicyEditor() {
+            currentEditingPolicyId = null;
+            document.getElementById('policy_editor').style.display = 'none';
+        }
+
+        function deleteTaggingPolicy(policyId) {
+            if (!confirm('Delete this tagging policy?')) return;
+            taggingPolicies = taggingPolicies.filter(function(p) { return p.id !== policyId; });
+            renderTaggingPolicies();
+            updateMsgPreview();
+        }
+
+        function toggleTaggingPolicy(policyId) {
+            var policy = taggingPolicies.find(function(p) { return p.id === policyId; });
+            if (policy) {
+                policy.enabled = !policy.enabled;
+                renderTaggingPolicies();
+                updateMsgPreview();
+            }
+        }
+
+        function moveTaggingPolicy(policyId, direction) {
+            var index = taggingPolicies.findIndex(function(p) { return p.id === policyId; });
+            if (index === -1) return;
+
+            if (direction === 'up' && index > 0) {
+                var temp = taggingPolicies[index];
+                taggingPolicies[index] = taggingPolicies[index - 1];
+                taggingPolicies[index - 1] = temp;
+            } else if (direction === 'down' && index < taggingPolicies.length - 1) {
+                var temp = taggingPolicies[index];
+                taggingPolicies[index] = taggingPolicies[index + 1];
+                taggingPolicies[index + 1] = temp;
+            }
+            
+            renderTaggingPolicies();
+            updateMsgPreview();
+        }
+
+        function renderTaggingPolicies() {
+            var container = document.getElementById('tagging_policies_list');
+            if (!container) return;
+
+            container.innerHTML = '';
+
+            if (taggingPolicies.length === 0) {
+                container.innerHTML = '<div class="text-center text-gray-500 text-xs py-4 border border-gray-700 rounded">No policies defined. Click "+ Add Policy" to create your first policy.</div>';
+                return;
+            }
+
+            taggingPolicies.forEach(function(policy, index) {
+                var typeIcon = policy.type === 'default' ? '📍' : '⚡';
+                var typeColor = policy.type === 'default' ? 'green' : 'purple';
+                var typeText = policy.type === 'default' ? 'Default' : 'Sub-tagging';
+                
+                var description = '';
+                if (policy.type === 'default') {
+                    var tag1Name = RTPLUS_TYPES[policy.settings.tag1_type] ? RTPLUS_TYPES[policy.settings.tag1_type][0] : 'Unknown';
+                    var tag2Name = RTPLUS_TYPES[policy.settings.tag2_type] ? RTPLUS_TYPES[policy.settings.tag2_type][0] : 'Unknown';
+                    description = tag1Name + ' + ' + tag2Name + ' • Split: "' + (policy.settings.split_pattern || ' - ') + '"';
+                } else {
+                    var tagName = RTPLUS_TYPES[policy.settings.tag_type] ? RTPLUS_TYPES[policy.settings.tag_type][0] : 'Unknown';
+                    description = tagName + ' • ' + policy.settings.condition.replace('_', ' ') + ': "' + policy.settings.pattern + '"';
+                }
+                
+                var policyHtml = `
+                    <div class="bg-[#1a1a1a] border border-${typeColor}-800/50 rounded p-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-3">
+                                <label class="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" ${policy.enabled ? 'checked' : ''} 
+                                           onchange="toggleTaggingPolicy(${policy.id})"
+                                           class="accent-${typeColor}-600">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-lg">${typeIcon}</span>
+                                        <div>
+                                            <div class="text-sm font-bold text-white">${escapeHtml(policy.name)}</div>
+                                            <div class="text-xs text-${typeColor}-400">${typeText}</div>
+                                        </div>
+                                    </div>
+                                </label>
+                            </div>
+                            <div class="flex gap-1">
+                                <button onclick="moveTaggingPolicy(${policy.id}, 'up')" ${index === 0 ? 'disabled' : ''}
+                                        class="w-6 h-6 text-xs bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded">↑</button>
+                                <button onclick="moveTaggingPolicy(${policy.id}, 'down')" ${index === taggingPolicies.length - 1 ? 'disabled' : ''}
+                                        class="w-6 h-6 text-xs bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded">↓</button>
+                                <button onclick="editTaggingPolicy(${policy.id})" 
+                                        class="w-6 h-6 text-xs bg-blue-800 hover:bg-blue-700 rounded text-white">✏</button>
+                                <button onclick="deleteTaggingPolicy(${policy.id})" 
+                                        class="w-6 h-6 text-xs bg-red-800 hover:bg-red-700 rounded text-white">×</button>
+                            </div>
+                        </div>
+                        <div class="text-xs text-gray-400">${description}</div>
+                    </div>
+                `;
+                container.innerHTML += policyHtml;
+            });
+        }
+
+        function initializeTaggingPolicies() {
+            // Initialize with example policies
+            taggingPolicies = [
+                {
+                    id: Date.now() + 1,
+                    name: 'Music Default',
+                    type: 'default',
+                    enabled: true,
+                    settings: {
+                        tag1_type: 4, // Artist
+                        tag2_type: 1, // Title
+                        split_pattern: ' - ',
+                        prefix: '',
+                        suffix: ''
+                    }
+                },
+                {
+                    id: Date.now() + 2,
+                    name: 'Breaking News',
+                    type: 'sub',
+                    enabled: true,
+                    settings: {
+                        condition: 'starts_with',
+                        pattern: '+++',
+                        action: 'tag_after',
+                        tag_type: 12, // Info.News
+                        strip_pattern: true
+                    }
+                }
+            ];
+            renderTaggingPolicies();
         }
 
         function saveRTMessage() {
@@ -5785,68 +6744,65 @@ UI_HTML = r"""
                     // Simple text mode
                     msg.content = document.getElementById('rt_msg_simple_text').value;
                     msg.prefix = '';
-                    msg.tag1_text = '';
-                    msg.middle = '';
-                    msg.tag2_text = '';
                     msg.suffix = '';
                     msg.split_delimiter = '';
+                    msg.smart_rules = '[]';
                 } else {
-                    // RT+ builder mode
-                    msg.prefix = document.getElementById('rt_msg_prefix').value;
-                    msg.tag1_text = document.getElementById('rt_msg_tag1_text').value;
-                    msg.middle = document.getElementById('rt_msg_middle').value;
-                    msg.tag2_text = document.getElementById('rt_msg_tag2_text').value;
-                    msg.suffix = document.getElementById('rt_msg_suffix').value;
+                    // Intelligent tagging mode
+                    msg.content = document.getElementById('rt_msg_sample_text') ? document.getElementById('rt_msg_sample_text').value : 'Artist - Song Title'; // Store sample text
+                    msg.prefix = document.getElementById('rt_msg_prefix') ? document.getElementById('rt_msg_prefix').value || '' : '';
+                    msg.suffix = document.getElementById('rt_msg_suffix') ? document.getElementById('rt_msg_suffix').value || '' : '';
+                    msg.split_delimiter = document.getElementById('rt_msg_split_pattern') ? document.getElementById('rt_msg_split_pattern').value : ' - ';
                     msg.rt_plus_tags = {
-                        tag1_type: parseInt(document.getElementById('rt_msg_tag1_type').value),
-                        tag2_type: parseInt(document.getElementById('rt_msg_tag2_type').value)
+                        tag1_type: parseInt(document.getElementById('rt_msg_before_tag') ? document.getElementById('rt_msg_before_tag').value : '4') || 4,
+                        tag2_type: parseInt(document.getElementById('rt_msg_after_tag') ? document.getElementById('rt_msg_after_tag').value : '1') || 1
                     };
-                    // Build content from parts for backend
-                    msg.content = (msg.prefix || '') + (msg.tag1_text || '') +
-                        (msg.tag2_text ? (msg.middle || '') + msg.tag2_text : '') + (msg.suffix || '');
-                    msg.split_delimiter = msg.middle || ' - ';
+                    msg.smart_rules = JSON.stringify(taggingPolicies);
+                    msg.case_sensitive = document.getElementById('rt_msg_case_sensitive') ? document.getElementById('rt_msg_case_sensitive').checked : false;
+                    msg.whole_words = document.getElementById('rt_msg_whole_words') ? document.getElementById('rt_msg_whole_words').checked : false;
+                    msg.sample_text = msg.content; // Store the same as content for manual mode
                 }
-            } else if (msg.source_type === 'json') {
-                // Save JSON fields
-                msg.content = document.getElementById('rt_msg_json_url').value;
-                msg.prefix = document.getElementById('rt_msg_json_prefix').value;
-                msg.suffix = document.getElementById('rt_msg_json_suffix').value;
-                msg.json_field1 = document.getElementById('rt_msg_json_field1').value;
-                msg.json_field2 = document.getElementById('rt_msg_json_field2').value;
-                msg.split_delimiter = document.getElementById('rt_msg_json_delimiter').value;
-                msg.json_hide_empty = document.getElementById('rt_msg_json_hide_empty').checked;
-                msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
-                msg.rt_plus_tags = {
-                    tag1_type: parseInt(document.getElementById('rt_msg_json_tag1_type').value),
-                    tag2_type: parseInt(document.getElementById('rt_msg_json_tag2_type').value)
-                };
-
-                // Clear fields not used by JSON
+                // Clear old manual fields
                 msg.tag1_text = '';
                 msg.middle = '';
                 msg.tag2_text = '';
-                msg.json_template = '';
-                msg.json_mappings = [];
-            } else {
-                // Save file/URL fields
-                msg.content = document.getElementById('rt_msg_content').value;
-                msg.prefix = document.getElementById('rt_msg_prefix_auto').value;
-                msg.suffix = document.getElementById('rt_msg_suffix_auto').value;
+            } else if (msg.source_type === 'json') {
+                // Save JSON fields with field mapping
+                msg.content = document.getElementById('rt_msg_json_url').value;
+                msg.json_field1 = document.getElementById('rt_msg_json_field1') ? document.getElementById('rt_msg_json_field1').value : '';
+                msg.json_field2 = document.getElementById('rt_msg_json_field2') ? document.getElementById('rt_msg_json_field2').value : '';
+                msg.json_hide_if_blank = document.getElementById('rt_msg_json_hide_if_blank') ? document.getElementById('rt_msg_json_hide_if_blank').checked : false;
+                msg.split_delimiter = document.getElementById('rt_msg_json_delimiter') ? document.getElementById('rt_msg_json_delimiter').value : ' - ';
                 msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
-                var rtplusMethodEl = document.querySelector('input[name="rt_msg_rtplus_method"]:checked');
-                msg.rt_plus_mode = rtplusMethodEl ? rtplusMethodEl.value : 'split';
-                if (msg.rt_plus_mode === 'regex') {
-                    msg.rt_plus_regex_rules = JSON.stringify(msgRegexRules);
-                    msg.split_delimiter = '';
-                    msg.rt_plus_tags = { tag1_type: -1, tag2_type: -1 };
-                } else {
-                    msg.split_delimiter = document.getElementById('rt_msg_split').value;
-                    msg.rt_plus_tags = {
-                        tag1_type: parseInt(document.getElementById('rt_msg_tag1_type_auto').value),
-                        tag2_type: parseInt(document.getElementById('rt_msg_tag2_type_auto').value)
-                    };
-                    msg.rt_plus_regex_rules = '[]';
-                }
+                msg.rt_plus_tags = {
+                    tag1_type: parseInt(document.getElementById('rt_msg_json_tag1_type') ? document.getElementById('rt_msg_json_tag1_type').value : '4') || 4,
+                    tag2_type: parseInt(document.getElementById('rt_msg_json_tag2_type') ? document.getElementById('rt_msg_json_tag2_type').value : '1') || 1
+                };
+                msg.tagging_policies = JSON.stringify(taggingPolicies);
+
+                // Clear fields not used by JSON
+                msg.prefix = '';
+                msg.suffix = '';
+                msg.tag1_text = '';
+                msg.middle = '';
+                msg.tag2_text = '';
+                msg.case_sensitive = false;
+                msg.whole_words = false;
+            } else {
+                // Save file/URL fields with intelligent tagging
+                msg.content = document.getElementById('rt_msg_content').value;
+                msg.prefix = document.getElementById('rt_msg_prefix') ? document.getElementById('rt_msg_prefix').value || '' : '';
+                msg.suffix = document.getElementById('rt_msg_suffix') ? document.getElementById('rt_msg_suffix').value || '' : '';
+                msg.rt_plus_enabled = document.getElementById('rt_msg_rtplus_enabled').checked;
+                msg.split_delimiter = document.getElementById('rt_msg_split_pattern') ? document.getElementById('rt_msg_split_pattern').value : ' - ';
+                msg.rt_plus_tags = {
+                    tag1_type: parseInt(document.getElementById('rt_msg_before_tag') ? document.getElementById('rt_msg_before_tag').value : '4') || 4,
+                    tag2_type: parseInt(document.getElementById('rt_msg_after_tag') ? document.getElementById('rt_msg_after_tag').value : '1') || 1
+                };
+                msg.smart_rules = JSON.stringify(smartRules);
+                msg.case_sensitive = document.getElementById('rt_msg_case_sensitive') ? document.getElementById('rt_msg_case_sensitive').checked : false;
+                msg.whole_words = document.getElementById('rt_msg_whole_words') ? document.getElementById('rt_msg_whole_words').checked : false;
+                
                 // Clear manual-only fields
                 msg.tag1_text = '';
                 msg.middle = '';
@@ -5911,54 +6867,124 @@ UI_HTML = r"""
             var field1Select = document.getElementById('rt_msg_json_field1');
             var field2Select = document.getElementById('rt_msg_json_field2');
 
-            // Use passed parameters or current values
-            var currentField1 = selectedField1 !== undefined ? selectedField1 : field1Select.value;
-            var currentField2 = selectedField2 !== undefined ? selectedField2 : field2Select.value;
+            var currentField1 = selectedField1 !== undefined ? selectedField1 : (field1Select ? field1Select.value : '');
+            var currentField2 = selectedField2 !== undefined ? selectedField2 : (field2Select ? field2Select.value : '');
 
-            // Clear and populate field 1
-            field1Select.innerHTML = '<option value="">Select field...</option>';
-            fields.forEach(function(field) {
-                var opt = document.createElement('option');
-                opt.value = field;
-                opt.textContent = field;
-                if (field === currentField1) opt.selected = true;
-                field1Select.appendChild(opt);
-            });
-
-            // Clear and populate field 2
-            field2Select.innerHTML = '<option value="">None (single field)</option>';
-            fields.forEach(function(field) {
-                var opt = document.createElement('option');
-                opt.value = field;
-                opt.textContent = field;
-                if (field === currentField2) opt.selected = true;
-                field2Select.appendChild(opt);
-            });
-
-            // Initialize tag type selects if not already done
-            initJSONTagSelects();
-        }
-
-        function initJSONTagSelects() {
-            var tag1Select = document.getElementById('rt_msg_json_tag1_type');
-            var tag2Select = document.getElementById('rt_msg_json_tag2_type');
-
-            if (tag1Select && tag1Select.options.length === 0) {
-                for (var code in RTPLUS_TYPES) {
-                    var opt1 = document.createElement('option');
-                    opt1.value = code;
-                    opt1.textContent = RTPLUS_TYPES[code][1];
-                    tag1Select.appendChild(opt1);
-
-                    var opt2 = document.createElement('option');
-                    opt2.value = code;
-                    opt2.textContent = RTPLUS_TYPES[code][1];
-                    tag2Select.appendChild(opt2);
-                }
-                tag1Select.value = '4'; // Default to Artist
-                tag2Select.value = '1'; // Default to Title
+            if (field1Select) {
+                field1Select.innerHTML = '<option value="">Select field...</option>';
+                fields.forEach(function(field) {
+                    var opt = document.createElement('option');
+                    opt.value = field;
+                    opt.textContent = field;
+                    if (field === currentField1) opt.selected = true;
+                    field1Select.appendChild(opt);
+                });
             }
+
+            if (field2Select) {
+                field2Select.innerHTML = '<option value="">None (single field)</option>';
+                fields.forEach(function(field) {
+                    var opt = document.createElement('option');
+                    opt.value = field;
+                    opt.textContent = field;
+                    if (field === currentField2) opt.selected = true;
+                    field2Select.appendChild(opt);
+                });
+            }
+
+            // Populate tag type selects
+            populateRTPlusSelect(document.getElementById('rt_msg_json_tag1_type'), 4);
+            populateRTPlusSelect(document.getElementById('rt_msg_json_tag2_type'), 1);
         }
+
+        function displayJSONFields(fields, sample) {
+            var container = document.getElementById('rt_msg_json_fields');
+            var html = '';
+
+            fields.forEach(function(field) {
+                var value = sample[field] || '';
+                var displayValue = String(value).substring(0, 40);
+                if (String(value).length > 40) displayValue += '...';
+                html += '<div class="flex justify-between gap-2">';
+                html += '<span class="text-cyan-400 font-mono">' + field + '</span>';
+                html += '<span class="text-gray-500 text-xs truncate flex-1">' + displayValue + '</span>';
+                html += '</div>';
+            });
+
+            container.innerHTML = html;
+        }
+        function populateRTPlusSelect(selectElement, selectedValue) {
+            if (!selectElement) {
+                console.error('populateRTPlusSelect: selectElement is null');
+                return;
+            }
+            
+            console.log('populateRTPlusSelect: Starting population with selectedValue:', selectedValue);
+            
+            // Clear existing options
+            selectElement.innerHTML = '';
+            
+            // Group types by category
+            var categories = {};
+            for (var i = 0; i <= 63; i++) {
+                var info = RTPLUS_TYPES[i];
+                if (!info) continue;
+                
+                var category = info[2] || 'system';
+                if (!categories[category]) {
+                    categories[category] = [];
+                }
+                categories[category].push({
+                    code: i,
+                    name: info[0],
+                    description: info[1]
+                });
+            }
+            
+            console.log('populateRTPlusSelect: Categories grouped:', Object.keys(categories));
+            
+            // Define category display order
+            var categoryOrder = ['music', 'station', 'news', 'media', 'contact', 'utility', 'location', 'system'];
+            
+            // Build hierarchical options
+            categoryOrder.forEach(function(categoryKey) {
+                var categoryInfo = RTPLUS_CATEGORIES[categoryKey];
+                var items = categories[categoryKey];
+                
+                if (!items || items.length === 0) return;
+                
+                console.log('Adding category:', categoryKey, 'with', items.length, 'items');
+                
+                // Add category header (optgroup)
+                var optgroup = document.createElement('optgroup');
+                optgroup.label = categoryInfo.name;
+                optgroup.style.fontWeight = 'bold';
+                optgroup.style.backgroundColor = '#2a2a2a';
+                optgroup.style.color = '#9ca3af';
+                
+                // Add items in this category
+                items.forEach(function(item) {
+                    var option = document.createElement('option');
+                    option.value = item.code;
+                    option.textContent = '  ' + item.code + ': ' + item.name;
+                    option.title = item.description + ' (' + categoryInfo.name + ')';
+                    option.style.paddingLeft = '16px';
+                    option.style.backgroundColor = '#1f2937';
+                    
+                    if (selectedValue && item.code == selectedValue) {
+                        option.selected = true;
+                        console.log('Selected option:', item.code, item.name);
+                    }
+                    
+                    optgroup.appendChild(option);
+                });
+                
+                selectElement.appendChild(optgroup);
+            });
+            
+            console.log('populateRTPlusSelect: Population complete. Total optgroups:', selectElement.children.length);
+        }
+
 
         function displayJSONFields(fields, sample) {
             var container = document.getElementById('rt_msg_json_fields');
@@ -5983,43 +7009,80 @@ UI_HTML = r"""
         }
 
         function initRTMsgTagSelects() {
-            // Build options HTML
-            var opts = '';
-            for (var i = 0; i <= 63; i++) {
-                var info = RTPLUS_TYPES[i] || ["Unknown", ""];
-                opts += '<option value="' + i + '">' + i + ': ' + info[0] + '</option>';
-            }
-
+            console.log('Initializing RT Message tag selectors with hierarchical categories...');
+            
             // Manual mode selects
             var sel1 = document.getElementById('rt_msg_tag1_type');
             var sel2 = document.getElementById('rt_msg_tag2_type');
-            if (sel1) { sel1.innerHTML = opts; sel1.value = '4'; }
-            if (sel2) { sel2.innerHTML = opts; sel2.value = '1'; }
+            if (sel1) { 
+                populateRTPlusSelect(sel1, 4); // Default to Artist
+                console.log('Populated rt_msg_tag1_type');
+            }
+            if (sel2) { 
+                populateRTPlusSelect(sel2, 1); // Default to Title
+                console.log('Populated rt_msg_tag2_type');
+            }
 
             // Auto mode selects (file/URL)
             var sel1Auto = document.getElementById('rt_msg_tag1_type_auto');
             var sel2Auto = document.getElementById('rt_msg_tag2_type_auto');
-            if (sel1Auto) { sel1Auto.innerHTML = opts; sel1Auto.value = '4'; }
-            if (sel2Auto) { sel2Auto.innerHTML = opts; sel2Auto.value = '1'; }
+            if (sel1Auto) { 
+                populateRTPlusSelect(sel1Auto, 4); // Default to Artist
+                console.log('Populated rt_msg_tag1_type_auto');
+            }
+            if (sel2Auto) { 
+                populateRTPlusSelect(sel2Auto, 1); // Default to Title
+                console.log('Populated rt_msg_tag2_type_auto');
+            }
+            
+            // Initialize intelligent tagging system
+            initializeTaggingPolicies();
+            console.log('Tagging policies system initialized');
+            
+            console.log('RT Message tag selectors initialized successfully!');
         }
 
         function initRTPlusBuilder() {
+            console.log('Initializing RT+ Builder with hierarchical categories...');
             var select1 = document.getElementById('builder_tag1_type');
             var select2 = document.getElementById('builder_tag2_type');
-            if (!select1 || !select2) return;
-
-            select1.innerHTML = '';
-            select2.innerHTML = '<option value="-1">None (single tag)</option>';
-
-            for (var i = 0; i <= 63; i++) {
-                var info = RTPLUS_TYPES[i] || ["Unknown", ""];
-                var opt = '<option value="' + i + '">' + i + ': ' + info[0] + '</option>';
-                select1.innerHTML += opt;
-                select2.innerHTML += opt;
+            if (!select1 || !select2) {
+                console.error('RT+ Builder selects not found!');
+                return;
             }
 
-            select1.value = "4";
-            select2.value = "1";
+            console.log('Populating Tag 1 select...');
+            // Clear and populate Tag 1 selector
+            populateRTPlusSelect(select1, 4);  // Default to Artist
+            
+            console.log('Populating Tag 2 select...');
+            // Setup Tag 2 selector with "None" option
+            select2.innerHTML = '';
+            var noneOption = document.createElement('option');
+            noneOption.value = '-1';
+            noneOption.textContent = 'None (single tag)';
+            noneOption.style.fontWeight = 'bold';
+            noneOption.style.backgroundColor = '#333';
+            select2.appendChild(noneOption);
+            
+            // Add hierarchical options for Tag 2
+            populateRTPlusSelect(select2, 1);  // Default to Title
+            
+            console.log('RT+ Builder initialized successfully!');
+        }
+
+        // Toggle category reference panel
+        function toggleCategoryReference() {
+            var panel = document.getElementById('category_reference');
+            var button = document.getElementById('toggle_categories');
+            
+            if (panel.classList.contains('hidden')) {
+                panel.classList.remove('hidden');
+                button.textContent = 'Hide Reference';
+            } else {
+                panel.classList.add('hidden');
+                button.textContent = 'Show Reference';
+            }
         }
 
         function openRTPlusModal() {
@@ -6136,20 +7199,36 @@ UI_HTML = r"""
             countEl.className = totalLen > limit ? 'text-red-400' : 'text-green-400';
             document.getElementById('builder_char_limit').innerText = limit;
 
-            // Tag info
+            // Tag info with category display
             document.getElementById('builder_tag1_info').innerText = tag1Text
                 ? 'pos ' + tag1Start + ', len ' + tag1Text.length
                 : 'not set';
-            document.getElementById('builder_tag1_typename').innerText = tag1Type >= 0
-                ? RTPLUS_TYPES[tag1Type][0]
-                : 'None';
+            
+            var tag1TypeInfo = '';
+            if (tag1Type >= 0 && RTPLUS_TYPES[tag1Type]) {
+                var typeData = RTPLUS_TYPES[tag1Type];
+                var categoryData = RTPLUS_CATEGORIES[typeData[2]];
+                tag1TypeInfo = typeData[0] + ' (' + (categoryData ? categoryData.name : typeData[2]) + ')';
+            } else {
+                tag1TypeInfo = 'None';
+            }
+            document.getElementById('builder_tag1_typename').innerHTML = 
+                '<span title="' + (RTPLUS_TYPES[tag1Type] ? RTPLUS_TYPES[tag1Type][1] : '') + '">' + tag1TypeInfo + '</span>';
 
             document.getElementById('builder_tag2_info').innerText = (tag2Type >= 0 && tag2Text)
                 ? 'pos ' + tag2Start + ', len ' + tag2Text.length
                 : 'not set';
-            document.getElementById('builder_tag2_typename').innerText = tag2Type >= 0
-                ? RTPLUS_TYPES[tag2Type][0]
-                : 'None';
+                
+            var tag2TypeInfo = '';
+            if (tag2Type >= 0 && RTPLUS_TYPES[tag2Type]) {
+                var typeData = RTPLUS_TYPES[tag2Type];
+                var categoryData = RTPLUS_CATEGORIES[typeData[2]];
+                tag2TypeInfo = typeData[0] + ' (' + (categoryData ? categoryData.name : typeData[2]) + ')';
+            } else {
+                tag2TypeInfo = 'None';
+            }
+            document.getElementById('builder_tag2_typename').innerHTML = 
+                '<span title="' + (RTPLUS_TYPES[tag2Type] ? RTPLUS_TYPES[tag2Type][1] : '') + '">' + tag2TypeInfo + '</span>';
         }
 
         function loadBuilderFromState() {
@@ -6291,10 +7370,46 @@ UI_HTML = r"""
 
         function buildRTPlusTypeOptions(selected) {
             var html = '';
+            
+            // Group types by category
+            var categories = {};
             for (var i = 0; i <= 63; i++) {
-                var info = RTPLUS_TYPES[i] || ['Unknown',''];
-                html += '<option value="' + i + '"' + (i === parseInt(selected) ? ' selected' : '') + '>' + i + ': ' + info[0] + '</option>';
+                var info = RTPLUS_TYPES[i];
+                if (!info) continue;
+                
+                var category = info[2] || 'system';
+                if (!categories[category]) {
+                    categories[category] = [];
+                }
+                categories[category].push({
+                    code: i,
+                    name: info[0],
+                    description: info[1]
+                });
             }
+            
+            // Define category display order
+            var categoryOrder = ['music', 'station', 'news', 'media', 'contact', 'utility', 'location', 'system'];
+            
+            // Build hierarchical options
+            categoryOrder.forEach(function(categoryKey) {
+                var categoryInfo = RTPLUS_CATEGORIES[categoryKey];
+                var items = categories[categoryKey];
+                
+                if (!items || items.length === 0) return;
+                
+                // Add category header (disabled option)
+                html += '<option disabled style="background: #1f2937; color: #9ca3af; font-weight: bold; padding: 4px 8px;">';
+                html += categoryInfo.name + '</option>';
+                
+                // Add items in this category
+                items.forEach(function(item) {
+                    var isSelected = item.code === parseInt(selected) ? ' selected' : '';
+                    html += '<option value="' + item.code + '"' + isSelected + ' style="padding-left: 16px;">';
+                    html += '  ' + item.code + ': ' + item.name + '</option>';
+                });
+            });
+            
             return html;
         }
 
