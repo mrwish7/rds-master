@@ -13,7 +13,6 @@ import urllib.request
 import json
 from datetime import datetime, timezone, date
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, send_from_directory
-from werkzeug.utils import secure_filename, send_from_directory
 from werkzeug.utils import secure_filename
 from flask_socketio import SocketIO
 from scipy import signal as dsp_signal
@@ -373,6 +372,7 @@ default_state = {
     "rds2_carrier2_level": 4.5,  # RDS2 carrier 2 (71.25 kHz) level %
     "rds2_carrier3_level": 4.5,  # RDS2 carrier 3 (76 kHz) level %
     "rds2_logo_path": "",  # Path to station logo for RDS2 file transfer
+    "rds2_logo_filename": "",  # Just the filename for display/serving
 
     # Settings
     "rds_freq": 57000,
@@ -864,12 +864,11 @@ def save_config():
         
         data['datasets'][current]['state'] = dict(state)
         
-        # Preserve existing auth - don't overwrite unless missing
-        if 'auth' not in data or not data['auth']:
-            data['auth'] = {
-                'user': auth_config.get('user', 'admin'),
-                'pass': auth_config.get('pass', 'admin')
-            }
+        # Always save current auth credentials
+        data['auth'] = {
+            'user': auth_config.get('user', 'admin'),
+            'pass': auth_config.get('pass', 'admin')
+        }
         
         # Save global auto_start setting
         data['auto_start'] = auto_start
@@ -929,9 +928,10 @@ def save_datasets():
         data['current'] = current_dataset
         data['auto_start'] = auto_start  # Save global auto_start setting at root level
         
-        # Preserve auth and system if they exist
-        if 'auth' not in data:
-            data['auth'] = {'user': auth_config.get('user', 'admin'), 'pass': auth_config.get('pass', 'admin')}
+        # Always save current auth credentials
+        data['auth'] = {'user': auth_config.get('user', 'admin'), 'pass': auth_config.get('pass', 'admin')}
+        
+        # Preserve system if it exists
         if 'system' not in data:
             data['system'] = {}
         
@@ -1082,6 +1082,23 @@ def monitor_pusher_loop():
             except:
                 monitor_data["eon_networks"] = []
             
+            # RDS2 status
+            carrier_levels = [
+                state.get("rds2_carrier1_level", 0),
+                state.get("rds2_carrier2_level", 0),
+                state.get("rds2_carrier3_level", 0)
+            ]
+            carrier_count = sum(1 for level in carrier_levels if level > 0)
+            monitor_data["rds2_enabled"] = carrier_count > 0
+            monitor_data["rds2_carrier_count"] = carrier_count
+            
+            # Get logo filename - extract from path if filename field is empty
+            logo_filename = state.get("rds2_logo_filename", "")
+            if not logo_filename and state.get("rds2_logo_path"):
+                logo_filename = os.path.basename(state.get("rds2_logo_path"))
+            monitor_data["rds2_logo_filename"] = logo_filename
+            monitor_data["rds2_carrier_levels"] = carrier_levels
+            
             # Pilot generation: disabled if pass-through is enabled and an input device is selected, or when genlock is active
             monitor_data["pilot_generated"] = not ((state.get("passthrough") and state.get("device_in_idx") != -1) or state.get("genlock"))
             socketio.emit('monitor', monitor_data)
@@ -1093,7 +1110,8 @@ def monitor_pusher_loop():
                  "pilot_generated": False,
                  "tp": 0, "ta": 0, "ms": 0,
                  "di_stereo": 0, "di_head": 0, "di_comp": 0, "di_dyn": 0,
-                 "rbds": False, "eon_networks": []
+                 "rbds": False, "eon_networks": [],
+                 "rds2_enabled": False, "rds2_carrier_count": 0, "rds2_logo_filename": "", "rds2_carrier_levels": [0, 0, 0]
              })
         time.sleep(0.2)
 
@@ -3786,6 +3804,7 @@ def upload_rds2_logo():
         
         file.save(filepath)
         state['rds2_logo_path'] = filepath
+        state['rds2_logo_filename'] = filename  # Store just filename for display
         state['rds2_logo_reload'] = True  # Signal to audio thread to reload
         save_config()
         
@@ -3803,13 +3822,27 @@ def clear_rds2_logo():
     if not session.get('auth'): return jsonify({"ok": False, "error": "unauthorized"}), 401
     
     state['rds2_logo_path'] = ""
+    state['rds2_logo_filename'] = ""
     state['rds2_logo_reload'] = False
     save_config()
     return jsonify({"ok": True})
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
+    try:
+        # Secure the filename to prevent directory traversal
+        safe_name = secure_filename(filename)
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        
+        # Check if file exists
+        if not os.path.exists(filepath):
+            print(f"[UPLOADS] File not found: {filepath}", flush=True)
+            return "File not found", 404
+        
+        return send_from_directory(UPLOAD_FOLDER, safe_name)
+    except Exception as e:
+        print(f"[UPLOADS] Error serving file {filename}: {e}", flush=True)
+        return f"Error: {str(e)}", 500
 
 @app.route('/custom_groups/import', methods=['POST'])
 def import_custom_groups():
@@ -4295,6 +4328,43 @@ UI_HTML = r"""
                                      <div class="live-display sub text-xs whitespace-pre-line" id="live_eon"></div>
                                  </div>
                              </div>
+                        </div>
+                    </div>
+                    
+                    <div class="section col-span-2" id="rds2_status_section" style="display:none">
+                        <div class="section-header">RDS2 Status</div>
+                        <div class="section-body">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="flex justify-between">
+                                        <span>Carrier Status</span>
+                                        <span class="text-xs text-gray-400" id="rds2_carrier_count">0 active</span>
+                                    </label>
+                                    <div class="live-display sub text-xs" id="rds2_carriers">No carriers active</div>
+                                    
+                                    <div id="rds2_carrier_details" class="mt-2 grid grid-cols-3 gap-2" style="display:none">
+                                        <div>
+                                            <label class="text-xs">66.5 kHz</label>
+                                            <div class="live-display sub text-xs text-center" id="rds2_c1_level">0%</div>
+                                        </div>
+                                        <div>
+                                            <label class="text-xs">71.25 kHz</label>
+                                            <div class="live-display sub text-xs text-center" id="rds2_c2_level">0%</div>
+                                        </div>
+                                        <div>
+                                            <label class="text-xs">76 kHz</label>
+                                            <div class="live-display sub text-xs text-center" id="rds2_c3_level">0%</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label>Logo/Image Being Transmitted</label>
+                                    <div class="live-display sub text-xs" id="rds2_logo_name">No logo loaded</div>
+                                    <div class="mt-2" id="rds2_logo_preview_container" style="display:none">
+                                        <img id="rds2_logo_preview" src="" alt="RDS2 Logo" class="max-w-full h-auto border border-gray-600 rounded" style="max-height: 150px;">
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -5242,15 +5312,14 @@ UI_HTML = r"""
                                     <div class="text-sm text-green-300 font-semibold">✓ Logo Uploaded</div>
                                     <button onclick="clearRDS2Logo()" class="bg-red-600 hover:bg-red-500 text-white text-xs rounded px-3 py-1">Clear</button>
                                 </div>
-                                <div class="text-xs text-gray-400 break-all">{{ state.rds2_logo_path }}</div>
-                                {% if state.rds2_logo_path.startswith('uploads/') or '/uploads/' in state.rds2_logo_path %}
+                                <div class="text-xs text-gray-400 break-all">{{ state.get('rds2_logo_filename', state.rds2_logo_path.split('/')[-1].split('\\')[-1]) }}</div>
                                 <div class="mt-2">
-                                    <img src="/{{ state.rds2_logo_path.split('uploads/')[-1] if '/uploads/' in state.rds2_logo_path else 'uploads/' + state.rds2_logo_path }}" 
+                                    {% set logo_file = state.get('rds2_logo_filename', state.rds2_logo_path.split('/')[-1].split('\\')[-1]) %}
+                                    <img src="/uploads/{{ logo_file }}" 
                                          alt="Station Logo" 
                                          class="max-w-xs max-h-32 border border-gray-600 rounded"
                                          onerror="this.style.display='none'">
                                 </div>
-                                {% endif %}
                             </div>
                             {% else %}
                             <div class="bg-gray-900/50 border border-gray-700 rounded p-3">
@@ -8358,6 +8427,47 @@ UI_HTML = r"""
                 setText('live_eon', eonText);
             } else {
                 setText('live_eon', "None");
+            }
+            
+            // RDS2 Status
+            const rds2Section = document.getElementById('rds2_status_section');
+            const rds2CarrierDetails = document.getElementById('rds2_carrier_details');
+            const rds2LogoPreviewContainer = document.getElementById('rds2_logo_preview_container');
+            
+            if (data.rds2_enabled && data.rds2_carrier_count > 0) {
+                if (rds2Section) rds2Section.style.display = 'block';
+                
+                // Carrier status
+                const frequencies = ['66.5 kHz', '71.25 kHz', '76 kHz'];
+                const activeCarriers = [];
+                data.rds2_carrier_levels.forEach((level, idx) => {
+                    if (level > 0) activeCarriers.push(frequencies[idx]);
+                });
+                setText('rds2_carriers', activeCarriers.join(', '));
+                setText('rds2_carrier_count', data.rds2_carrier_count + ' active');
+                
+                // Carrier levels
+                if (rds2CarrierDetails) rds2CarrierDetails.style.display = 'grid';
+                setText('rds2_c1_level', data.rds2_carrier_levels[0].toFixed(1) + '%');
+                setText('rds2_c2_level', data.rds2_carrier_levels[1].toFixed(1) + '%');
+                setText('rds2_c3_level', data.rds2_carrier_levels[2].toFixed(1) + '%');
+                
+                // Logo status
+                if (data.rds2_logo_filename) {
+                    setText('rds2_logo_name', '📡 ' + data.rds2_logo_filename);
+                    
+                    // Show logo preview
+                    const logoPreview = document.getElementById('rds2_logo_preview');
+                    if (logoPreview && rds2LogoPreviewContainer) {
+                        logoPreview.src = '/uploads/' + data.rds2_logo_filename;
+                        rds2LogoPreviewContainer.style.display = 'block';
+                    }
+                } else {
+                    setText('rds2_logo_name', 'No logo loaded');
+                    if (rds2LogoPreviewContainer) rds2LogoPreviewContainer.style.display = 'none';
+                }
+            } else {
+                if (rds2Section) rds2Section.style.display = 'none';
             }
             
             // Use RBDS or RDS list based on mode
