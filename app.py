@@ -1082,22 +1082,33 @@ def monitor_pusher_loop():
             except:
                 monitor_data["eon_networks"] = []
             
-            # RDS2 status
-            carrier_levels = [
-                state.get("rds2_carrier1_level", 0),
-                state.get("rds2_carrier2_level", 0),
-                state.get("rds2_carrier3_level", 0)
-            ]
-            carrier_count = sum(1 for level in carrier_levels if level > 0)
-            monitor_data["rds2_enabled"] = carrier_count > 0
-            monitor_data["rds2_carrier_count"] = carrier_count
+            # RDS2 status - only count as active if RDS2 is actually enabled
+            rds2_enabled = state.get("en_rds2", False)
             
-            # Get logo filename - extract from path if filename field is empty
-            logo_filename = state.get("rds2_logo_filename", "")
-            if not logo_filename and state.get("rds2_logo_path"):
-                logo_filename = os.path.basename(state.get("rds2_logo_path"))
-            monitor_data["rds2_logo_filename"] = logo_filename
-            monitor_data["rds2_carrier_levels"] = carrier_levels
+            # If RDS2 is disabled, send all zeros
+            if not rds2_enabled:
+                monitor_data["rds2_enabled"] = False
+                monitor_data["rds2_carrier_count"] = 0
+                monitor_data["rds2_logo_filename"] = ""
+                monitor_data["rds2_carrier_levels"] = [0, 0, 0]
+            else:
+                # RDS2 is enabled - check carrier levels
+                carrier_levels = [
+                    state.get("rds2_carrier1_level", 0),
+                    state.get("rds2_carrier2_level", 0),
+                    state.get("rds2_carrier3_level", 0)
+                ]
+                carrier_count = sum(1 for level in carrier_levels if level > 0)
+                
+                monitor_data["rds2_enabled"] = carrier_count > 0
+                monitor_data["rds2_carrier_count"] = carrier_count
+                monitor_data["rds2_carrier_levels"] = carrier_levels
+                
+                # Get logo filename - extract from path if filename field is empty
+                logo_filename = state.get("rds2_logo_filename", "")
+                if not logo_filename and state.get("rds2_logo_path"):
+                    logo_filename = os.path.basename(state.get("rds2_logo_path"))
+                monitor_data["rds2_logo_filename"] = logo_filename
             
             # Pilot generation: disabled if pass-through is enabled and an input device is selected, or when genlock is active
             monitor_data["pilot_generated"] = not ((state.get("passthrough") and state.get("device_in_idx") != -1) or state.get("genlock"))
@@ -8434,7 +8445,8 @@ UI_HTML = r"""
             const rds2CarrierDetails = document.getElementById('rds2_carrier_details');
             const rds2LogoPreviewContainer = document.getElementById('rds2_logo_preview_container');
             
-            if (data.rds2_enabled && data.rds2_carrier_count > 0) {
+            // Hide if carrier count is 0 or not enabled
+            if (data.rds2_carrier_count > 0 && data.rds2_enabled) {
                 if (rds2Section) rds2Section.style.display = 'block';
                 
                 // Carrier status
@@ -8467,6 +8479,7 @@ UI_HTML = r"""
                     if (rds2LogoPreviewContainer) rds2LogoPreviewContainer.style.display = 'none';
                 }
             } else {
+                // Hide section when disabled or no carriers
                 if (rds2Section) rds2Section.style.display = 'none';
             }
             
