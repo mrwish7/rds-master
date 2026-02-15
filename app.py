@@ -4294,7 +4294,7 @@ UI_HTML = r"""
             </svg>
             <div class="flex items-center gap-4">
                 <div class="text-[10px] text-gray-400 flex items-center gap-2">
-                    <span id="heartbeat" class="text-xs">♥</span> 192kHz Ready
+                    {{site_name}} • <span id="heartbeat" class="text-xs">♥</span> 192kHz Ready
                 </div>
                 <button id="pwrBtn" onclick="togglePower()" class="pwr-btn">OFF AIR</button>
                 <a href="/logout" class="text-[11px] text-gray-300 hover:text-white underline">Logout</a>
