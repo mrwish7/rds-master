@@ -850,8 +850,22 @@ def save_config():
         # Load existing data
         data = {}
         if os.path.exists(DATASETS_FILE):
-            with open(DATASETS_FILE, 'r') as f:
-                data = json.load(f)
+            try:
+                with open(DATASETS_FILE, 'r') as f:
+                    content = f.read().strip()
+                    if content:  # Only parse if file has content
+                        data = json.loads(content)
+                    else:
+                        print("Warning: datasets.json is empty, using default structure")
+                        data = {}
+            except json.JSONDecodeError as je:
+                print(f"Warning: datasets.json is corrupted ({je}), creating new structure")
+                # Backup corrupted file
+                import shutil
+                backup_path = DATASETS_FILE + '.corrupted'
+                shutil.copy2(DATASETS_FILE, backup_path)
+                print(f"Corrupted file backed up to {backup_path}")
+                data = {}
         
         # Ensure structure exists
         if 'datasets' not in data:
@@ -880,20 +894,27 @@ def save_config():
         # Save site_name
         data['site_name'] = site_name
         
-        # Save site_name
-        data['site_name'] = site_name
+        # Validate JSON serializability before writing
+        try:
+            json.dumps(data)
+        except (TypeError, ValueError) as e:
+            print(f"Error: State contains non-serializable data: {e}")
+            return
         
         # Save
         with open(DATASETS_FILE, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         print(f"Error saving config: {e}")
+        import traceback
+        traceback.print_exc()
 
 # --- DATASETS ---
 # DATASETS_FILE already defined above near CONFIG_FILE
 datasets = {}
 current_dataset = 1
 auto_start = True  # Global setting, not per-dataset
+site_name = "Secure Login"  # Global setting for UI branding
 
 def load_datasets():
     global datasets, current_dataset
@@ -2036,10 +2057,16 @@ class RDSScheduler:
         # 57% 0A, 43% 2A (rebalanced for better RT coverage)
         seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (2,0), (2,0), (2,0), (0,0), (0,0), (2,0)]
         if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +7% increase
-        # EON at 15% - 4 consecutive groups for PS assembly
+        # EON at 15% - 4 consecutive groups for PS assembly (only if services configured)
         if state.get("en_eon"):
-            for _ in range(4):  # Send 4 Group 14A (~15% overall)
-                seq.append((14,0))
+            try:
+                eon_services_str = state.get("eon_services", "[]")
+                eon_services = json.loads(eon_services_str) if isinstance(eon_services_str, str) else eon_services_str
+                if eon_services:  # Only add if services exist
+                    for _ in range(4):  # Send 4 Group 14A (~15% overall)
+                        seq.append((14,0))
+            except:
+                pass  # Skip EON if parsing fails
         if state["en_ptyn"]: seq.append((10,0))  # +4% (single group)
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
@@ -2186,11 +2213,21 @@ class RDSScheduler:
                 if debug_custom:
                     print(f"[Custom Groups] Sending Group {group_key} [{current_idx+1}/{len(matching_groups)}]: B2=0x{custom.get('b2_tail','00')} B3=0x{custom.get('b3','0000')} B4=0x{custom.get('b4','0000')}")
                 try:
-                    b2_tail = int(custom.get("b2_tail", "0"), 16) & 0x1F
-                    b3_val = int(custom.get("b3", "0"), 16) & 0xFFFF
-                    b4_val = int(custom.get("b4", "0"), 16) & 0xFFFF
-                    # Skip custom groups with all-zero data (would display as "--")
-                    if b2_tail == 0 and b3_val == 0 and b4_val == 0:
+                    # Handle empty strings properly - treat empty/whitespace as "0"
+                    b2_str = (custom.get("b2_tail", "0") or "0").strip() or "0"
+                    b3_str = (custom.get("b3", "0") or "0").strip() or "0"
+                    b4_str = (custom.get("b4", "0") or "0").strip() or "0"
+                    
+                    b2_tail = int(b2_str, 16) & 0x1F
+                    b3_val = int(b3_str, 16) & 0xFFFF
+                    b4_val = int(b4_str, 16) & 0xFFFF
+                    
+                    # Skip groups with all-zero data or placeholder data
+                    # Common placeholders: 0x0000, 0xE0E0 (shown as "--" in some decoders)
+                    if (b2_tail == 0 and b3_val == 0 and b4_val == 0) or \
+                       (b3_val == 0xE0E0 and b4_val == 0) or \
+                       (b3_val == 0 and b4_val == 0xE0E0) or \
+                       (b3_val == 0xE0E0 and b4_val == 0xE0E0):
                         pass  # Skip this custom group, fall through to built-in handlers
                     else:
                         return RDSHelper.get_group_bits(g_type, g_ver, b2_tail, b3_val, b4_val)
@@ -2611,8 +2648,17 @@ class RDSScheduler:
                 eon_services = []
 
             if not eon_services:
-                # No services configured - send empty 14A group with filler codes
-                return RDSHelper.get_group_bits(14,0,0,0xE0E0,0xE0E0)
+                # No services configured - skip Group 14A entirely
+                # Advance schedule pointer and get next group
+                if state["scheduler_auto"]:
+                    schedule = getattr(self, '_auto_schedule_cache', [(0,0)])
+                else:
+                    schedule = self.parse_schedule_string(state["group_sequence"])
+                g_type, g_ver = schedule[self.schedule_ptr % len(schedule)]
+                self.schedule_ptr += 1
+                # Fall through to next group (will be handled by subsequent checks)
+                # Avoid recursion - just return a basic 0A PS group as fallback
+                return self.next()
 
             # Initialize EON state tracking
             if not hasattr(self, 'eon_service_idx'):
@@ -3955,6 +4001,8 @@ def import_custom_groups():
         print(f"[IMPORT] Saving {len(custom_groups)} total groups to state", flush=True)
         state["custom_groups"] = json.dumps(custom_groups)
         save_config()
+        # Emit socket update to refresh all connected clients
+        socketio.emit('state_update', {'custom_groups': state["custom_groups"]})
         print(f"[IMPORT] Success! Returning count={len(custom_groups)}", flush=True)
         return jsonify({'success': True, 'count': len(custom_groups)})
     except Exception as e:
