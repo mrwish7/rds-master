@@ -1814,8 +1814,8 @@ class RDSScheduler:
                     if tag1_start < limit and tag1_len > 0:
                         tags.append((tag1_type, tag1_start, tag1_len))
 
-        # Apply tagging policies (for JSON and manual modes)
-        if msg.get("source_type") in ["json", "manual"] and msg.get("tagging_policies"):
+        # Apply tagging policies (for JSON, manual, and file/URL modes)
+        if msg.get("tagging_policies"):
             try:
                 policies = json.loads(msg.get("tagging_policies", "[]"))
                 tags = self.apply_tagging_policies_to_tags(resolved_content, tags, policies, offset, limit)
@@ -2272,7 +2272,9 @@ class RDSScheduler:
             # Calculate RT+ tags
             if current_msg:
                 # New message system: use per-message RT+ config
-                rt_plus_sig = f"{raw}_{current_msg.get('id')}_{current_msg.get('rt_plus_enabled')}_{current_msg.get('split_delimiter')}_{current_msg.get('rt_plus_mode','')}_{current_msg.get('rt_plus_regex_rules','')}"
+                # Include all RT+ settings that could affect tag calculation in the signature
+                rt_plus_tags_config = current_msg.get('rt_plus_tags', {})
+                rt_plus_sig = f"{raw}_{current_msg.get('id')}_{current_msg.get('rt_plus_enabled')}_{current_msg.get('split_delimiter')}_{current_msg.get('rt_plus_mode','')}_{current_msg.get('rt_plus_regex_rules','')}_{rt_plus_tags_config.get('tag1_type')}_{rt_plus_tags_config.get('tag2_type')}_{current_msg.get('json_field1')}_{current_msg.get('json_field2')}_{current_msg.get('tagging_policies','')}"
                 if raw != self.last_rt_clean or rt_plus_sig != getattr(self, 'last_rtplus_sig', ''):
                     self.last_rt_clean = raw
                     self.last_rtplus_sig = rt_plus_sig
@@ -3371,10 +3373,12 @@ def import_custom_groups():
     try:
         data = request.json
         source_type = data.get('type', 'json')  # 'json', 'url', 'text'
+        print(f"[IMPORT] Received request: type={source_type}, mode={data.get('mode')}", flush=True)
 
         if source_type == 'json':
             # Direct JSON data
             custom_groups = data.get('custom_groups', [])
+            print(f"[IMPORT] JSON mode: received {len(custom_groups)} groups", flush=True)
         elif source_type == 'url':
             # Fetch from URL
             url = data.get('url', '')
@@ -3414,13 +3418,17 @@ def import_custom_groups():
 
         # Merge or replace
         mode = data.get('mode', 'replace')  # 'replace' or 'merge'
+        print(f"[IMPORT] Mode: {mode}, Groups to process: {len(custom_groups)}", flush=True)
         if mode == 'merge':
             existing = json.loads(state.get("custom_groups", "[]"))
+            print(f"[IMPORT] Merging: existing={len(existing)}, new={len(custom_groups)}", flush=True)
             existing.extend(custom_groups)
             custom_groups = existing
 
+        print(f"[IMPORT] Saving {len(custom_groups)} total groups to state", flush=True)
         state["custom_groups"] = json.dumps(custom_groups)
         save_config()
+        print(f"[IMPORT] Success! Returning count={len(custom_groups)}", flush=True)
         return jsonify({'success': True, 'count': len(custom_groups)})
     except Exception as e:
         return jsonify({'error': f'Import failed: {str(e)}'}), 500
@@ -4019,7 +4027,7 @@ UI_HTML = r"""
                                             <div>
                                                 <label class="text-xs text-orange-400 font-bold">Tag Type</label>
                                                 <select id="rt_msg_json_tag1_type" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs" onchange="updateMsgPreview()">
-                                                    <option value="4" selected>4: Artist</option>
+                                                    <!-- Populated by populateRTPlusSelect() -->
                                                 </select>
                                             </div>
                                         </div>
@@ -4037,7 +4045,7 @@ UI_HTML = r"""
                                             <div>
                                                 <label class="text-xs text-cyan-400 font-bold">Tag Type</label>
                                                 <select id="rt_msg_json_tag2_type" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs" onchange="updateMsgPreview()">
-                                                    <option value="1" selected>1: Title</option>
+                                                    <!-- Populated by populateRTPlusSelect() -->
                                                 </select>
                                             </div>
                                         </div>
@@ -5326,7 +5334,20 @@ UI_HTML = r"""
                     </div>
 
                     <div class="mt-3 border-t border-gray-700 pt-3">
-                        <div class="text-xs font-bold text-gray-400 mb-2">Detected Groups (click to toggle import):</div>
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="text-xs font-bold text-gray-400">Detected Groups (click to toggle):</div>
+                            <div class="flex gap-2">
+                                <button onclick="selectAllRdsSpyGroups()" class="text-xs px-2 py-1 bg-purple-600 hover:bg-purple-700 rounded">Select All</button>
+                                <button onclick="deselectAllRdsSpyGroups()" class="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded">Deselect All</button>
+                            </div>
+                        </div>
+                        <div class="text-[11px] text-gray-500 mb-2">
+                            <span class="inline-block w-3 h-3 rounded" style="background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);"></span> = Will import
+                            <span class="mx-2">|</span>
+                            <span class="inline-block w-3 h-3 rounded bg-gray-700"></span> = Will skip
+                            <span class="mx-2">|</span>
+                            <span id="rdsspy_enabled_count" class="text-cyan-400">0 groups selected</span>
+                        </div>
                         <div id="rdsspy_group_grid" class="grid grid-cols-8 gap-2">
                             <!-- Grid will be populated by JavaScript -->
                         </div>
@@ -5698,10 +5719,14 @@ UI_HTML = r"""
                         document.getElementById('rt_msg_sample_text').value = msg.sample_text || 'Artist - Song Title';
                     globalSampleText = msg.sample_text || 'Artist - Song Title';
                     
-                    // Load smart rules
+                    // Load smart rules (backward compatibility with old 'smart_rules' field)
                     taggingPolicies = [];
                     try {
-                        if (msg.tagging_policies) taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                        if (msg.tagging_policies) {
+                            taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                        } else if (msg.smart_rules) {
+                            taggingPolicies = JSON.parse(msg.smart_rules) || [];
+                        }
                     } catch(e) {}
                     renderTaggingPolicies();
                 }
@@ -5715,17 +5740,17 @@ UI_HTML = r"""
                     document.getElementById('rt_msg_json_field2').value = msg.json_field2 || '';
                 if (document.getElementById('rt_msg_json_hide_if_blank'))
                     document.getElementById('rt_msg_json_hide_if_blank').checked = msg.json_hide_if_blank || false;
-                if (document.getElementById('rt_msg_json_tag1_type'))
-                    document.getElementById('rt_msg_json_tag1_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || '4';
-                if (document.getElementById('rt_msg_json_tag2_type'))
-                    document.getElementById('rt_msg_json_tag2_type').value = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || '1';
                 if (document.getElementById('rt_msg_json_delimiter'))
                     document.getElementById('rt_msg_json_delimiter').value = msg.split_delimiter || ' - ';
 
-                // Load tagging policies
+                // Load tagging policies (backward compatibility with old 'smart_rules' field)
                 taggingPolicies = [];
                 try {
-                    if (msg.tagging_policies) taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                    if (msg.tagging_policies) {
+                        taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                    } else if (msg.smart_rules) {
+                        taggingPolicies = JSON.parse(msg.smart_rules) || [];
+                    }
                 } catch(e) {}
                 renderTaggingPolicies();
 
@@ -5743,7 +5768,11 @@ UI_HTML = r"""
                         if (data.ok) {
                             jsonFieldsCache = data.fields;
                             displayJSONFields(data.fields, data.sample);
-                            populateJSONFieldDropdowns(data.fields, msg.json_field1, msg.json_field2);
+                            
+                            // Pass saved tag types to prevent reset to defaults
+                            var savedTag1Type = (msg.rt_plus_tags && msg.rt_plus_tags.tag1_type) || 4;
+                            var savedTag2Type = (msg.rt_plus_tags && msg.rt_plus_tags.tag2_type) || 1;
+                            populateJSONFieldDropdowns(data.fields, msg.json_field1, msg.json_field2, savedTag1Type, savedTag2Type);
                             document.getElementById('rt_msg_json_structure').style.display = 'block';
                             document.getElementById('rt_msg_json_config').style.display = 'block';
                             updateMsgPreview();
@@ -5777,10 +5806,14 @@ UI_HTML = r"""
                 if (document.getElementById('rt_msg_whole_words'))
                     document.getElementById('rt_msg_whole_words').checked = msg.whole_words || false;
 
-                // Load tagging policies
+                // Load tagging policies (backward compatibility with old 'smart_rules' field)
                 taggingPolicies = [];
                 try {
-                    if (msg.tagging_policies) taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                    if (msg.tagging_policies) {
+                        taggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                    } else if (msg.smart_rules) {
+                        taggingPolicies = JSON.parse(msg.smart_rules) || [];
+                    }
                 } catch(e) {}
                 renderTaggingPolicies();
             }
@@ -6757,7 +6790,7 @@ UI_HTML = r"""
                         tag1_type: parseInt(document.getElementById('rt_msg_before_tag') ? document.getElementById('rt_msg_before_tag').value : '4') || 4,
                         tag2_type: parseInt(document.getElementById('rt_msg_after_tag') ? document.getElementById('rt_msg_after_tag').value : '1') || 1
                     };
-                    msg.smart_rules = JSON.stringify(taggingPolicies);
+                    msg.tagging_policies = JSON.stringify(taggingPolicies);
                     msg.case_sensitive = document.getElementById('rt_msg_case_sensitive') ? document.getElementById('rt_msg_case_sensitive').checked : false;
                     msg.whole_words = document.getElementById('rt_msg_whole_words') ? document.getElementById('rt_msg_whole_words').checked : false;
                     msg.sample_text = msg.content; // Store the same as content for manual mode
@@ -6766,6 +6799,7 @@ UI_HTML = r"""
                 msg.tag1_text = '';
                 msg.middle = '';
                 msg.tag2_text = '';
+                msg.smart_rules = '[]'; // Clear old field
             } else if (msg.source_type === 'json') {
                 // Save JSON fields with field mapping
                 msg.content = document.getElementById('rt_msg_json_url').value;
@@ -6799,7 +6833,7 @@ UI_HTML = r"""
                     tag1_type: parseInt(document.getElementById('rt_msg_before_tag') ? document.getElementById('rt_msg_before_tag').value : '4') || 4,
                     tag2_type: parseInt(document.getElementById('rt_msg_after_tag') ? document.getElementById('rt_msg_after_tag').value : '1') || 1
                 };
-                msg.smart_rules = JSON.stringify(smartRules);
+                msg.tagging_policies = JSON.stringify(taggingPolicies);
                 msg.case_sensitive = document.getElementById('rt_msg_case_sensitive') ? document.getElementById('rt_msg_case_sensitive').checked : false;
                 msg.whole_words = document.getElementById('rt_msg_whole_words') ? document.getElementById('rt_msg_whole_words').checked : false;
                 
@@ -6807,6 +6841,7 @@ UI_HTML = r"""
                 msg.tag1_text = '';
                 msg.middle = '';
                 msg.tag2_text = '';
+                msg.smart_rules = '[]'; // Clear old field
             }
 
             closeRTMsgModal();
@@ -6850,7 +6885,7 @@ UI_HTML = r"""
                 if (data.ok) {
                     jsonFieldsCache = data.fields;
                     displayJSONFields(data.fields, data.sample);
-                    populateJSONFieldDropdowns(data.fields);
+                    populateJSONFieldDropdowns(data.fields, '', '', 4, 1); // Use defaults for manual URL entry
                     document.getElementById('rt_msg_json_structure').style.display = 'block';
                     document.getElementById('rt_msg_json_config').style.display = 'block';
                     updateMsgPreview();
@@ -6863,7 +6898,7 @@ UI_HTML = r"""
             });
         }
 
-        function populateJSONFieldDropdowns(fields, selectedField1, selectedField2) {
+        function populateJSONFieldDropdowns(fields, selectedField1, selectedField2, tag1Type, tag2Type) {
             var field1Select = document.getElementById('rt_msg_json_field1');
             var field2Select = document.getElementById('rt_msg_json_field2');
 
@@ -6892,9 +6927,11 @@ UI_HTML = r"""
                 });
             }
 
-            // Populate tag type selects
-            populateRTPlusSelect(document.getElementById('rt_msg_json_tag1_type'), 4);
-            populateRTPlusSelect(document.getElementById('rt_msg_json_tag2_type'), 1);
+            // Populate tag type selects with saved values or defaults
+            var savedTag1Type = tag1Type !== undefined ? tag1Type : 4;
+            var savedTag2Type = tag2Type !== undefined ? tag2Type : 1;
+            populateRTPlusSelect(document.getElementById('rt_msg_json_tag1_type'), savedTag1Type);
+            populateRTPlusSelect(document.getElementById('rt_msg_json_tag2_type'), savedTag2Type);
         }
 
         function displayJSONFields(fields, sample) {
@@ -7021,6 +7058,18 @@ UI_HTML = r"""
             if (sel2) { 
                 populateRTPlusSelect(sel2, 1); // Default to Title
                 console.log('Populated rt_msg_tag2_type');
+            }
+
+            // JSON mode selects
+            var sel1Json = document.getElementById('rt_msg_json_tag1_type');
+            var sel2Json = document.getElementById('rt_msg_json_tag2_type');
+            if (sel1Json) { 
+                populateRTPlusSelect(sel1Json, 4); // Default to Artist
+                console.log('Populated rt_msg_json_tag1_type');
+            }
+            if (sel2Json) { 
+                populateRTPlusSelect(sel2Json, 1); // Default to Title
+                console.log('Populated rt_msg_json_tag2_type');
             }
 
             // Auto mode selects (file/URL)
@@ -9212,12 +9261,43 @@ UI_HTML = r"""
             }
         }
 
+        // Select all detected RDS Spy groups
+        function selectAllRdsSpyGroups() {
+            for (var type = 0; type <= 15; type++) {
+                for (var ver = 0; ver <= 1; ver++) {
+                    var verLabel = ver == 1 ? 'B' : 'A';
+                    var key = type + verLabel;
+                    var box = document.getElementById('rdsspy_group_' + key);
+                    if (box && box.classList.contains('rdsspy-group-detected')) {
+                        rdsspyGroupFilter[key] = true;
+                    }
+                }
+            }
+            updateRdsSpyGroupGrid();
+        }
+
+        // Deselect all detected RDS Spy groups
+        function deselectAllRdsSpyGroups() {
+            for (var type = 0; type <= 15; type++) {
+                for (var ver = 0; ver <= 1; ver++) {
+                    var verLabel = ver == 1 ? 'B' : 'A';
+                    var key = type + verLabel;
+                    var box = document.getElementById('rdsspy_group_' + key);
+                    if (box && box.classList.contains('rdsspy-group-detected')) {
+                        rdsspyGroupFilter[key] = false;
+                    }
+                }
+            }
+            updateRdsSpyGroupGrid();
+        }
+
         // Update the grid based on textarea content
         function updateRdsSpyGroupGrid() {
             var text = document.getElementById('import_rdsspy_data').value;
             if (!text.trim()) {
                 // Reset grid if no text
                 createRdsSpyGroupGrid();
+                document.getElementById('rdsspy_enabled_count').textContent = '0 groups selected';
                 return;
             }
 
@@ -9275,6 +9355,13 @@ UI_HTML = r"""
                     }
                 }
             }
+
+            // Count enabled groups
+            var enabledCount = 0;
+            for (var key in detectedGroups) {
+                if (rdsspyGroupFilter[key]) enabledCount++;
+            }
+            document.getElementById('rdsspy_enabled_count').textContent = enabledCount + ' group' + (enabledCount !== 1 ? 's' : '') + ' selected';
         }
 
         function doImport() {
@@ -9343,12 +9430,19 @@ UI_HTML = r"""
                     }
                 }
 
+                console.log('RDS Spy import: Parsed ' + groups.length + ' groups from ' + lines.length + ' lines');
+                console.log('Filter state:', rdsspyGroupFilter);
+                console.log('Sample groups:', groups.slice(0, 3)); // Show first 3 groups
+
                 if (groups.length === 0) {
-                    alert('No groups selected for import or no valid RDS data found');
+                    alert('No groups selected for import.\n\nMake sure:\n1. You pasted valid RDS Spy log data\n2. At least one group is enabled (purple/glowing)\n3. Click "Select All" to enable all detected groups');
                     return;
                 }
 
+                // Frontend already parsed, send as JSON type so backend reads from custom_groups field
+                payload.type = 'json';
                 payload.custom_groups = groups;
+                console.log('Sending to backend:', {type: payload.type, mode: payload.mode, count: groups.length});
             }
 
             fetch('/custom_groups/import', {
@@ -9360,6 +9454,7 @@ UI_HTML = r"""
             })
             .then(response => response.json())
             .then(data => {
+                console.log('Backend response:', data);
                 if (data.success) {
                     alert('Imported ' + data.count + ' custom group(s)');
                     loadCustomGroups();
@@ -9585,6 +9680,7 @@ UI_HTML = r"""
             })
             .then(response => response.json())
             .then(data => {
+                console.log('New Preview: Backend response for confirmRdsSpyImport:', data);
                 if (data.success) {
                     alert('Imported ' + selectedGroups.length + ' custom group(s)');
                     loadCustomGroups();
