@@ -12,7 +12,9 @@ import configparser
 import urllib.request
 import json
 from datetime import datetime, timezone, date
-from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, send_from_directory
+from werkzeug.utils import secure_filename, send_from_directory
+from werkzeug.utils import secure_filename
 from flask_socketio import SocketIO
 from scipy import signal as dsp_signal
 from scipy.fft import fft
@@ -268,6 +270,19 @@ def get_rtplus_type_info(type_code):
 app = Flask(__name__)
 CONFIG_FILE = 'config.ini'  # Legacy - deprecated
 DATASETS_FILE = os.path.join(os.path.dirname(__file__), 'datasets.json')
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+
+# Create upload folder if it doesn't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
+
+# Create upload folder if it doesn't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def get_or_create_secret():
     """Get or create secret key from datasets.json."""
@@ -350,6 +365,14 @@ default_state = {
     "custom_groups": "[]",  # JSON array of custom group data
     "dynamic_control_enabled": False,  # Enable dynamic RDS control from JSON
     "dynamic_control_rules": "[]",  # JSON array of dynamic control rules
+
+    # RDS2
+    "en_rds2": False,  # Enable RDS2 functionality
+    "rds2_num_carriers": 3,  # Number of RDS2 carriers (1-3)
+    "rds2_carrier1_level": 4.5,  # RDS2 carrier 1 (66.5 kHz) level %
+    "rds2_carrier2_level": 4.5,  # RDS2 carrier 2 (71.25 kHz) level %
+    "rds2_carrier3_level": 4.5,  # RDS2 carrier 3 (76 kHz) level %
+    "rds2_logo_path": "",  # Path to station logo for RDS2 file transfer
 
     # Settings
     "rds_freq": 57000,
@@ -1087,7 +1110,7 @@ def dynamic_control_loop():
             if not state.get("dynamic_control_enabled", False):
                 # Clear all overrides when disabled - fall back to dataset values
                 if dynamic_overrides:
-                    print(f"[DYNAMIC CONTROL] Clearing {len(dynamic_overrides)} overrides - disabled", flush=True)
+                    # print(f"[DYNAMIC CONTROL] Clearing {len(dynamic_overrides)} overrides - disabled", flush=True)
                     dynamic_overrides.clear()
                 time.sleep(5.0)
                 continue
@@ -1129,17 +1152,17 @@ def dynamic_control_loop():
                     # Fetch JSON data
                     url = rule.get("url", "")
                     if not url:
-                        print(f"[DYNAMIC CONTROL] Rule {idx}: No URL configured", flush=True)
+                        # print(f"[DYNAMIC CONTROL] Rule {idx}: No URL configured", flush=True)
                         continue
                     
-                    print(f"[DYNAMIC CONTROL] Rule {idx}: Fetching from {url}", flush=True)
+                    # print(f"[DYNAMIC CONTROL] Rule {idx}: Fetching from {url}", flush=True)
                     req = urllib.request.Request(url)
                     req.add_header('User-Agent', 'RDS-Encoder-Dynamic-Control/1.0')
                     
                     with urllib.request.urlopen(req, timeout=5) as response:
                         json_data = json.loads(response.read().decode('utf-8'))
                     
-                    print(f"[DYNAMIC CONTROL] Rule {idx}: JSON fetched successfully", flush=True)
+                    # print(f"[DYNAMIC CONTROL] Rule {idx}: JSON fetched successfully", flush=True)
                     
                     # Extract field value using dot notation path
                     field_path = rule.get("field_path", "")
@@ -1308,7 +1331,6 @@ class RDSHelper:
         return ((reg >> 16) & 0x3FF) ^ offset
 
     @staticmethod
-    @staticmethod
     def get_group_bits(g_type, ver, b2_tail, b3_val, b4_val):
         try: pi_v = int(get_effective_value("pi"), 16)
         except: pi_v = 0x0000
@@ -1320,6 +1342,22 @@ class RDSHelper:
         bits = []
         for b in [b1, b2, b3, b4]:
             for i in range(25, -1, -1): bits.append((b >> i) & 1)
+        return bits
+    
+    @staticmethod
+    def rds2_blocks_to_bits(block0, block1, block2, block3):
+        """Convert 4 raw RDS2 blocks to 104 bits with CRC checksums (for RDS2 carriers)"""
+        # Add CRC checkwords to each block using standard offsets
+        b0 = (int(block0) << 10) | RDSHelper.crc(block0, OFFSETS['A'])
+        b1 = (int(block1) << 10) | RDSHelper.crc(block1, OFFSETS['B'])
+        b2 = (int(block2) << 10) | RDSHelper.crc(block2, OFFSETS['C'])
+        b3 = (int(block3) << 10) | RDSHelper.crc(block3, OFFSETS['D'])
+        
+        # Convert to bit stream
+        bits = []
+        for b in [b0, b1, b2, b3]:
+            for i in range(25, -1, -1):
+                bits.append((b >> i) & 1)
         return bits
 
 class RDSScheduler:
@@ -2940,6 +2978,230 @@ class RDSScheduler:
         tail = (get_effective_value("ta")<<4)|(get_effective_value("ms")<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
         return RDSHelper.get_group_bits(0, 0, tail, 0xE0E0, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
 
+# --- RDS2 DATA GENERATOR ---
+class RDS2Generator:
+    """
+    Pure Python RDS2 File Transfer (RFT) implementation
+    Based on RDS2 specification with ODA AID 0xFF7F
+    """
+    # RDS2 ODA Application ID for file transfer
+    ODA_AID_RFT = 0xFF7F
+    
+    def __init__(self):
+        self.logo_data = None
+        self.logo_size = 0
+        self.logo_loaded = False
+        
+        # File transfer state per stream (1, 2, 3)
+        # All streams send the same pipe (0) so receiver sees one coherent file
+        self.channel = [0, 0, 0]  # Pipe/channel number per stream (all pipe 0)
+        self.file_version = [0, 0, 0]  # File version (0-7)
+        self.file_id = [0, 0, 0]  # File ID (0-63)
+        self.toggle = [0, 0, 0]  # Toggle bit
+        self.segment_idx = [0, 0, 0]  # Current segment being transmitted
+        self.num_segments = [0, 0, 0]  # Total segments
+        self.rft_state = [0, 0, 0]  # State machine (0-49)
+        self.use_crc = True  # Enable CRC
+        self.crc_value = [0, 0, 0]  # Calculated CRC
+        
+    def load_logo(self, logo_path):
+        """Load station logo from file for RDS2 file transfer"""
+        if not logo_path or not os.path.exists(logo_path):
+            self.logo_data = None
+            self.logo_size = 0
+            self.logo_loaded = False
+            return False
+        
+        try:
+            with open(logo_path, 'rb') as f:
+                self.logo_data = bytearray(f.read())
+                self.logo_size = len(self.logo_data)
+                
+                # Pad to multiple of 5 bytes (segment size)
+                if self.logo_size % 5 != 0:
+                    padding = 5 - (self.logo_size % 5)
+                    self.logo_data.extend([0] * padding)
+                
+                # Calculate segments and CRC
+                for i in range(3):
+                    self.num_segments[i] = len(self.logo_data) // 5
+                    self.segment_idx[i] = 0
+                    self.crc_value[i] = self._calculate_crc16(self.logo_data)
+                
+                self.logo_loaded = True
+                # print(f"[RDS2] Loaded logo: {logo_path} ({self.logo_size} bytes, {self.num_segments[0]} segments, CRC: 0x{self.crc_value[0]:04X})")
+                return True
+        except Exception as e:
+            # print(f"[RDS2] Failed to load logo: {e}")
+            pass
+            self.logo_data = None
+            self.logo_size = 0
+            self.logo_loaded = False
+            return False
+    
+    def _calculate_crc16(self, data):
+        """Calculate CRC-16 matching RDS2 C reference implementation"""
+        crc = 0xFFFF
+        for i in range(self.logo_size):  # Only use actual file size, not padded
+            crc = ((crc >> 8) | (crc << 8)) & 0xFFFF
+            crc ^= data[i]
+            crc ^= (crc & 0xFF) >> 4
+            crc ^= (crc << 8) << 4
+            crc ^= ((crc & 0xFF) << 4) << 1
+            crc &= 0xFFFF
+        return crc ^ 0xFFFF
+    
+    def get_logo_info(self):
+        """Get information about loaded logo"""
+        if self.logo_loaded and self.logo_data:
+            return {
+                "loaded": True,
+                "size": self.logo_size,
+                "segments": self.num_segments[0],
+                "crc": self.crc_value[0]
+            }
+        return {"loaded": False, "size": 0, "segments": 0, "crc": 0}
+    
+    def get_rds2_group_bits(self, stream_num):
+        """
+        Generate RDS2 group bits for stream 1, 2, or 3
+        Implements full RFT protocol with metadata, CRC, and file data
+        """
+        if stream_num < 1 or stream_num > 3:
+            return [0] * 104
+        
+        idx = stream_num - 1
+        
+        if not self.logo_loaded or not self.logo_data:
+            # No logo: send test pattern
+            blocks = self._get_test_pattern(idx)
+            return self._blocks_to_bits(blocks)
+        
+        # State machine matching C code: 0, 1, 2, 3 = metadata/CRC, 4-49 = file data
+        state = self.rft_state[idx]
+        
+        if state == 0 or state == 2:
+            # Variant 0: File metadata
+            blocks = self._get_variant_0(idx)
+        elif state == 1 or state == 3:
+            # Variant 1: CRC information
+            blocks = self._get_variant_1(idx)
+        else:
+            # File data transmission
+            blocks = self._get_file_data(idx)
+        
+        # Advance state
+        self.rft_state[idx] = (self.rft_state[idx] + 1) % 50
+        
+        # Convert 4 blocks to RDS group bits
+        return self._blocks_to_bits(blocks)
+    
+    def _get_variant_0(self, idx):
+        """RFT Variant 0: File metadata (exact C reference format)"""
+        blocks = [0, 0, 0, 0]
+        
+        # Block 0: Function header (bit 15) + pipe number (bits 0-3)
+        blocks[0] = (1 << 15)  # Function header
+        blocks[0] |= (self.channel[idx] & 0x0F)  # Pipe number
+        
+        # Block 1: ODA Application ID for file transfer
+        blocks[1] = self.ODA_AID_RFT
+        
+        # Block 2: Variant code (0) + CRC flag + version + file ID + file size upper
+        blocks[2] = (0 & 0x0F) << 12  # Variant 0
+        blocks[2] |= (1 if self.use_crc else 0) << 11  # CRC flag
+        blocks[2] |= (self.file_version[idx] & 0x07) << 8  # File version
+        blocks[2] |= (self.file_id[idx] & 0x3F) << 2  # File ID
+        blocks[2] |= (self.logo_size >> 16) & 0x03  # File size upper 2 bits
+        
+        # Block 3: File size lower 16 bits
+        blocks[3] = self.logo_size & 0xFFFF
+        
+        # Debug output (only once per stream)
+        # if self.rft_state[idx] == 0:
+        #     print(f"[RDS2-{idx+1}] Variant 0: Size={self.logo_size}, CRC=0x{self.crc_value[idx]:04X}, Blocks={[f'{b:04X}' for b in blocks]}")
+        
+        return blocks
+    
+    def _get_variant_1(self, idx):
+        """RFT Variant 1: CRC information (exact C reference format)"""
+        blocks = [0, 0, 0, 0]
+        
+        # Block 0: Function header + pipe number
+        blocks[0] = (1 << 15)
+        blocks[0] |= (self.channel[idx] & 0x0F)
+        
+        # Block 1: ODA AID
+        blocks[1] = self.ODA_AID_RFT
+        
+        # Block 2: Variant code (1) + CRC mode (0 = entire file) + chunk address (0)
+        blocks[2] = (1 & 0x0F) << 12  # Variant 1
+        blocks[2] |= (0 & 0x07) << 9  # CRC mode 0 (entire file)
+        blocks[2] |= 0 & 0x1FF  # Chunk address 0
+        
+        # Block 3: CRC-16 value
+        blocks[3] = self.crc_value[idx] & 0xFFFF
+        
+        # Debug output (only once per stream)
+        # if self.rft_state[idx] == 1:
+        #     print(f"[RDS2-{idx+1}] Variant 1: CRC=0x{self.crc_value[idx]:04X}, Blocks={[f'{b:04X}' for b in blocks]}")
+        
+        return blocks
+    
+    def _get_file_data(self, idx):
+        """RFT File Data: 5 bytes per group (exact C reference format)"""
+        blocks = [0, 0, 0, 0]
+        
+        # Block 0: Function header (bits 12-15) + pipe (bits 8-11) + toggle (bit 7) + segment addr upper (bits 0-6)
+        blocks[0] = (2 << 12)  # Function header
+        blocks[0] |= (self.channel[idx] & 0x0F) << 8  # Pipe number
+        blocks[0] |= (self.toggle[idx] & 0x01) << 7  # Toggle bit
+        blocks[0] |= (self.segment_idx[idx] >> 8) & 0x7F  # Segment address upper 7 bits
+        
+        # Block 1: Segment address lower 8 bits + first data byte
+        blocks[1] = (self.segment_idx[idx] & 0xFF) << 8
+        
+        # Get 5 bytes of file data
+        seg_offset = self.segment_idx[idx] * 5
+        if seg_offset + 5 <= len(self.logo_data):
+            blocks[1] |= self.logo_data[seg_offset + 0]
+            blocks[2] = (self.logo_data[seg_offset + 1] << 8) | self.logo_data[seg_offset + 2]
+            blocks[3] = (self.logo_data[seg_offset + 3] << 8) | self.logo_data[seg_offset + 4]
+        else:
+            blocks[1] |= 0
+            blocks[2] = 0
+            blocks[3] = 0
+        
+        # Advance segment counter
+        self.segment_idx[idx] += 1
+        if self.segment_idx[idx] >= self.num_segments[idx]:
+            self.segment_idx[idx] = 0
+            self.toggle[idx] ^= 1  # Toggle bit flips each cycle
+        
+        # Debug output (only first data block per stream)
+        # if self.rft_state[idx] == 4:
+        #     print(f"[RDS2-{idx+1}] File Data: Seg=0, Toggle={self.toggle[idx]}, Blocks={[f'{b:04X}' for b in blocks]}")
+        
+        return blocks
+    
+    def _get_test_pattern(self, idx):
+        """Generate test pattern when no logo loaded"""
+        counter = self.rft_state[idx]
+        self.rft_state[idx] = (self.rft_state[idx] + 1) % 65536
+        
+        blocks = [
+            0x8000 | (idx & 0x0F),  # Function header + pipe
+            self.ODA_AID_RFT,        # ODA AID
+            counter & 0xFFFF,        # Counter
+            (~counter) & 0xFFFF      # Inverted counter
+        ]
+        
+        return blocks
+    
+    def _blocks_to_bits(self, blocks):
+        """Convert 4 RDS2 blocks to 104 bits"""
+        return RDSHelper.rds2_blocks_to_bits(blocks[0], blocks[1], blocks[2], blocks[3])
+
 # --- DSP ENGINE ---
 class RDSDSP:
     # Number of bits to keep pre-generated in the queue (~170 ms of RDS data).
@@ -2950,6 +3212,24 @@ class RDSDSP:
         self.sched = RDSScheduler()
         self.p_rds, self.p_pilot, self.bit_clock, self.last_bit = 0.0, 0.0, 0.0, 0
         self.bit_queue = collections.deque()
+        
+        # RDS2 generator and oscillator phases
+        self.rds2_gen = RDS2Generator()
+        self.p_rds2_1, self.p_rds2_2, self.p_rds2_3 = 0.0, 0.0, 0.0  # Phases for 66.5, 71.25, 76 kHz
+        self.rds2_bit_clock = [0.0, 0.0, 0.0]
+        self.rds2_last_bit = [0, 0, 0]
+        self.rds2_bit_queue = [collections.deque(), collections.deque(), collections.deque()]
+        self.rds2_zi = [np.zeros(2048), np.zeros(2048), np.zeros(2048)]
+        
+        # Load RDS2 logo if available in state
+        if state.get("rds2_logo_path"):
+            try:
+                self.rds2_gen.load_logo(state["rds2_logo_path"])
+                # print(f"[RDS2] Loaded logo: {state['rds2_logo_path']}")
+            except Exception as e:
+                # print(f"[RDS2] Failed to load logo: {e}")
+                pass
+        
         # 2049-tap Kaiser β=8 lowpass at 2×BITRATE (2.375 kHz).
         # 301 taps at 192 kHz gave a ~10 kHz transition band, leaving sinc sidelobes
         # visible on a spectrum analyser.  2049 taps narrows the transition band to
@@ -2974,6 +3254,18 @@ class RDSDSP:
         """Non-real-time thread: keeps bit_queue near _QUEUE_TARGET so the
         audio callback never has to call the scheduler directly."""
         while state["running"]:
+            # Check if RDS2 logo needs reloading
+            if state.get("rds2_logo_reload", False):
+                logo_path = state.get("rds2_logo_path", "")
+                if logo_path:
+                    try:
+                        self.rds2_gen.load_logo(logo_path)
+                        # print(f"[RDS2] Reloaded logo: {logo_path}")
+                    except Exception as e:
+                        # print(f"[RDS2] Failed to reload logo: {e}")
+                        pass
+                state["rds2_logo_reload"] = False
+            
             # Time-bound each fill burst to ≤3 ms so the audio callback always
             # wins the GIL within its 10.67 ms window.  A burst_counter=16 PS
             # update would otherwise monopolise the GIL for ~3–5 ms.
@@ -3062,6 +3354,76 @@ class RDSDSP:
 
         self.p_rds = (self.p_rds + 2 * np.pi * rds_freq * frames / SAMPLE_RATE) % (2 * np.pi)
         mixed = rds_sig + pilot_sig
+        
+        # Add RDS2 carriers if enabled (pure Python implementation)
+        if state.get("en_rds2", False):
+            num_carriers = int(state.get("rds2_num_carriers", 0))
+            
+            # RDS2 carrier frequencies (66.5, 71.25, 76 kHz)
+            rds2_freqs = [66500, 71250, 76000]
+            rds2_levels = [
+                state.get("rds2_carrier1_level", 4.5) / 100.0,
+                state.get("rds2_carrier2_level", 4.5) / 100.0,
+                state.get("rds2_carrier3_level", 4.5) / 100.0
+            ]
+            
+            # Generate each enabled RDS2 carrier
+            for i in range(min(num_carriers, 3)):
+                try:
+                    # Get RDS2 bits from generator (stream 1, 2, 3)
+                    # Fill queue if needed
+                    if len(self.rds2_bit_queue[i]) < 104:
+                        rds2_bits = self.rds2_gen.get_rds2_group_bits(i + 1)
+                        self.rds2_bit_queue[i].extend(rds2_bits)
+                    
+                    # Generate RDS2 carrier using same biphase modulation as main RDS
+                    dr = BITRATE / SAMPLE_RATE
+                    cum = self.rds2_bit_clock[i] + np.arange(1, frames + 1) * dr
+                    n_bits_at = np.floor(cum).astype(np.int32)
+                    n_bits_total = int(n_bits_at[-1])
+                    
+                    # Fill queue if underrun
+                    while len(self.rds2_bit_queue[i]) < n_bits_total:
+                        rds2_bits = self.rds2_gen.get_rds2_group_bits(i + 1)
+                        self.rds2_bit_queue[i].extend(rds2_bits)
+                    
+                    if len(self.rds2_bit_queue[i]) >= n_bits_total and n_bits_total > 0:
+                        # Build prefix-XOR array
+                        xor_prefix = np.zeros(n_bits_total + 1, dtype=np.int32)
+                        raw = np.fromiter(
+                            (self.rds2_bit_queue[i].popleft() for _ in range(n_bits_total)),
+                            dtype=np.int32, count=n_bits_total)
+                        xor_prefix[1:] = np.cumsum(raw) & 1
+                        
+                        # State and encoding
+                        states = (self.rds2_last_bit[i] ^ xor_prefix[n_bits_at]) & 1
+                        self.rds2_last_bit[i] ^= int(xor_prefix[n_bits_total])
+                        self.rds2_bit_clock[i] = float(cum[-1] - n_bits_total)
+                        
+                        bb = np.where(states, 1.0, -1.0)
+                        frac = cum - n_bits_at
+                        bb = np.where(frac >= 0.5, -bb, bb)
+                        
+                        shaped, self.rds2_zi[i] = dsp_signal.lfilter(self.taps, 1.0, bb, zi=self.rds2_zi[i])
+                        
+                        # Apply carrier modulation with quadrature phase shifting
+                        # Stream 1: 90°, Stream 2: 180°, Stream 3: 270°
+                        phase_shifts = [np.pi/2, np.pi, 3*np.pi/2]
+                        rds2_phase = [self.p_rds2_1, self.p_rds2_2, self.p_rds2_3][i]
+                        
+                        rds2_sig = shaped * (np.pi / 4.0) * np.sin(2 * np.pi * rds2_freqs[i] * t + rds2_phase + phase_shifts[i]) * rds2_levels[i]
+                        mixed += rds2_sig
+                        
+                        # Update phase
+                        if i == 0:
+                            self.p_rds2_1 = (self.p_rds2_1 + 2 * np.pi * rds2_freqs[i] * frames / SAMPLE_RATE) % (2 * np.pi)
+                        elif i == 1:
+                            self.p_rds2_2 = (self.p_rds2_2 + 2 * np.pi * rds2_freqs[i] * frames / SAMPLE_RATE) % (2 * np.pi)
+                        else:
+                            self.p_rds2_3 = (self.p_rds2_3 + 2 * np.pi * rds2_freqs[i] * frames / SAMPLE_RATE) % (2 * np.pi)
+                
+                except Exception as e:
+                    print(f"[RDS2] Carrier {i+1} exception: {e}", flush=True)
         
         if indata is not None and state["passthrough"] and indata.shape[1] == 2:
              outdata[:] = indata + np.column_stack((mixed, mixed))
@@ -3400,6 +3762,54 @@ def export_custom_groups():
         return jsonify({'custom_groups': custom_groups, 'count': len(custom_groups)})
     except:
         return jsonify({'error': 'Failed to export custom groups'}), 500
+
+# RDS2 Logo Upload Routes
+@app.route('/rds2/upload_logo', methods=['POST'])
+def upload_rds2_logo():
+    if not session.get('auth'): return jsonify({"ok": False, "error": "unauthorized"}), 401
+    
+    if 'logo' not in request.files:
+        return jsonify({"ok": False, "error": "No file provided"}), 400
+    
+    file = request.files['logo']
+    
+    if file.filename == '':
+        return jsonify({"ok": False, "error": "No file selected"}), 400
+    
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        # Add timestamp to prevent overwrites
+        timestamp = int(time.time())
+        name, ext = os.path.splitext(filename)
+        filename = f"rds2_logo_{timestamp}{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        
+        file.save(filepath)
+        state['rds2_logo_path'] = filepath
+        state['rds2_logo_reload'] = True  # Signal to audio thread to reload
+        save_config()
+        
+        return jsonify({
+            "ok": True,
+            "path": filepath,
+            "filename": filename,
+            "url": f"/uploads/{filename}"
+        })
+    
+    return jsonify({"ok": False, "error": "Invalid file type. Use PNG, JPG, GIF, or BMP"}), 400
+
+@app.route('/rds2/clear_logo', methods=['POST'])
+def clear_rds2_logo():
+    if not session.get('auth'): return jsonify({"ok": False, "error": "unauthorized"}), 401
+    
+    state['rds2_logo_path'] = ""
+    state['rds2_logo_reload'] = False
+    save_config()
+    return jsonify({"ok": True})
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route('/custom_groups/import', methods=['POST'])
 def import_custom_groups():
@@ -3788,6 +4198,7 @@ UI_HTML = r"""
                 <div class="tab-btn" onclick="setTab('basic')">Basic RDS</div>
                 <div class="tab-btn" onclick="setTab('expert')">Expert</div>
                 <div class="tab-btn" onclick="setTab('audio')">Audio & MPX</div>
+                <div class="tab-btn" onclick="setTab('rds2')">RDS2 Carriers</div>
                 <div class="tab-btn" onclick="setTab('datasets')">Datasets</div>
                 <div class="tab-btn" onclick="setTab('settings')">Settings</div>
             </div>
@@ -4716,6 +5127,155 @@ UI_HTML = r"""
                                 <div class="slider-container">
                                     <input type="range" id="rds_level" min="0" max="20" step="0.1" value="{{state.rds_level}}" oninput="sync()">
                                     <span class="slider-val" id="val_rds">{{state.rds_level}}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="rds2" class="content">
+                <div class="section border-l-4 border-l-purple-500">
+                    <div class="section-header text-purple-400">RDS2 Multi-Carrier Configuration</div>
+                    <div class="section-body">
+                        <div class="bg-blue-900/20 border border-blue-500/30 rounded p-3 mb-4">
+                            <div class="text-sm text-blue-300 font-semibold mb-1">ℹ️ About RDS2</div>
+                            <div class="text-xs text-gray-300">
+                                RDS2 adds up to 3 additional data carriers at 66.5, 71.25, and 76 kHz for enhanced data transmission.
+                                These carriers use quadrature phase shifting to minimize peak amplitude.
+                                <span class="text-yellow-400">⚠ Experimental feature</span> - verify with spectrum analyzer.
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4 mb-4">
+                            <div class="bg-[#111] p-3 rounded flex justify-between items-center">
+                                <div>
+                                    <label class="text-purple-400">Enable RDS2</label>
+                                    <div class="text-[9px] text-gray-500">Activate additional RDS carriers</div>
+                                </div>
+                                <label class="switch"><input type="checkbox" id="en_rds2" onchange="sync()" {% if state.en_rds2 %}checked{% endif %}><span class="slider"></span></label>
+                            </div>
+                            <div>
+                                <label>Number of RDS2 Carriers</label>
+                                <select id="rds2_num_carriers" onchange="updateRDS2Visibility(); sync();">
+                                    <option value="0" {% if state.rds2_num_carriers == 0 %}selected{% endif %}>0 (Disabled)</option>
+                                    <option value="1" {% if state.rds2_num_carriers == 1 %}selected{% endif %}>1 Carrier (66.5 kHz)</option>
+                                    <option value="2" {% if state.rds2_num_carriers == 2 %}selected{% endif %}>2 Carriers (66.5, 71.25 kHz)</option>
+                                    <option value="3" {% if state.rds2_num_carriers == 3 %}selected{% endif %}>3 Carriers (66.5, 71.25, 76 kHz)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 gap-3">
+                            <div class="rds2-carrier" id="rds2_carrier1_div">
+                                <div class="bg-purple-900/20 border border-purple-500/30 rounded p-3">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <label class="text-purple-300 font-semibold">Carrier 1 - 66.5 kHz</label>
+                                        <span class="text-xs text-gray-400">Phase: 90°</span>
+                                    </div>
+                                    <div class="slider-container">
+                                        <label class="text-xs">Modulation Level (%)</label>
+                                        <input type="range" id="rds2_carrier1_level" min="0" max="15" step="0.1" value="{{state.rds2_carrier1_level}}" oninput="sync()">
+                                        <span class="slider-val" id="val_rds2_c1">{{state.rds2_carrier1_level}}</span>
+                                        <div class="text-[9px] text-gray-500 mt-1">Recommended: 4.5% (max 15%)</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="rds2-carrier" id="rds2_carrier2_div">
+                                <div class="bg-purple-900/20 border border-purple-500/30 rounded p-3">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <label class="text-purple-300 font-semibold">Carrier 2 - 71.25 kHz</label>
+                                        <span class="text-xs text-gray-400">Phase: 180°</span>
+                                    </div>
+                                    <div class="slider-container">
+                                        <label class="text-xs">Modulation Level (%)</label>
+                                        <input type="range" id="rds2_carrier2_level" min="0" max="15" step="0.1" value="{{state.rds2_carrier2_level}}" oninput="sync()">
+                                        <span class="slider-val" id="val_rds2_c2">{{state.rds2_carrier2_level}}</span>
+                                        <div class="text-[9px] text-gray-500 mt-1">Recommended: 4.5% (max 15%)</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="rds2-carrier" id="rds2_carrier3_div">
+                                <div class="bg-purple-900/20 border border-purple-500/30 rounded p-3">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <label class="text-purple-300 font-semibold">Carrier 3 - 76 kHz</label>
+                                        <span class="text-xs text-gray-400">Phase: 270°</span>
+                                    </div>
+                                    <div class="slider-container">
+                                        <label class="text-xs">Modulation Level (%)</label>
+                                        <input type="range" id="rds2_carrier3_level" min="0" max="15" step="0.1" value="{{state.rds2_carrier3_level}}" oninput="sync()">
+                                        <span class="slider-val" id="val_rds2_c3">{{state.rds2_carrier3_level}}</span>
+                                        <div class="text-[9px] text-gray-500 mt-1">Recommended: 4.5% (max 15%)</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-amber-900/20 border border-amber-500/30 rounded p-3 mt-4">
+                            <div class="text-sm text-amber-300 font-semibold mb-1">⚠️ Important Notes</div>
+                            <ul class="text-xs text-gray-300 space-y-1">
+                                <li>• Keep total MPX modulation below 100% to avoid overdeviation</li>
+                                <li>• Monitor output with a spectrum analyzer to verify carrier levels</li>
+                                <li>• RDS2 carriers currently transmit test patterns for verification</li>
+                                <li>• Quadrature phase shifting reduces peak-to-average ratio</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section border-l-4 border-l-indigo-500 mt-4">
+                    <div class="section-header text-indigo-400">📸 Station Logo Upload (RDS2 File Transfer)</div>
+                    <div class="section-body">
+                        <div class="bg-indigo-900/20 border border-indigo-500/30 rounded p-3 mb-4">
+                            <div class="text-xs text-gray-300">
+                                Upload a station logo image for RDS2 file transfer (future feature).
+                                Supported formats: PNG, JPG, GIF, BMP • Max size: 3 KB recommended
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 gap-4">
+                            {% if state.rds2_logo_path %}
+                            <div class="bg-green-900/20 border border-green-500/30 rounded p-3">
+                                <div class="flex items-center justify-between mb-2">
+                                    <div class="text-sm text-green-300 font-semibold">✓ Logo Uploaded</div>
+                                    <button onclick="clearRDS2Logo()" class="bg-red-600 hover:bg-red-500 text-white text-xs rounded px-3 py-1">Clear</button>
+                                </div>
+                                <div class="text-xs text-gray-400 break-all">{{ state.rds2_logo_path }}</div>
+                                {% if state.rds2_logo_path.startswith('uploads/') or '/uploads/' in state.rds2_logo_path %}
+                                <div class="mt-2">
+                                    <img src="/{{ state.rds2_logo_path.split('uploads/')[-1] if '/uploads/' in state.rds2_logo_path else 'uploads/' + state.rds2_logo_path }}" 
+                                         alt="Station Logo" 
+                                         class="max-w-xs max-h-32 border border-gray-600 rounded"
+                                         onerror="this.style.display='none'">
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% else %}
+                            <div class="bg-gray-900/50 border border-gray-700 rounded p-3">
+                                <div class="text-sm text-gray-400 mb-2">No logo uploaded</div>
+                            </div>
+                            {% endif %}
+
+                            <div>
+                                <label class="block text-sm mb-2">Upload New Logo</label>
+                                <div class="flex gap-2">
+                                    <input type="file" 
+                                           id="rds2_logo_input" 
+                                           accept="image/png,image/jpeg,image/gif,image/bmp"
+                                           class="flex-1 bg-black/60 border border-gray-700 rounded px-3 py-2 text-sm text-gray-300 file:mr-4 file:py-1 file:px-3 file:rounded file:border-0 file:text-sm file:bg-purple-600 file:text-white hover:file:bg-purple-500">
+                                    <button onclick="uploadRDS2Logo()" 
+                                            class="bg-purple-600 hover:bg-purple-500 text-white rounded px-4 py-2 text-sm font-semibold">
+                                        Upload
+                                    </button>
+                                </div>
+                                <div class="text-xs text-gray-500 mt-1">PNG, JPG, GIF, or BMP format</div>
+                            </div>
+
+                            <div id="rds2_upload_status" class="hidden">
+                                <div class="bg-blue-900/20 border border-blue-500/30 rounded p-3">
+                                    <div class="text-sm text-blue-300" id="rds2_upload_message"></div>
                                 </div>
                             </div>
                         </div>
@@ -7877,6 +8437,9 @@ UI_HTML = r"""
             };
             setValText('val_rds', 'rds_level');
             setValText('val_pilot', 'pilot_level');
+            setValText('val_rds2_c1', 'rds2_carrier1_level');
+            setValText('val_rds2_c2', 'rds2_carrier2_level');
+            setValText('val_rds2_c3', 'rds2_carrier3_level');
             const genEl = document.getElementById('genlock_offset');
             const valOffset = document.getElementById('val_offset');
             if (genEl && valOffset) valOffset.innerText = genEl.value;
@@ -7916,9 +8479,113 @@ UI_HTML = r"""
                 en_eon: getVal('en_eon'), eon_services: getVal('eon_services'),
                 rds_freq: getVal('rds_freq'),
                 group_sequence: getVal('group_sequence'), scheduler_auto: getVal('scheduler_auto'),
-                dynamic_control_enabled: getVal('dynamic_control_enabled'), dynamic_control_rules: getVal('dynamic_control_rules')
+                dynamic_control_enabled: getVal('dynamic_control_enabled'), dynamic_control_rules: getVal('dynamic_control_rules'),
+                en_rds2: getVal('en_rds2'),
+                rds2_num_carriers: getVal('rds2_num_carriers'),
+                rds2_carrier1_level: getVal('rds2_carrier1_level'),
+                rds2_carrier2_level: getVal('rds2_carrier2_level'),
+                rds2_carrier3_level: getVal('rds2_carrier3_level')
             };
             socket.emit('update', data);
+        }
+
+        // === RDS2 FUNCTIONS ===
+        function updateRDS2Visibility() {
+            const numCarriers = parseInt(document.getElementById('rds2_num_carriers')?.value || 0);
+            const c1 = document.getElementById('rds2_carrier1_div');
+            const c2 = document.getElementById('rds2_carrier2_div');
+            const c3 = document.getElementById('rds2_carrier3_div');
+            
+            if (c1) c1.style.display = numCarriers >= 1 ? 'block' : 'none';
+            if (c2) c2.style.display = numCarriers >= 2 ? 'block' : 'none';
+            if (c3) c3.style.display = numCarriers >= 3 ? 'block' : 'none';
+        }
+
+        function uploadRDS2Logo() {
+            const fileInput = document.getElementById('rds2_logo_input');
+            const statusDiv = document.getElementById('rds2_upload_status');
+            const messageDiv = document.getElementById('rds2_upload_message');
+            
+            if (!fileInput.files || fileInput.files.length === 0) {
+                showRDS2Status('Please select a file first', 'error');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const maxSize = 200 * 1024; // 200 KB
+            
+            if (file.size > maxSize) {
+                showRDS2Status('File too large! Maximum size is 200 KB', 'error');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('logo', file);
+            
+            showRDS2Status('Uploading...', 'info');
+            
+            fetch('/rds2/upload_logo', {
+                method: 'POST',
+                body: formData
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    showRDS2Status('✓ Logo uploaded successfully!', 'success');
+                    setTimeout(function() { location.reload(); }, 1500);
+                } else {
+                    showRDS2Status('✗ Upload failed: ' + (data.error || 'Unknown error'), 'error');
+                }
+            })
+            .catch(function(err) {
+                showRDS2Status('✗ Upload failed: ' + err.message, 'error');
+            });
+        }
+
+        function clearRDS2Logo() {
+            if (!confirm('Remove the uploaded station logo?')) return;
+            
+            fetch('/rds2/clear_logo', { method: 'POST' })
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    if (data.ok) {
+                        location.reload();
+                    } else {
+                        alert('Failed to clear logo');
+                    }
+                })
+                .catch(function(err) {
+                    alert('Error: ' + err.message);
+                });
+        }
+
+        function showRDS2Status(message, type) {
+            const statusDiv = document.getElementById('rds2_upload_status');
+            const messageDiv = document.getElementById('rds2_upload_message');
+            
+            if (!statusDiv || !messageDiv) return;
+            
+            statusDiv.className = 'mt-3';
+            
+            if (type === 'success') {
+                statusDiv.className += ' bg-green-900/20 border border-green-500/30 rounded p-3';
+                messageDiv.className = 'text-sm text-green-300';
+            } else if (type === 'error') {
+                statusDiv.className += ' bg-red-900/20 border border-red-500/30 rounded p-3';
+                messageDiv.className = 'text-sm text-red-300';
+            } else {
+                statusDiv.className += ' bg-blue-900/20 border border-blue-500/30 rounded p-3';
+                messageDiv.className = 'text-sm text-blue-300';
+            }
+            
+            messageDiv.textContent = message;
+            statusDiv.classList.remove('hidden');
+            
+            if (type !== 'info') {
+                setTimeout(function() {
+                    statusDiv.classList.add('hidden');
+                }, 5000);
+            }
         }
 
         // === DATASET FUNCTIONS ===
@@ -9940,6 +10607,7 @@ UI_HTML = r"""
         updatePTYList(); // Initialize PTY list based on RDS/RBDS setting
         updateAFMethodUI(); // Initialize AF UI based on method
         loadDatasets(); // Initialize datasets on page load
+        updateRDS2Visibility(); // Initialize RDS2 carrier visibility
         loadEONServices(); // Initialize EON services on page load
         loadCustomGroups(); // Initialize custom groups on page load
         updateCustomGroupsDisplay(); // Update custom groups display
