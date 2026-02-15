@@ -334,9 +334,9 @@ default_state = {
     "en_eon": 0, "eon_services": "[]",
     
     # Text
-    "ps_dynamic": "RDS PRO", "ps_centered": False,
-    "rt_text": "RDS MASTER PRO", "rt_manual_buffers": False, "rt_cycle_ab": False,
-    "rt_a": "RDS MASTER PRO", "rt_b": "Simple & Open Source RDS Encoder",
+    "ps_dynamic": "RDSMASTR", "ps_centered": False,
+    "rt_text": "RDS MASTER", "rt_manual_buffers": False, "rt_cycle_ab": False,
+    "rt_a": "RDS MASTER", "rt_b": "Simple & Open Source RDS Encoder",
     "rt_cr": True, "rt_centered": False,
     "rt_mode": "2A", "rt_cycle": True, "rt_cycle_time": 5, "rt_active_buffer": 0,
     "rt_ab_cycle_count": 2,
@@ -357,10 +357,11 @@ default_state = {
     
     # Expert
     "ecc": "E3", "lic": "09", "tz_offset": 0.0, "en_ct": 1, "en_id": 1,
-    "ps_long_32": "RDS MASTER PRO v10.14", "en_lps": 1, "lps_centered": False, "lps_cr": False,
-    "ptyn": "PYTHON", "en_ptyn": 1, "ptyn_centered": False,
-    "en_dab": 0, "dab_channel": "12B", "dab_eid": "CE15", "dab_mode": 1, "dab_es_flag": 0,
+    "ps_long_32": "RDS MASTER v1.1a", "en_lps": 1, "lps_centered": False, "lps_cr": True,
+    "ptyn": "RDSMASTR", "en_ptyn": 1, "ptyn_centered": False,
+    "en_dab": 0, "dab_channel": "12C", "dab_eid": "2E01", "dab_mode": 1, "dab_es_flag": 0,
     "dab_sid": "0000", "dab_variant": 0,
+    "custom_oda_list": "[]",  # JSON array of custom ODA configurations
     "custom_groups": "[]",  # JSON array of custom group data
     "dynamic_control_enabled": False,  # Enable dynamic RDS control from JSON
     "dynamic_control_rules": "[]",  # JSON array of dynamic control rules
@@ -710,7 +711,7 @@ def migrate_config_ini():
 
 def load_config():
     """Load configuration from datasets.json."""
-    global state, auth_config, current_dataset, auto_start
+    global state, auth_config, current_dataset, auto_start, site_name
     
     # First, check if we need to migrate from config.ini
     migrate_config_ini()
@@ -745,6 +746,9 @@ def load_config():
                     auto_start_was_missing = True
                     print("⚠ auto_start missing from datasets.json, will add it...")
                 auto_start = data.get('auto_start', True)
+                
+                # Load site_name global setting
+                site_name = data.get('site_name', 'Secure Login')
         else:
             print("datasets.json not found, using default state.")
     except Exception as e:
@@ -872,6 +876,12 @@ def save_config():
         
         # Save global auto_start setting
         data['auto_start'] = auto_start
+        
+        # Save site_name
+        data['site_name'] = site_name
+        
+        # Save site_name
+        data['site_name'] = site_name
         
         # Save
         with open(DATASETS_FILE, 'w') as f:
@@ -2033,9 +2043,26 @@ class RDSScheduler:
         if state["en_ptyn"]: seq.append((10,0))  # +4% (single group)
         if state["en_id"]: seq.append((1,0))
         # Half 3A frequency: only add on even counter cycles
-        if state.get("en_dab") and (self.schedule_gen_counter % 2 == 0): seq.append((3,0))
+        # Group 3A is ODA announcement - add if any ODA is active
+        needs_3a = False
+        if state.get("en_dab"): needs_3a = True
+        if state.get("en_rt_plus"): needs_3a = True
+        if state.get("en_rds2"): needs_3a = True
+        # Check if custom ODAs are enabled
+        if not needs_3a:
+            try:
+                custom_oda_json = state.get("custom_oda_list", "[]")
+                if custom_oda_json and custom_oda_json != "[]":
+                    custom_odas = json.loads(custom_oda_json)
+                    for oda in custom_odas:
+                        if oda.get("enabled", True):
+                            needs_3a = True
+                            break
+            except:
+                pass
+        if needs_3a and (self.schedule_gen_counter % 2 == 0): 
+            seq.append((3,0))
         if state["en_rt_plus"]:
-            if self.schedule_gen_counter % 2 == 0: seq.append((3,0))
             seq.append((11,0))
 
         # Add enabled custom groups to auto schedule
@@ -2487,30 +2514,49 @@ class RDSScheduler:
             return RDSHelper.get_group_bits(2, v, (buf<<4)|a, b3_val, b4_val)
 
         elif g_type == 3:
-             # Group 3A: ODA announcement for DAB (AID=0x0093) and/or RT+ (AID=0x4BD7)
-             if state.get("en_dab") and state.get("en_rt_plus"):
-                 # Both enabled: alternate between DAB and RT+
-                 self.group_3a_toggle = 1 - self.group_3a_toggle
-                 if self.group_3a_toggle == 0:
-                     # Announce DAB ODA on Group 12A
-                     # Block 2 Tail: Application Group Type Code = 12A = 11000 binary = 0x18
-                     b2_tail = 0x18
-                     b3_val = 0x0000  # Message bits (reserved)
-                     b4_val = 0x0093  # AID for DAB linkage
-                     return RDSHelper.get_group_bits(3, 0, b2_tail, b3_val, b4_val)
-                 else:
-                     # Announce RT+ ODA on Group 11A
-                     if state["en_rt_plus"]:
-                         return RDSHelper.get_group_bits(3, 0, 22, 0x0000, 0x4BD7)
-             elif state.get("en_dab"):
-                 # Only DAB enabled: announce Group 12A ODA
-                 b2_tail = 0x18
-                 b3_val = 0x0000
-                 b4_val = 0x0093
-                 return RDSHelper.get_group_bits(3, 0, b2_tail, b3_val, b4_val)
-             elif state["en_rt_plus"]:
-                 # Only RT+ enabled: announce Group 11A ODA
-                 return RDSHelper.get_group_bits(3, 0, 22, 0x0000, 0x4BD7)
+             # Group 3A: ODA announcement for DAB, RT+, RDS2/RFT, and custom ODAs
+             # Build list of all active ODAs
+             active_odas = []
+             
+             # Add DAB if enabled
+             if state.get("en_dab"):
+                 active_odas.append({"type": "dab", "group_type": 0x18, "aid": 0x0093, "msg": 0x0000})
+             
+             # Add RT+ if enabled
+             if state.get("en_rt_plus"):
+                 active_odas.append({"type": "rtplus", "group_type": 22, "aid": 0x4BD7, "msg": 0x0000})
+             
+             # Add RDS2/RFT if enabled
+             if state.get("en_rds2"):
+                 active_odas.append({"type": "rds2", "group_type": 6, "aid": 0xFF7F, "msg": 0x0000})
+             
+             # Add custom ODAs
+             try:
+                 custom_oda_json = state.get("custom_oda_list", "[]")
+                 if custom_oda_json and custom_oda_json != "[]":
+                     custom_odas = json.loads(custom_oda_json)
+                     for oda in custom_odas:
+                         if oda.get("enabled", True):
+                             aid_val = oda.get("aid", "0000")
+                             msg_val = oda.get("msg", "0000")
+                             active_odas.append({
+                                 "type": "custom",
+                                 "group_type": int(oda.get("group_type", 0)),
+                                 "aid": int(aid_val, 16) if isinstance(aid_val, str) else int(aid_val),
+                                 "msg": int(msg_val, 16) if isinstance(msg_val, str) else int(msg_val)
+                             })
+             except Exception as e:
+                 print(f"Error parsing custom ODAs: {e}")
+             
+             # If we have active ODAs, cycle through them
+             if active_odas:
+                 # Use modulo to cycle through list
+                 current_oda = active_odas[self.group_3a_toggle % len(active_odas)]
+                 self.group_3a_toggle = (self.group_3a_toggle + 1) % len(active_odas)
+                 
+                 # Emit ODA announcement
+                 return RDSHelper.get_group_bits(3, 0, current_oda["group_type"], 
+                                                  current_oda["msg"], current_oda["aid"])
         
         elif g_type == 11 and (not state["scheduler_auto"] or state["en_rt_plus"]):
              # --- CORRECTED RT+ PACKING (37 Bits split across blocks) ---
@@ -2972,19 +3018,6 @@ class RDSScheduler:
                     b4_val = 0x0000  # Default fallback
             
             return RDSHelper.get_group_bits(12, 0, b2_tail, b3_val, b4_val)
-
-        elif g_type == 3 and (not state["scheduler_auto"] or state.get("en_dab")):
-            # Group 3A: ODA (Open Data Application) for DAB cross-reference
-            # AID: 0xCD46 (DAB linkage)
-            dab_ch = state.get("dab_channel", "12B")
-            linkage_code = DAB_CHANNELS.get(dab_ch, DAB_CHANNELS["12B"])
-            # Block 2 Tail: ODA application variant (0x08 for DAB linkage)
-            b2_tail = 0x08
-            # Block 3: AID high byte (0xCD) in upper 8 bits
-            b3_val = 0xCD00 | 0x38
-            # Block 4: AID low byte (0x46) + linkage frequency data
-            b4_val = 0x4600 | (linkage_code & 0xFF)
-            return RDSHelper.get_group_bits(3, 0, b2_tail, b3_val, b4_val)
 
         elif g_type == 8:
             # Group 8A: Traffic Message Channel (TMC) - not implemented
@@ -3504,7 +3537,7 @@ def run_audio():
 def index():
     if not session.get('auth'): return redirect(url_for('login'))
     inputs, outputs = get_valid_devices()
-    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, auto_start=auto_start, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config)
+    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, auto_start=auto_start, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config, site_name=site_name)
 
 @app.route('/login', methods=['GET','POST'])
 def login():
@@ -3517,7 +3550,7 @@ def login():
             return redirect(url_for('index'))
         else:
             msg = "Invalid credentials"
-    return render_template_string(LOGIN_HTML, msg=msg, user=auth_config.get('user',''))
+    return render_template_string(LOGIN_HTML, msg=msg, user=auth_config.get('user',''), site_name=site_name)
 
 @app.route('/logout')
 def logout():
@@ -3543,6 +3576,12 @@ def update_settings():
     password = data.get('password')
     if isinstance(password, str) and password.strip():
         auth_config['pass'] = password.strip()
+        changed = True
+
+    site = data.get('site_name')
+    if isinstance(site, str):
+        global site_name
+        site_name = site.strip() if site.strip() else 'Secure Login'
         changed = True
 
     if changed: save_config()
@@ -4051,7 +4090,7 @@ LOGIN_HTML = r"""
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>RDS Master Pro - Login</title>
+    <title>RDS Master - Login</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background: #0f0f10; color: #e5e7eb; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
@@ -4061,8 +4100,22 @@ LOGIN_HTML = r"""
 <body class="min-h-screen flex items-center justify-center px-4">
     <div class="glass rounded-md p-8 w-full max-w-sm">
         <div class="text-center mb-6">
-            <div class="text-2xl font-bold text-white">RDS <span class="text-pink-400">MASTER</span> PRO</div>
-            <div class="text-xs text-gray-400">v10.14 • Secure Login</div>
+            <div class="flex justify-center mb-2">
+                <svg width="280" height="36" viewBox="0 0 2782 353" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path fill-rule="evenodd" clip-rule="evenodd" d="M280.133 50.036C258.107 72.0443 236.513 101.579 230.994 132.323C221.001 188.039 206.309 231.799 163.932 221.432C64.7423 143.095 212.838 84.1579 212.838 84.1579C212.838 84.1579 248.131 36.581 265.739 25.6349C105.794 -25.3699 -39.1536 97.0913 33.0134 215.802C71.703 279.458 141.541 299.148 210.866 289.651C245.504 284.898 273.786 248.392 292.994 222.732C300.178 213.144 307.188 204.061 313.304 193.926C319.958 193.454 340.326 41.7312 429.397 143.31C454.597 217.226 362.907 226.831 362.907 226.831C362.907 226.831 348.869 258.692 341.909 273.786C355.167 300.862 388.943 320.303 417.888 320.535C434.485 320.668 452.326 318.026 466.587 308.703C474.766 303.561 482.514 297.807 489.814 291.431C497.264 285.113 497.148 284.699 489.458 290.164C519.513 267.179 552.883 248.822 552.062 209.997C546.916 -32.7557 345.803 -15.5913 280.133 50.036Z" fill="white"/>
+                    <path fill-rule="evenodd" clip-rule="evenodd" d="M348.654 176.447C348.654 156.053 365.086 139.526 385.355 139.526C405.64 139.526 422.072 156.053 422.072 176.447C422.072 196.832 405.64 213.359 385.355 213.359C365.086 213.359 348.654 196.832 348.654 176.447ZM213.949 214.444C223.412 204.657 229.287 191.599 229.287 176.811C229.287 89.9622 299.059 19.7975 385.421 19.7975C471.493 19.7975 541.091 89.9374 541.091 176.496C541.091 178.302 540.95 180.222 540.95 182.028L523.698 168.258C519.48 95.0875 459.146 36.9288 385.355 36.9288C308.498 36.9288 246.382 99.1861 246.382 176.48C246.382 205.303 229.453 230.673 204.867 241.61C195.917 245.593 185.692 248.127 175.218 248.127C140.174 248.127 111.006 222.657 105.131 189.09L121.124 176.488C121.124 206.586 145.295 230.888 175.218 230.888C183.902 230.888 192.222 228.826 199.505 225.224C204.867 222.533 209.731 218.816 213.949 214.444ZM86.5441 187.815C92.3032 231.931 129.8 266.268 175.201 266.268C188.112 266.268 200.616 263.37 211.753 258.493C242.918 244.806 264.455 212.92 264.455 176.496C264.455 109.238 318.483 55.1034 385.346 55.1034C448.655 55.1034 500.413 104.22 505.401 166.602L490.179 176.496C490.179 118.114 443.277 70.9265 385.346 70.9265C327.175 70.9265 280.216 117.982 280.216 176.488C280.216 218.931 254.975 255.504 219.128 272.412C205.977 278.622 190.664 282.083 175.201 282.083C117.395 282.083 70.2031 235.144 70.2031 177.142V176.496L86.5441 187.815ZM218.805 80.5478C205.513 74.2468 190.805 70.9016 175.201 70.9016C117.138 70.9016 70.2031 118.106 70.2031 176.488L54.8565 166.453C59.9776 104.08 111.884 55.0868 175.201 55.0868C193.871 55.0868 211.513 59.3262 227.249 66.919C230.828 61.9013 234.532 57.0161 238.377 52.3876C219.451 42.4847 197.956 36.9619 175.201 36.9619C101.277 36.9619 40.7861 95.0875 36.6926 168.523L19.4235 182.152C19.4235 180.222 19.2992 178.426 19.2992 176.488C19.2992 89.9291 89.1212 19.7064 175.193 19.7064C202.431 19.7064 228.127 26.7775 250.384 39.2638C255.232 34.4945 260.361 29.8825 265.731 25.6349C239.264 9.43092 208.314 0.29808 175.201 0.29808C78.3902 0.29808 0 79.132 0 176.496C0 273.861 78.3902 352.687 175.201 352.687C208.314 352.687 239.421 343.537 265.764 327.457C305.829 303.015 335.329 262.418 345.779 214.99C355.697 225.166 369.561 231.368 384.849 231.368C415.012 231.368 439.457 206.768 439.457 176.447L455.003 188.329C449.368 222.028 420.216 247.754 385.172 247.754C374.682 247.754 364.837 245.444 355.88 241.445C353.841 247.373 351.529 253.153 348.853 258.684C359.973 263.569 372.254 266.268 385.172 266.268C430.442 266.268 467.797 232.312 473.672 188.461L490.171 176.886C490.171 235.028 442.979 282.091 385.172 282.091C369.569 282.091 354.562 278.572 341.254 272.536C329.114 293.783 313.329 312.239 294.344 327.391C320.828 343.479 352.06 352.703 385.172 352.703C481.851 352.703 560.249 273.869 560.249 176.513C560.249 79.1568 482.066 0 385.38 0C320.256 0 263.61 35.4632 233.265 88.3973C228.674 85.2757 223.793 82.858 218.805 80.5478ZM138.509 176.513C138.509 156.128 154.941 139.593 175.226 139.593C195.495 139.593 211.927 156.128 211.927 176.513C211.927 196.898 195.495 213.434 175.226 213.434C154.941 213.434 138.509 196.898 138.509 176.513Z" fill="#E52976"/>
+                    <path d="M663.572 299.932L698.362 51.4321H793.679C807.169 51.4321 818.884 54.8046 828.824 61.5496C838.764 68.2946 846.101 77.3471 850.834 88.7071C855.686 99.9488 857.165 112.433 855.272 126.16C853.733 137.401 850.243 147.755 844.799 157.222C839.356 166.57 832.493 174.676 824.209 181.54C816.044 188.403 806.933 193.61 796.874 197.16L842.137 299.932H792.259L748.594 201.065H720.727L706.882 299.932H663.572ZM726.762 157.755H773.799C779.953 157.755 785.751 156.216 791.194 153.14C796.756 150.063 801.43 145.921 805.217 140.715C809.122 135.508 811.488 129.71 812.317 123.32C813.263 116.811 812.553 110.954 810.187 105.747C807.938 100.54 804.448 96.3988 799.714 93.3221C795.099 90.2455 789.715 88.7071 783.562 88.7071H736.524L726.762 157.755Z" fill="white"/>
+                    <path d="M876.086 299.932L910.876 51.4321H993.236C1010.39 51.4321 1026.01 54.6863 1040.1 61.1946C1054.18 67.5846 1066.13 76.5188 1075.95 87.9971C1085.77 99.3571 1092.81 112.551 1097.07 127.58C1101.45 142.49 1102.46 158.524 1100.09 175.682C1097.72 192.84 1092.22 208.934 1083.58 223.962C1075.06 238.872 1064.3 252.066 1051.28 263.545C1038.38 274.905 1023.94 283.839 1007.97 290.347C992.112 296.737 975.605 299.932 958.446 299.932H876.086ZM925.431 256.622H964.481C975.486 256.622 986.136 254.551 996.431 250.41C1006.84 246.15 1016.31 240.351 1024.83 233.015C1033.35 225.56 1040.39 216.98 1045.95 207.277C1051.52 197.455 1055.12 186.924 1056.78 175.682C1058.32 164.44 1057.61 153.968 1054.65 144.265C1051.81 134.561 1047.2 125.982 1040.81 118.527C1034.42 111.072 1026.61 105.274 1017.38 101.132C1008.26 96.8721 998.147 94.7421 987.024 94.7421H948.151L925.431 256.622Z" fill="white"/>
+                    <path d="M1204.39 304.547C1190.67 304.547 1177.77 302.417 1165.7 298.157C1153.75 293.779 1143.63 287.566 1135.34 279.52C1127.06 271.355 1121.62 261.592 1119.01 250.232L1161.79 235.322C1162.86 240.055 1165.64 244.375 1170.13 248.28C1174.63 252.185 1180.37 255.32 1187.35 257.687C1194.33 260.054 1202.03 261.237 1210.43 261.237C1219.07 261.237 1227.29 259.935 1235.1 257.332C1243.03 254.61 1249.65 250.883 1254.98 246.15C1260.3 241.298 1263.44 235.677 1264.39 229.287C1265.33 222.779 1263.62 217.454 1259.24 213.312C1254.98 209.052 1249.24 205.68 1242.02 203.195C1234.92 200.71 1227.41 198.816 1219.48 197.515C1202.2 194.793 1187 190.592 1173.86 184.912C1160.73 179.232 1150.79 171.363 1144.04 161.305C1137.42 151.246 1135.17 138.23 1137.3 122.255C1139.43 107.226 1145.58 94.0913 1155.76 82.8496C1166.05 71.6079 1178.65 62.8513 1193.56 56.5796C1208.59 50.308 1224.27 47.1721 1240.6 47.1721C1254.21 47.1721 1266.99 49.3021 1278.94 53.5621C1291.01 57.8221 1301.25 64.0346 1309.65 72.1996C1318.05 80.3646 1323.55 90.1863 1326.16 101.665L1283.2 116.397C1282.14 111.664 1279.36 107.345 1274.86 103.44C1270.36 99.5346 1264.62 96.458 1257.64 94.2096C1250.66 91.843 1242.97 90.6596 1234.57 90.6596C1226.17 90.5413 1218 91.9021 1210.07 94.7421C1202.14 97.4638 1195.46 101.191 1190.01 105.925C1184.69 110.658 1181.55 116.101 1180.61 122.255C1179.54 130.183 1180.96 136.159 1184.87 140.182C1188.77 144.205 1194.27 147.164 1201.37 149.057C1208.59 150.832 1216.64 152.489 1225.51 154.027C1241.84 156.63 1256.58 161.009 1269.71 167.162C1282.97 173.315 1293.14 181.54 1300.24 191.835C1307.34 202.011 1309.83 214.495 1307.7 229.287C1305.57 244.315 1299.41 257.51 1289.24 268.87C1279.18 280.111 1266.64 288.868 1251.61 295.14C1236.7 301.411 1220.96 304.547 1204.39 304.547Z" fill="white"/>
+                    <path d="M1418.55 299.932L1466.83 51.4321H1502.68L1563.21 210.65L1623.74 51.4321H1659.59L1707.87 299.932H1663.68L1633.86 146.217L1577.94 294.252H1548.3L1492.39 146.217L1462.75 299.932H1418.55Z" fill="#E52976"/>
+                    <path d="M1814.67 51.4321H1864.55L1954.9 299.932H1908.92L1892.95 255.912H1786.45L1770.47 299.932H1724.5L1814.67 51.4321ZM1802.25 212.602H1876.97L1839.52 110.185L1802.25 212.602Z" fill="#E52976"/>
+                    <path d="M2059.23 304.547C2045.5 304.547 2032.31 302.417 2019.65 298.157C2007.1 293.779 1996.1 287.566 1986.63 279.52C1977.17 271.355 1970.36 261.592 1966.22 250.232L2006.87 235.322C2008.52 240.055 2011.9 244.375 2016.98 248.28C2022.07 252.185 2028.29 255.32 2035.62 257.687C2042.96 260.054 2050.83 261.237 2059.23 261.237C2067.87 261.237 2075.91 259.935 2083.37 257.332C2090.94 254.61 2097.04 250.883 2101.65 246.15C2106.27 241.298 2108.57 235.677 2108.57 229.287C2108.57 222.779 2106.15 217.454 2101.3 213.312C2096.44 209.052 2090.23 205.68 2082.66 203.195C2075.09 200.71 2067.28 198.816 2059.23 197.515C2041.6 194.793 2025.8 190.592 2011.84 184.912C1997.87 179.232 1986.81 171.363 1978.64 161.305C1970.6 151.246 1966.57 138.23 1966.57 122.255C1966.57 107.226 1970.89 94.0913 1979.53 82.8496C1988.17 71.6079 1999.53 62.8513 2013.61 56.5796C2027.69 50.308 2042.9 47.1721 2059.23 47.1721C2072.84 47.1721 2085.97 49.3021 2098.63 53.5621C2111.3 57.8221 2122.36 64.0346 2131.83 72.1996C2141.41 80.3646 2148.28 90.1863 2152.42 101.665L2111.59 116.397C2109.94 111.664 2106.56 107.345 2101.47 103.44C2096.39 99.5346 2090.17 96.458 2082.84 94.2096C2075.5 91.843 2067.63 90.6596 2059.23 90.6596C2050.83 90.5413 2042.84 91.9021 2035.27 94.7421C2027.81 97.4638 2021.72 101.191 2016.98 105.925C2012.25 110.658 2009.88 116.101 2009.88 122.255C2009.88 130.183 2012.07 136.159 2016.45 140.182C2020.95 144.205 2026.92 147.164 2034.38 149.057C2041.83 150.832 2050.12 152.489 2059.23 154.027C2075.8 156.63 2091.12 161.009 2105.2 167.162C2119.28 173.315 2130.58 181.54 2139.1 191.835C2147.62 202.011 2151.88 214.495 2151.88 229.287C2151.88 244.315 2147.62 257.51 2139.1 268.87C2130.58 280.111 2119.28 288.868 2105.2 295.14C2091.12 301.411 2075.8 304.547 2059.23 304.547Z" fill="#E52976"/>
+                    <path d="M2371.47 51.4321V94.7421H2295.5V299.932H2252.19V94.7421H2176.22V51.4321H2371.47Z" fill="#E52976"/>
+                    <path d="M2406.93 299.932V51.4321H2562.78V94.7421H2450.24V145.152H2539.52V188.462H2450.24V256.622H2562.78V299.932H2406.93Z" fill="#E52976"/>
+                    <path d="M2602.81 299.932V51.4321H2698.12C2711.61 51.4321 2723.8 54.8046 2734.69 61.5496C2745.58 68.2946 2754.21 77.3471 2760.6 88.7071C2766.99 99.9488 2770.19 112.433 2770.19 126.16C2770.19 137.401 2768.12 147.755 2763.98 157.222C2759.95 166.57 2754.27 174.676 2746.94 181.54C2739.72 188.403 2731.38 193.61 2721.91 197.16L2781.37 299.932H2731.49L2673.98 201.065H2646.12V299.932H2602.81ZM2646.12 157.755H2693.15C2699.31 157.755 2704.93 156.216 2710.02 153.14C2715.1 150.063 2719.19 145.921 2722.26 140.715C2725.34 135.508 2726.88 129.71 2726.88 123.32C2726.88 116.811 2725.34 110.954 2722.26 105.747C2719.19 100.54 2715.1 96.3988 2710.02 93.3221C2704.93 90.2455 2699.31 88.7071 2693.15 88.7071H2646.12V157.755Z" fill="#E52976"/>
+                </svg>
+            </div>
+            <div class="text-xs text-gray-400">v1.1a • {{site_name}}</div>
         </div>
         {% if msg %}
         <div class="mb-4 text-sm text-red-300 bg-red-900/40 border border-red-700 rounded px-3 py-2">{{ msg }}</div>
@@ -4089,7 +4142,7 @@ UI_HTML = r"""
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>RDS Master Pro v10.14</title>
+    <title>RDS Master - {{site_name}}</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -4226,7 +4279,19 @@ UI_HTML = r"""
 <body>
     <div class="app-container">
         <div class="header">
-            <div class="logo">RDS <span>MASTER PRO</span> <span class="text-[9px] text-gray-500 ml-2">v10.14</span></div>
+            <svg width="180" height="23" viewBox="0 0 2782 353" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path fill-rule="evenodd" clip-rule="evenodd" d="M280.133 50.036C258.107 72.0443 236.513 101.579 230.994 132.323C221.001 188.039 206.309 231.799 163.932 221.432C64.7423 143.095 212.838 84.1579 212.838 84.1579C212.838 84.1579 248.131 36.581 265.739 25.6349C105.794 -25.3699 -39.1536 97.0913 33.0134 215.802C71.703 279.458 141.541 299.148 210.866 289.651C245.504 284.898 273.786 248.392 292.994 222.732C300.178 213.144 307.188 204.061 313.304 193.926C319.958 193.454 340.326 41.7312 429.397 143.31C454.597 217.226 362.907 226.831 362.907 226.831C362.907 226.831 348.869 258.692 341.909 273.786C355.167 300.862 388.943 320.303 417.888 320.535C434.485 320.668 452.326 318.026 466.587 308.703C474.766 303.561 482.514 297.807 489.814 291.431C497.264 285.113 497.148 284.699 489.458 290.164C519.513 267.179 552.883 248.822 552.062 209.997C546.916 -32.7557 345.803 -15.5913 280.133 50.036Z" fill="white"/>
+                <path fill-rule="evenodd" clip-rule="evenodd" d="M348.654 176.447C348.654 156.053 365.086 139.526 385.355 139.526C405.64 139.526 422.072 156.053 422.072 176.447C422.072 196.832 405.64 213.359 385.355 213.359C365.086 213.359 348.654 196.832 348.654 176.447ZM213.949 214.444C223.412 204.657 229.287 191.599 229.287 176.811C229.287 89.9622 299.059 19.7975 385.421 19.7975C471.493 19.7975 541.091 89.9374 541.091 176.496C541.091 178.302 540.95 180.222 540.95 182.028L523.698 168.258C519.48 95.0875 459.146 36.9288 385.355 36.9288C308.498 36.9288 246.382 99.1861 246.382 176.48C246.382 205.303 229.453 230.673 204.867 241.61C195.917 245.593 185.692 248.127 175.218 248.127C140.174 248.127 111.006 222.657 105.131 189.09L121.124 176.488C121.124 206.586 145.295 230.888 175.218 230.888C183.902 230.888 192.222 228.826 199.505 225.224C204.867 222.533 209.731 218.816 213.949 214.444ZM86.5441 187.815C92.3032 231.931 129.8 266.268 175.201 266.268C188.112 266.268 200.616 263.37 211.753 258.493C242.918 244.806 264.455 212.92 264.455 176.496C264.455 109.238 318.483 55.1034 385.346 55.1034C448.655 55.1034 500.413 104.22 505.401 166.602L490.179 176.496C490.179 118.114 443.277 70.9265 385.346 70.9265C327.175 70.9265 280.216 117.982 280.216 176.488C280.216 218.931 254.975 255.504 219.128 272.412C205.977 278.622 190.664 282.083 175.201 282.083C117.395 282.083 70.2031 235.144 70.2031 177.142V176.496L86.5441 187.815ZM218.805 80.5478C205.513 74.2468 190.805 70.9016 175.201 70.9016C117.138 70.9016 70.2031 118.106 70.2031 176.488L54.8565 166.453C59.9776 104.08 111.884 55.0868 175.201 55.0868C193.871 55.0868 211.513 59.3262 227.249 66.919C230.828 61.9013 234.532 57.0161 238.377 52.3876C219.451 42.4847 197.956 36.9619 175.201 36.9619C101.277 36.9619 40.7861 95.0875 36.6926 168.523L19.4235 182.152C19.4235 180.222 19.2992 178.426 19.2992 176.488C19.2992 89.9291 89.1212 19.7064 175.193 19.7064C202.431 19.7064 228.127 26.7775 250.384 39.2638C255.232 34.4945 260.361 29.8825 265.731 25.6349C239.264 9.43092 208.314 0.29808 175.201 0.29808C78.3902 0.29808 0 79.132 0 176.496C0 273.861 78.3902 352.687 175.201 352.687C208.314 352.687 239.421 343.537 265.764 327.457C305.829 303.015 335.329 262.418 345.779 214.99C355.697 225.166 369.561 231.368 384.849 231.368C415.012 231.368 439.457 206.768 439.457 176.447L455.003 188.329C449.368 222.028 420.216 247.754 385.172 247.754C374.682 247.754 364.837 245.444 355.88 241.445C353.841 247.373 351.529 253.153 348.853 258.684C359.973 263.569 372.254 266.268 385.172 266.268C430.442 266.268 467.797 232.312 473.672 188.461L490.171 176.886C490.171 235.028 442.979 282.091 385.172 282.091C369.569 282.091 354.562 278.572 341.254 272.536C329.114 293.783 313.329 312.239 294.344 327.391C320.828 343.479 352.06 352.703 385.172 352.703C481.851 352.703 560.249 273.869 560.249 176.513C560.249 79.1568 482.066 0 385.38 0C320.256 0 263.61 35.4632 233.265 88.3973C228.674 85.2757 223.793 82.858 218.805 80.5478ZM138.509 176.513C138.509 156.128 154.941 139.593 175.226 139.593C195.495 139.593 211.927 156.128 211.927 176.513C211.927 196.898 195.495 213.434 175.226 213.434C154.941 213.434 138.509 196.898 138.509 176.513Z" fill="#E52976"/>
+                <path d="M663.572 299.932L698.362 51.4321H793.679C807.169 51.4321 818.884 54.8046 828.824 61.5496C838.764 68.2946 846.101 77.3471 850.834 88.7071C855.686 99.9488 857.165 112.433 855.272 126.16C853.733 137.401 850.243 147.755 844.799 157.222C839.356 166.57 832.493 174.676 824.209 181.54C816.044 188.403 806.933 193.61 796.874 197.16L842.137 299.932H792.259L748.594 201.065H720.727L706.882 299.932H663.572ZM726.762 157.755H773.799C779.953 157.755 785.751 156.216 791.194 153.14C796.756 150.063 801.43 145.921 805.217 140.715C809.122 135.508 811.488 129.71 812.317 123.32C813.263 116.811 812.553 110.954 810.187 105.747C807.938 100.54 804.448 96.3988 799.714 93.3221C795.099 90.2455 789.715 88.7071 783.562 88.7071H736.524L726.762 157.755Z" fill="white"/>
+                <path d="M876.086 299.932L910.876 51.4321H993.236C1010.39 51.4321 1026.01 54.6863 1040.1 61.1946C1054.18 67.5846 1066.13 76.5188 1075.95 87.9971C1085.77 99.3571 1092.81 112.551 1097.07 127.58C1101.45 142.49 1102.46 158.524 1100.09 175.682C1097.72 192.84 1092.22 208.934 1083.58 223.962C1075.06 238.872 1064.3 252.066 1051.28 263.545C1038.38 274.905 1023.94 283.839 1007.97 290.347C992.112 296.737 975.605 299.932 958.446 299.932H876.086ZM925.431 256.622H964.481C975.486 256.622 986.136 254.551 996.431 250.41C1006.84 246.15 1016.31 240.351 1024.83 233.015C1033.35 225.56 1040.39 216.98 1045.95 207.277C1051.52 197.455 1055.12 186.924 1056.78 175.682C1058.32 164.44 1057.61 153.968 1054.65 144.265C1051.81 134.561 1047.2 125.982 1040.81 118.527C1034.42 111.072 1026.61 105.274 1017.38 101.132C1008.26 96.8721 998.147 94.7421 987.024 94.7421H948.151L925.431 256.622Z" fill="white"/>
+                <path d="M1204.39 304.547C1190.67 304.547 1177.77 302.417 1165.7 298.157C1153.75 293.779 1143.63 287.566 1135.34 279.52C1127.06 271.355 1121.62 261.592 1119.01 250.232L1161.79 235.322C1162.86 240.055 1165.64 244.375 1170.13 248.28C1174.63 252.185 1180.37 255.32 1187.35 257.687C1194.33 260.054 1202.03 261.237 1210.43 261.237C1219.07 261.237 1227.29 259.935 1235.1 257.332C1243.03 254.61 1249.65 250.883 1254.98 246.15C1260.3 241.298 1263.44 235.677 1264.39 229.287C1265.33 222.779 1263.62 217.454 1259.24 213.312C1254.98 209.052 1249.24 205.68 1242.02 203.195C1234.92 200.71 1227.41 198.816 1219.48 197.515C1202.2 194.793 1187 190.592 1173.86 184.912C1160.73 179.232 1150.79 171.363 1144.04 161.305C1137.42 151.246 1135.17 138.23 1137.3 122.255C1139.43 107.226 1145.58 94.0913 1155.76 82.8496C1166.05 71.6079 1178.65 62.8513 1193.56 56.5796C1208.59 50.308 1224.27 47.1721 1240.6 47.1721C1254.21 47.1721 1266.99 49.3021 1278.94 53.5621C1291.01 57.8221 1301.25 64.0346 1309.65 72.1996C1318.05 80.3646 1323.55 90.1863 1326.16 101.665L1283.2 116.397C1282.14 111.664 1279.36 107.345 1274.86 103.44C1270.36 99.5346 1264.62 96.458 1257.64 94.2096C1250.66 91.843 1242.97 90.6596 1234.57 90.6596C1226.17 90.5413 1218 91.9021 1210.07 94.7421C1202.14 97.4638 1195.46 101.191 1190.01 105.925C1184.69 110.658 1181.55 116.101 1180.61 122.255C1179.54 130.183 1180.96 136.159 1184.87 140.182C1188.77 144.205 1194.27 147.164 1201.37 149.057C1208.59 150.832 1216.64 152.489 1225.51 154.027C1241.84 156.63 1256.58 161.009 1269.71 167.162C1282.97 173.315 1293.14 181.54 1300.24 191.835C1307.34 202.011 1309.83 214.495 1307.7 229.287C1305.57 244.315 1299.41 257.51 1289.24 268.87C1279.18 280.111 1266.64 288.868 1251.61 295.14C1236.7 301.411 1220.96 304.547 1204.39 304.547Z" fill="white"/>
+                <path d="M1418.55 299.932L1466.83 51.4321H1502.68L1563.21 210.65L1623.74 51.4321H1659.59L1707.87 299.932H1663.68L1633.86 146.217L1577.94 294.252H1548.3L1492.39 146.217L1462.75 299.932H1418.55Z" fill="#E52976"/>
+                <path d="M1814.67 51.4321H1864.55L1954.9 299.932H1908.92L1892.95 255.912H1786.45L1770.47 299.932H1724.5L1814.67 51.4321ZM1802.25 212.602H1876.97L1839.52 110.185L1802.25 212.602Z" fill="#E52976"/>
+                <path d="M2059.23 304.547C2045.5 304.547 2032.31 302.417 2019.65 298.157C2007.1 293.779 1996.1 287.566 1986.63 279.52C1977.17 271.355 1970.36 261.592 1966.22 250.232L2006.87 235.322C2008.52 240.055 2011.9 244.375 2016.98 248.28C2022.07 252.185 2028.29 255.32 2035.62 257.687C2042.96 260.054 2050.83 261.237 2059.23 261.237C2067.87 261.237 2075.91 259.935 2083.37 257.332C2090.94 254.61 2097.04 250.883 2101.65 246.15C2106.27 241.298 2108.57 235.677 2108.57 229.287C2108.57 222.779 2106.15 217.454 2101.3 213.312C2096.44 209.052 2090.23 205.68 2082.66 203.195C2075.09 200.71 2067.28 198.816 2059.23 197.515C2041.6 194.793 2025.8 190.592 2011.84 184.912C1997.87 179.232 1986.81 171.363 1978.64 161.305C1970.6 151.246 1966.57 138.23 1966.57 122.255C1966.57 107.226 1970.89 94.0913 1979.53 82.8496C1988.17 71.6079 1999.53 62.8513 2013.61 56.5796C2027.69 50.308 2042.9 47.1721 2059.23 47.1721C2072.84 47.1721 2085.97 49.3021 2098.63 53.5621C2111.3 57.8221 2122.36 64.0346 2131.83 72.1996C2141.41 80.3646 2148.28 90.1863 2152.42 101.665L2111.59 116.397C2109.94 111.664 2106.56 107.345 2101.47 103.44C2096.39 99.5346 2090.17 96.458 2082.84 94.2096C2075.5 91.843 2067.63 90.6596 2059.23 90.6596C2050.83 90.5413 2042.84 91.9021 2035.27 94.7421C2027.81 97.4638 2021.72 101.191 2016.98 105.925C2012.25 110.658 2009.88 116.101 2009.88 122.255C2009.88 130.183 2012.07 136.159 2016.45 140.182C2020.95 144.205 2026.92 147.164 2034.38 149.057C2041.83 150.832 2050.12 152.489 2059.23 154.027C2075.8 156.63 2091.12 161.009 2105.2 167.162C2119.28 173.315 2130.58 181.54 2139.1 191.835C2147.62 202.011 2151.88 214.495 2151.88 229.287C2151.88 244.315 2147.62 257.51 2139.1 268.87C2130.58 280.111 2119.28 288.868 2105.2 295.14C2091.12 301.411 2075.8 304.547 2059.23 304.547Z" fill="#E52976"/>
+                <path d="M2371.47 51.4321V94.7421H2295.5V299.932H2252.19V94.7421H2176.22V51.4321H2371.47Z" fill="#E52976"/>
+                <path d="M2406.93 299.932V51.4321H2562.78V94.7421H2450.24V145.152H2539.52V188.462H2450.24V256.622H2562.78V299.932H2406.93Z" fill="#E52976"/>
+                <path d="M2602.81 299.932V51.4321H2698.12C2711.61 51.4321 2723.8 54.8046 2734.69 61.5496C2745.58 68.2946 2754.21 77.3471 2760.6 88.7071C2766.99 99.9488 2770.19 112.433 2770.19 126.16C2770.19 137.401 2768.12 147.755 2763.98 157.222C2759.95 166.57 2754.27 174.676 2746.94 181.54C2739.72 188.403 2731.38 193.61 2721.91 197.16L2781.37 299.932H2731.49L2673.98 201.065H2646.12V299.932H2602.81ZM2646.12 157.755H2693.15C2699.31 157.755 2704.93 156.216 2710.02 153.14C2715.1 150.063 2719.19 145.921 2722.26 140.715C2725.34 135.508 2726.88 129.71 2726.88 123.32C2726.88 116.811 2725.34 110.954 2722.26 105.747C2719.19 100.54 2715.1 96.3988 2710.02 93.3221C2704.93 90.2455 2699.31 88.7071 2693.15 88.7071H2646.12V157.755Z" fill="#E52976"/>
+            </svg>
             <div class="flex items-center gap-4">
                 <div class="text-[10px] text-gray-400 flex items-center gap-2">
                     <span id="heartbeat" class="text-xs">♥</span> 192kHz Ready
@@ -5068,6 +5133,29 @@ UI_HTML = r"""
                  </div>
 
                  <div class="section">
+                    <div class="section-header">Custom ODA Flags (Group 3A)</div>
+                    <div class="section-body">
+                         <div class="flex justify-between items-center mb-3">
+                             <div>
+                                 <label>Custom Open Data Applications</label>
+                                 <div class="text-[9px] text-gray-500">Add custom ODA announcements alongside DAB, RT+, and RDS2</div>
+                                 <div class="text-[9px] text-amber-600 font-semibold">⚠️ EXPERIMENTAL: Use registered AID codes only</div>
+                             </div>
+                         </div>
+
+                         <input type="hidden" id="custom_oda_list" value="{{state.custom_oda_list}}">
+
+                         <div class="mb-3">
+                             <button onclick="openCustomODAModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white rounded px-3 py-2 text-sm w-full">Manage Custom ODAs</button>
+                         </div>
+
+                         <div id="custom_oda_display" class="text-xs text-gray-400">
+                             No custom ODAs configured
+                         </div>
+                    </div>
+                 </div>
+
+                 <div class="section">
                     <div class="section-header">EON - Enhanced Other Networks (Group 14A)</div>
                     <div class="section-body">
                          <div class="flex justify-between items-center mb-3">
@@ -5405,6 +5493,11 @@ UI_HTML = r"""
                         <div class="mb-3">
                             <label>New Password</label>
                             <input type="password" id="auth_pass" placeholder="Leave blank to keep current" class="w-full bg-black/60 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-pink-500">
+                        </div>
+                        <div class="mb-3">
+                            <label>Site Name</label>
+                            <div class="text-[9px] text-gray-500 mb-1">Displayed in login screen and page title (e.g., "POWER FM Burgas").</div>
+                            <input type="text" id="site_name" value="{{site_name}}" placeholder="Where am I" class="w-full bg-black/60 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-pink-500">
                         </div>
                         <div class="flex gap-2 items-center">
                             <button onclick="saveSettings()" class="bg-pink-600 hover:bg-pink-500 text-white font-semibold rounded px-4 py-2 text-sm transition">Save Settings</button>
@@ -5892,6 +5985,106 @@ UI_HTML = r"""
 
             <div class="flex justify-end mt-4">
                 <button onclick="closeDynamicControlModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom ODA Modal -->
+    <div id="custom_oda_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal-content" style="max-width: 600px;">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold">Manage Custom ODAs</h3>
+                <button onclick="closeCustomODAModal()" class="text-2xl leading-none hover:text-pink-600">×</button>
+            </div>
+
+            <div class="mb-4 bg-amber-900 border border-amber-700 rounded p-3">
+                <div class="text-xs text-amber-200 mb-2">⚠️ Use only registered AID codes from the RDS Forum</div>
+                <div class="text-[10px] text-amber-300">Group 3A will cycle through active ODAs (e.g RT+) and your custom ODAs</div>
+            </div>
+
+            <div class="mb-4">
+                <div id="custom_oda_list_modal" class="space-y-2 mb-3">
+                </div>
+                <button onclick="addCustomODA()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm w-full">+ Add Custom ODA</button>
+            </div>
+
+            <div id="custom_oda_edit_form" style="display: none;" class="border-t border-gray-700 pt-4 mt-4">
+                <input type="hidden" id="oda_edit_idx" value="">
+
+                <div class="space-y-3">
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Application Name</label>
+                        <input type="text" id="oda_name" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="e.g., iTunes Tagging, TMC">
+                        <div class="text-[10px] text-gray-500 mt-1">Descriptive name for this ODA</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">AID (Application ID)</label>
+                        <input type="text" id="oda_aid" maxlength="4" pattern="[0-9A-Fa-f]{4}" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="4BD7">
+                        <div class="text-[10px] text-gray-500 mt-1">4-digit hex code (e.g., 4BD7 for RT+, 0093 for DAB)</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Group Type</label>
+                        <select id="oda_group_type" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                            <option value="0">0A</option>
+                            <option value="1">0B</option>
+                            <option value="2">1A</option>
+                            <option value="3">1B</option>
+                            <option value="4">2A</option>
+                            <option value="5">2B</option>
+                            <option value="6">3A</option>
+                            <option value="7">3B</option>
+                            <option value="8">4A</option>
+                            <option value="9">4B</option>
+                            <option value="10">5A</option>
+                            <option value="11">5B</option>
+                            <option value="12">6A</option>
+                            <option value="13">6B</option>
+                            <option value="14">7A</option>
+                            <option value="15">7B</option>
+                            <option value="16">8A</option>
+                            <option value="17">8B</option>
+                            <option value="18">9A</option>
+                            <option value="19">9B</option>
+                            <option value="20">10A</option>
+                            <option value="21">10B</option>
+                            <option value="22">11A</option>
+                            <option value="23">11B</option>
+                            <option value="24">12A</option>
+                            <option value="25">12B</option>
+                            <option value="26">13A</option>
+                            <option value="27">13B</option>
+                            <option value="28">14A</option>
+                            <option value="29">14B</option>
+                            <option value="30">15A</option>
+                            <option value="31">15B</option>
+                        </select>
+                        <div class="text-[10px] text-gray-500 mt-1">Which group type carries this ODA (e.g., 11A for RT+)</div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">Message Bits (Optional)</label>
+                        <input type="text" id="oda_msg" maxlength="4" pattern="[0-9A-Fa-f]{4}" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono" placeholder="0000">
+                        <div class="text-[10px] text-gray-500 mt-1">4-digit hex for Block 3 (usually 0000)</div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between bg-black p-2 rounded">
+                            <label class="text-xs text-gray-400">Enabled</label>
+                            <input type="checkbox" class="toggle-checkbox" id="oda_enabled" checked>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-2 mt-4">
+                    <button onclick="cancelCustomODAEdit()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                    <button onclick="saveCustomODA()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-sm text-white font-bold">Save</button>
+                </div>
+            </div>
+
+            <div class="flex justify-end mt-4">
+                <button onclick="closeCustomODAModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
             </div>
         </div>
     </div>
@@ -8503,7 +8696,8 @@ UI_HTML = r"""
             if (statusEl) statusEl.innerText = 'Saving...';
             const payload = {
                 auto_start: document.getElementById('auto_start').checked,
-                user: document.getElementById('auth_user').value.trim()
+                user: document.getElementById('auth_user').value.trim(),
+                site_name: document.getElementById('site_name').value.trim()
             };
             const passEl = document.getElementById('auth_pass');
             if (passEl && passEl.value.trim()) payload.password = passEl.value.trim();
@@ -8600,6 +8794,8 @@ UI_HTML = r"""
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
                 dab_sid: getVal('dab_sid'), dab_variant: getVal('dab_variant'),
                 en_eon: getVal('en_eon'), eon_services: getVal('eon_services'),
+                custom_oda_list: getVal('custom_oda_list'),
+                custom_groups: getVal('custom_groups'),
                 rds_freq: getVal('rds_freq'),
                 group_sequence: getVal('group_sequence'), scheduler_auto: getVal('scheduler_auto'),
                 dynamic_control_enabled: getVal('dynamic_control_enabled'), dynamic_control_rules: getVal('dynamic_control_rules'),
@@ -9797,6 +9993,181 @@ UI_HTML = r"""
             updateCurrentMappingsDisplay();
         }
 
+        // Custom ODA Management
+        var customODAList = [];
+
+        function groupTypeToString(groupType) {
+            // Convert numeric group type (0-31) to string format (0A-15B)
+            var gt = parseInt(groupType) || 0;
+            var type = Math.floor(gt / 2);
+            var version = (gt % 2 === 0) ? 'A' : 'B';
+            return type + version;
+        }
+
+        function loadCustomODAList() {
+            try {
+                var hiddenInput = document.getElementById('custom_oda_list');
+                if (hiddenInput && hiddenInput.value) {
+                    customODAList = JSON.parse(hiddenInput.value);
+                } else {
+                    customODAList = [];
+                }
+            } catch (e) {
+                customODAList = [];
+            }
+            updateCustomODADisplay();
+        }
+
+        function openCustomODAModal() {
+            document.getElementById('custom_oda_modal').style.display = 'flex';
+            renderCustomODAList();
+        }
+
+        function closeCustomODAModal() {
+            document.getElementById('custom_oda_modal').style.display = 'none';
+            document.getElementById('custom_oda_edit_form').style.display = 'none';
+        }
+
+        function renderCustomODAList() {
+            var list = document.getElementById('custom_oda_list_modal');
+            if (!list) return;
+
+            if (customODAList.length === 0) {
+                list.innerHTML = '<div class="text-xs text-gray-500">No custom ODAs configured</div>';
+                return;
+            }
+
+            var html = '';
+            for (var i = 0; i < customODAList.length; i++) {
+                var oda = customODAList[i];
+                var enabled = oda.enabled !== false;
+                var statusColor = enabled ? 'text-green-400' : 'text-gray-500';
+                var statusText = enabled ? '✓ Enabled' : '✗ Disabled';
+
+                html += '<div class="p-3 bg-gray-800 hover:bg-gray-700 rounded cursor-pointer border border-gray-700 hover:border-indigo-600 transition-colors" onclick="editCustomODA(' + i + ')">';
+                html += '<div class="flex justify-between items-start mb-1">';
+                html += '<div class="font-semibold text-white">' + (oda.name || 'Unnamed ODA') + '</div>';
+                html += '<div class="text-[10px] ' + statusColor + '">' + statusText + '</div>';
+                html += '</div>';
+                html += '<div class="flex gap-4 text-[11px]">';
+                html += '<span class="text-gray-400">AID:</span><span class="font-mono text-pink-400">' + (oda.aid || '0000').toUpperCase() + '</span>';
+                html += '<span class="text-gray-400">Group:</span><span class="text-blue-400">' + groupTypeToString(oda.group_type || 0) + '</span>';
+                html += '</div>';
+                html += '<div class="flex justify-end gap-2 mt-2">';
+                html += '<button onclick="event.stopPropagation(); deleteCustomODA(' + i + ')" class="text-[10px] px-2 py-1 bg-red-700 hover:bg-red-600 rounded">Delete</button>';
+                html += '</div>';
+                html += '</div>';
+            }
+            list.innerHTML = html;
+        }
+
+        function addCustomODA() {
+            document.getElementById('oda_edit_idx').value = '';
+            document.getElementById('oda_name').value = '';
+            document.getElementById('oda_aid').value = '';
+            document.getElementById('oda_group_type').value = '22'; // Default to 11A
+            document.getElementById('oda_msg').value = '0000';
+            document.getElementById('oda_enabled').checked = true;
+            document.getElementById('custom_oda_edit_form').style.display = 'block';
+        }
+
+        function editCustomODA(idx) {
+            var oda = customODAList[idx];
+            document.getElementById('oda_edit_idx').value = idx;
+            document.getElementById('oda_name').value = oda.name || '';
+            document.getElementById('oda_aid').value = (oda.aid || '').toUpperCase();
+            document.getElementById('oda_group_type').value = oda.group_type || 0;
+            document.getElementById('oda_msg').value = (oda.msg || '0000').toUpperCase();
+            document.getElementById('oda_enabled').checked = oda.enabled !== false;
+            document.getElementById('custom_oda_edit_form').style.display = 'block';
+        }
+
+        function cancelCustomODAEdit() {
+            document.getElementById('custom_oda_edit_form').style.display = 'none';
+        }
+
+        async function saveCustomODA() {
+            var idx = document.getElementById('oda_edit_idx').value;
+            var name = document.getElementById('oda_name').value.trim();
+            var aid = document.getElementById('oda_aid').value.trim().toUpperCase();
+            var groupType = parseInt(document.getElementById('oda_group_type').value) || 0;
+            var msg = document.getElementById('oda_msg').value.trim().toUpperCase() || '0000';
+            var enabled = document.getElementById('oda_enabled').checked;
+
+            if (!name || !aid) {
+                alert('Please fill in Application Name and AID');
+                return;
+            }
+
+            if (!/^[0-9A-F]{4}$/.test(aid)) {
+                alert('AID must be a 4-digit hex value (e.g., 4BD7)');
+                return;
+            }
+
+            var oda = {
+                name: name,
+                aid: aid,
+                group_type: groupType,
+                msg: msg,
+                enabled: enabled
+            };
+
+            if (idx === '') {
+                customODAList.push(oda);
+            } else {
+                customODAList[parseInt(idx)] = oda;
+            }
+
+            await syncCustomODAList();
+            renderCustomODAList();
+            cancelCustomODAEdit();
+        }
+
+        async function deleteCustomODA(idx) {
+            if (!confirm('Delete this ODA?')) return;
+            customODAList.splice(idx, 1);
+            await syncCustomODAList();
+            renderCustomODAList();
+        }
+
+        async function syncCustomODAList() {
+            var hiddenInput = document.getElementById('custom_oda_list');
+            if (hiddenInput) {
+                hiddenInput.value = JSON.stringify(customODAList);
+            }
+            updateCustomODADisplay();
+            await sync();
+        }
+
+        function updateCustomODADisplay() {
+            var display = document.getElementById('custom_oda_display');
+            if (!display) return;
+
+            if (customODAList.length === 0) {
+                display.innerHTML = '<div class="text-xs text-gray-400">No custom ODAs configured</div>';
+                return;
+            }
+
+            var html = '<div class="text-xs space-y-1">';
+            var enabledCount = 0;
+            for (var i = 0; i < customODAList.length; i++) {
+                var oda = customODAList[i];
+                var enabled = oda.enabled !== false;
+                if (enabled) enabledCount++;
+                var statusIcon = enabled ? '<span class="text-green-400">✓</span>' : '<span class="text-gray-600">✗</span>';
+                html += '<div class="p-2 bg-gray-800 rounded flex justify-between items-center">';
+                html += '<div>';
+                html += '<div class="font-mono text-pink-400">' + (oda.aid || '0000').toUpperCase() + '</div>';
+                html += '<div class="text-gray-300">' + (oda.name || 'Unnamed') + '</div>';
+                html += '</div>';
+                html += '<div>' + statusIcon + '</div>';
+                html += '</div>';
+            }
+            html += '</div>';
+            html += '<div class="text-[10px] text-gray-500 mt-2">' + enabledCount + ' enabled, ' + (customODAList.length - enabledCount) + ' disabled</div>';
+            display.innerHTML = html;
+        }
+
         // Custom Groups Management
         var customGroups = [];
 
@@ -10732,6 +11103,7 @@ UI_HTML = r"""
         loadDatasets(); // Initialize datasets on page load
         updateRDS2Visibility(); // Initialize RDS2 carrier visibility
         loadEONServices(); // Initialize EON services on page load
+        loadCustomODAList(); // Initialize custom ODA list on page load
         loadCustomGroups(); // Initialize custom groups on page load
         updateCustomGroupsDisplay(); // Update custom groups display
         loadDynamicControlRules(); // Initialize dynamic control rules on page load
