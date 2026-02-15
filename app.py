@@ -1087,6 +1087,7 @@ def dynamic_control_loop():
             if not state.get("dynamic_control_enabled", False):
                 # Clear all overrides when disabled - fall back to dataset values
                 if dynamic_overrides:
+                    print(f"[DYNAMIC CONTROL] Clearing {len(dynamic_overrides)} overrides - disabled", flush=True)
                     dynamic_overrides.clear()
                 time.sleep(5.0)
                 continue
@@ -1128,13 +1129,17 @@ def dynamic_control_loop():
                     # Fetch JSON data
                     url = rule.get("url", "")
                     if not url:
+                        print(f"[DYNAMIC CONTROL] Rule {idx}: No URL configured", flush=True)
                         continue
                     
+                    print(f"[DYNAMIC CONTROL] Rule {idx}: Fetching from {url}", flush=True)
                     req = urllib.request.Request(url)
                     req.add_header('User-Agent', 'RDS-Encoder-Dynamic-Control/1.0')
                     
                     with urllib.request.urlopen(req, timeout=5) as response:
                         json_data = json.loads(response.read().decode('utf-8'))
+                    
+                    print(f"[DYNAMIC CONTROL] Rule {idx}: JSON fetched successfully", flush=True)
                     
                     # Extract field value using dot notation path
                     field_path = rule.get("field_path", "")
@@ -1196,6 +1201,35 @@ def dynamic_control_loop():
                     elif mapping_type == "pty_number":
                         # Direct PTY number
                         new_value = int(value) if str(value).isdigit() else 0
+                    
+                    elif mapping_type == "conditional":
+                        # If value = X, then output Y, otherwise use default (no override)
+                        condition_value = rule.get("condition_value", "")
+                        output_value = rule.get("output_value", "")
+                        
+                        # Check if current value matches the condition
+                        if str(value) == str(condition_value):
+                            # Condition met - apply output value with proper type conversion
+                            if rds_param in ["ms", "tp", "ta"]:
+                                new_value = int(output_value) if str(output_value).isdigit() else 0
+                            elif rds_param == "pty":
+                                new_value = max(0, min(31, int(output_value))) if str(output_value).isdigit() else 0
+                            elif rds_param == "pi":
+                                # Validate hex format
+                                try:
+                                    new_value = format(int(str(output_value), 16), '04X')
+                                except:
+                                    continue
+                            elif rds_param == "ptyn":
+                                # Truncate to 8 characters and apply EBU Latin
+                                new_value = convert_to_ebu_latin(str(output_value)[:8])
+                            else:
+                                new_value = output_value
+                        else:
+                            # Condition not met - remove override to fall back to default
+                            if rds_param in dynamic_overrides:
+                                del dynamic_overrides[rds_param]
+                            continue  # Skip setting new_value so it doesn't get applied
                     
                     # Apply the new value to state
                     if new_value is not None and rds_param in state:
@@ -5119,10 +5153,11 @@ UI_HTML = r"""
 
                         <div id="dc_mapping_auto" style="display: none;">
                             <label class="text-xs text-gray-400 mb-1 block">Mapping Type</label>
-                            <select id="dc_mapping_type" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                            <select id="dc_mapping_type" class="w-full bg-black border border-gray-600 rounded px-2 py-1" onchange="updateDynamicControlParamUI()">
                                 <option value="direct">Direct (0/1 → 0/1)</option>
                                 <option value="boolean">Boolean (true/false → 1/0)</option>
                                 <option value="text_match">Text Match (custom mapping)</option>
+                                <option value="conditional">Conditional (If X then Y, else default)</option>
                                 <option value="passthrough">Pass Through (JSON value → RDS value)</option>
                             </select>
                         </div>
@@ -5139,6 +5174,59 @@ UI_HTML = r"""
                             <div id="dc_value_mappings" class="space-y-2 mb-2"></div>
                             <button onclick="addDynamicControlValueMapping()" class="bg-gray-700 hover:bg-gray-600 text-white rounded px-2 py-1 text-xs w-full">+ Add Mapping</button>
                             <div class="text-[10px] text-gray-500 mt-1">Map specific JSON values to RDS values</div>
+                        </div>
+
+                        <div id="dc_conditional_section" style="display: none;">
+                            <label class="text-xs text-gray-400 mb-1 block">Conditional Mapping</label>
+                            <div class="grid grid-cols-2 gap-2 mb-2">
+                                <div>
+                                    <label class="text-[10px] text-gray-500">If JSON value equals:</label>
+                                    <input type="text" id="dc_condition_value" placeholder="e.g. News" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs">
+                                </div>
+                                <div>
+                                    <label class="text-[10px] text-gray-500">Then set to:</label>
+                                    <!-- Text input for non-PTY parameters -->
+                                    <input type="text" id="dc_output_value" placeholder="e.g. 1" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs">
+                                    <!-- PTY dropdown for PTY parameter -->
+                                    <select id="dc_output_pty" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs" style="display: none;">
+                                        <option value="0">0</option>
+                                        <option value="1">1</option>
+                                        <option value="2">2</option>
+                                        <option value="3">3</option>
+                                        <option value="4">4</option>
+                                        <option value="5">5</option>
+                                        <option value="6">6</option>
+                                        <option value="7">7</option>
+                                        <option value="8">8</option>
+                                        <option value="9">9</option>
+                                        <option value="10">10</option>
+                                        <option value="11">11</option>
+                                        <option value="12">12</option>
+                                        <option value="13">13</option>
+                                        <option value="14">14</option>
+                                        <option value="15">15</option>
+                                        <option value="16">16</option>
+                                        <option value="17">17</option>
+                                        <option value="18">18</option>
+                                        <option value="19">19</option>
+                                        <option value="20">20</option>
+                                        <option value="21">21</option>
+                                        <option value="22">22</option>
+                                        <option value="23">23</option>
+                                        <option value="24">24</option>
+                                        <option value="25">25</option>
+                                        <option value="26">26</option>
+                                        <option value="27">27</option>
+                                        <option value="28">28</option>
+                                        <option value="29">29</option>
+                                        <option value="30">30</option>
+                                        <option value="31">31</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="text-[10px] text-gray-500 bg-blue-900/20 border border-blue-700/50 rounded p-2">
+                                <strong>How it works:</strong> If the JSON field equals the condition value, apply the output value. Otherwise, use the default from your settings (no override).
+                            </div>
                         </div>
                     </div>
 
@@ -8224,7 +8312,9 @@ UI_HTML = r"""
                 }[rule.rds_param] || rule.rds_param;
                 
                 var mappingInfo = rule.mapping_type;
-                if (rule.custom_mapping && Object.keys(rule.custom_mapping).length > 0) {
+                if (rule.mapping_type === 'conditional' && rule.condition_value && rule.output_value) {
+                    mappingInfo += ' (If "' + rule.condition_value + '" → ' + rule.output_value + ')';
+                } else if (rule.custom_mapping && Object.keys(rule.custom_mapping).length > 0) {
                     mappingInfo += ' (' + Object.keys(rule.custom_mapping).length + ' mappings)';
                 }
                 
@@ -8264,6 +8354,9 @@ UI_HTML = r"""
             document.getElementById('dc_poll_interval').value = '5';
             document.getElementById('dc_enabled').checked = true;
             document.getElementById('dc_value_mappings').innerHTML = '';
+            document.getElementById('dc_condition_value').value = '';
+            document.getElementById('dc_output_value').value = '';
+            document.getElementById('dc_output_pty').value = '0';
             ptyMappings = {};
             currentDynamicControlFieldValue = null;
             currentDynamicControlFieldType = null;
@@ -8287,6 +8380,9 @@ UI_HTML = r"""
             
             // Clear existing mappings
             document.getElementById('dc_value_mappings').innerHTML = '';
+            document.getElementById('dc_condition_value').value = '';
+            document.getElementById('dc_output_value').value = '';
+            document.getElementById('dc_output_pty').value = '0';
             ptyMappings = {};
             currentDynamicControlFieldValue = null;
             currentDynamicControlFieldType = null;
@@ -8309,7 +8405,34 @@ UI_HTML = r"""
                 });
             }
             
+            // Load conditional mapping fields
+            if (rule.mapping_type === 'conditional') {
+                document.getElementById('dc_condition_value').value = rule.condition_value || '';
+                
+                // Populate appropriate output field based on parameter type
+                if (rule.rds_param === 'pty') {
+                    document.getElementById('dc_output_pty').value = rule.output_value || '0';
+                    document.getElementById('dc_output_value').value = '';
+                } else {
+                    document.getElementById('dc_output_value').value = rule.output_value || '';
+                    document.getElementById('dc_output_pty').value = '0';
+                }
+            }
+            
             updateDynamicControlParamUI();
+            
+            // Re-populate conditional fields after UI update (in case UI update cleared them)
+            if (rule.mapping_type === 'conditional') {
+                setTimeout(function() {
+                    document.getElementById('dc_condition_value').value = rule.condition_value || '';
+                    if (rule.rds_param === 'pty') {
+                        document.getElementById('dc_output_pty').value = rule.output_value || '0';
+                    } else {
+                        document.getElementById('dc_output_value').value = rule.output_value || '';
+                    }
+                }, 100);
+            }
+            
             document.getElementById('dynamic_control_modal_title').textContent = 'Edit Control Rule';
             document.getElementById('dynamic_control_edit_form').style.display = 'block';
         }
@@ -8335,10 +8458,9 @@ UI_HTML = r"""
             var customMapping = null;
             var mappingType = document.getElementById('dc_mapping_type').value;
             
-            if (rdsParam === 'pty' && Object.keys(ptyMappings).length > 0) {
-                // PTY mappings
+            if (rdsParam === 'pty' && mappingType === 'pty_name' && Object.keys(ptyMappings).length > 0) {
+                // PTY name mappings (only when explicitly using pty_name mapping type)
                 customMapping = ptyMappings;
-                mappingType = 'pty_name';
             } else if (mappingType === 'text_match') {
                 // Custom value mappings
                 customMapping = {};
@@ -8353,6 +8475,9 @@ UI_HTML = r"""
                 if (Object.keys(customMapping).length === 0) {
                     customMapping = null;
                 }
+            } else if (mappingType === 'conditional') {
+                // Conditional mapping - no custom_mapping needed, use separate fields
+                customMapping = null;
             }
             
             var rule = {
@@ -8365,6 +8490,30 @@ UI_HTML = r"""
                 poll_interval: parseInt(document.getElementById('dc_poll_interval').value) || 5,
                 enabled: document.getElementById('dc_enabled').checked
             };
+            
+
+            
+            // Add conditional mapping fields if applicable
+            if (mappingType === 'conditional') {
+                rule.condition_value = document.getElementById('dc_condition_value').value || '';
+                
+                // Get output value from appropriate input (PTY dropdown or text input)
+                if (rdsParam === 'pty') {
+                    rule.output_value = document.getElementById('dc_output_pty').value || '';
+                } else {
+                    rule.output_value = document.getElementById('dc_output_value').value || '';
+                }
+                
+                // Validation for conditional mapping
+                if (!rule.condition_value) {
+                    alert('Condition value is required for conditional mapping');
+                    return;
+                }
+                if (!rule.output_value) {
+                    alert('Output value is required for conditional mapping');
+                    return;
+                }
+            }
 
             // Validation
             if (!rule.url) {
@@ -8646,40 +8795,86 @@ UI_HTML = r"""
             var autoMapping = document.getElementById('dc_mapping_auto');
             var ptyMapping = document.getElementById('dc_pty_mapping');
             var customMapping = document.getElementById('dc_custom_mapping_section');
+            var conditionalMapping = document.getElementById('dc_conditional_section');
+            var mappingTypeElement = document.getElementById('dc_mapping_type');
+            
+            if (!mappingTypeElement) {
+                console.error('[DEBUG] dc_mapping_type element not found!');
+                return;
+            }
+            
+            var mappingType = mappingTypeElement.value;
             
             // Hide all
             autoMapping.style.display = 'none';
             ptyMapping.style.display = 'none';
             customMapping.style.display = 'none';
+            conditionalMapping.style.display = 'none';
+            
+            // Reset conditional inputs visibility
+            document.getElementById('dc_output_value').style.display = 'block';
+            document.getElementById('dc_output_pty').style.display = 'none';
             
             if (param === 'pty') {
-                // Show PTY mapping interface
-                ptyMapping.style.display = 'block';
-                renderPTYMappingList();
+                // Show both mapping type options AND PTY mapping interface
+                autoMapping.style.display = 'block';
+                
+                if (mappingType === 'pty_name') {
+                    // Show PTY mapping interface for pty_name mapping
+                    ptyMapping.style.display = 'block';
+                    renderPTYMappingList();
+                } else if (mappingType === 'text_match' || document.getElementById('dc_value_mappings').children.length > 0) {
+                    customMapping.style.display = 'block';
+                    updateCurrentMappingsDisplay();
+                } else if (mappingType === 'conditional') {
+                    conditionalMapping.style.display = 'block';
+                    // Show PTY dropdown for conditional PTY mapping
+                    document.getElementById('dc_output_value').style.display = 'none';
+                    document.getElementById('dc_output_pty').style.display = 'block';
+                }
             } else if (param === 'ms' || param === 'tp' || param === 'ta') {
                 // Show simple mapping options
                 autoMapping.style.display = 'block';
-                var mappingType = document.getElementById('dc_mapping_type').value;
                 if (mappingType === 'text_match' || document.getElementById('dc_value_mappings').children.length > 0) {
                     customMapping.style.display = 'block';
                     updateCurrentMappingsDisplay();
+                } else if (mappingType === 'conditional') {
+                    conditionalMapping.style.display = 'block';
+                    // Show text input for non-PTY conditional mapping
+                    document.getElementById('dc_output_value').style.display = 'block';
+                    document.getElementById('dc_output_pty').style.display = 'none';
                 }
                 // Show quick setup if field is selected
                 if (currentDynamicControlFieldValue !== null) {
                     showDynamicControlQuickSetup();
                 }
             } else if (param === 'ptyn' || param === 'pi') {
-                // Passthrough only
+                // Allow all mapping types for PTYN and PI
                 autoMapping.style.display = 'block';
-                document.getElementById('dc_mapping_type').value = 'passthrough';
+                if (mappingType === 'text_match' || document.getElementById('dc_value_mappings').children.length > 0) {
+                    customMapping.style.display = 'block';
+                    updateCurrentMappingsDisplay();
+                } else if (mappingType === 'conditional') {
+                    conditionalMapping.style.display = 'block';
+                    // Show text input for non-PTY conditional mapping
+                    document.getElementById('dc_output_value').style.display = 'block';
+                    document.getElementById('dc_output_pty').style.display = 'none';
+                }
                 // Show quick setup
                 if (currentDynamicControlFieldValue !== null) {
                     showDynamicControlQuickSetup();
                 }
             } else if (param) {
                 autoMapping.style.display = 'block';
-                customMapping.style.display = 'block';
-                updateCurrentMappingsDisplay();
+                if (mappingType === 'text_match' || document.getElementById('dc_value_mappings').children.length > 0) {
+                    customMapping.style.display = 'block';
+                    updateCurrentMappingsDisplay();
+                } else if (mappingType === 'conditional') {
+                    conditionalMapping.style.display = 'block';
+                    // Show text input for non-PTY conditional mapping
+                    document.getElementById('dc_output_value').style.display = 'block';
+                    document.getElementById('dc_output_pty').style.display = 'none';
+                }
             }
         }
 
@@ -9953,4 +10148,6 @@ UI_HTML = r"""
 """
 
 if __name__ == '__main__':
+    print("[STARTUP] RDS Encoder application starting...", flush=True)
+    print("[STARTUP] Starting threads and web server on port 5000", flush=True)
     socketio.run(app, host='0.0.0.0', port=5000, debug=False)
