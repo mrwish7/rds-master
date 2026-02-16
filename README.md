@@ -1,8 +1,9 @@
 
 
-# RDS Master Pro (Python)
+# RDS Master (Python)
 
-  ![Overview of the User Interface](http://uploads.mpbnl.nl/u/LeTzSM.png)
+<img width="1920" height="951" alt="image" src="https://github.com/user-attachments/assets/a88a381b-e5b6-4df9-8fc7-5310dce3fc7f" />
+
 
 A work-in-progress open-source webUI based RDS encoder. Ships with a lightweight Flask + Socket.IO server, Tailwind-styled UI, and session-gated access for secure usage.
 
@@ -12,7 +13,7 @@ Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper DX and
 
 ## Current Features
 
-- Web UI with tabs for Dashboard, Basic RDS, Expert, Audio, and Settings.
+- Web UI with tabs for Dashboard, Basic RDS, Experts settings, RDS2, Datasets, and Settings.
 
 - Config-driven login (credentials stored in `config.ini` under `[AUTH]`).
 
@@ -24,15 +25,21 @@ Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper DX and
 
 - RT+ formatting with visual builder and support for up to 2 tags per RT message.
 
-- Long PS (32 chars), PTYN, CT, AF Method A & B controls; DAB cross-reference (12A) (experimental).
+- Long PS (32 chars), PTYN, CT, AF Method A & B controls; DAB cross-reference (12A).
 
-- Enhanced Other Networks (EON) Group 14A support with PS/AF/PTY transmission (experimental, TA/TP not working).
+- Datasets for preset data
+
+- Basic remote control of PTY/PTYN/M-S/TP-TA via JSON
+
+- Enhanced Other Networks (EON) Group 14A support with PS/AF/Mapped AF/PTY transmission.
 - FM-DAB linking via ODA
 - Manual RDS group input from RDS Spy recording / Airomate-standard txt file 
 
 - Live monitor panel that reflects PS/RT/PI/PTY and pilot status via WebSocket.
 
-  
+- Basic RDS2 logos (experimental)
+
+- Custom Groups
 
 ## Installation
 
@@ -58,7 +65,7 @@ python app.py
 
 ```
 
-2. Browse to `http://localhost:5000` and log in with the credentials from `config.ini` ( defaults are`user` / `pass`).
+2. Browse to `http://localhost:5000` and log in with the credentials set in `datasets.json` ( defaults are`user` / `pass`).
 
 3. In **Settings**, adjust:
 
@@ -68,29 +75,13 @@ python app.py
 
 4. Select audio devices in **Audio & MPX**, set RDS fields in **Basic/Expert**, then toggle **ON AIR**.
 
-5. Config is persisted back to `config.ini` on changes or when stopping the encoder.
-
-  
+5. Config is persisted back to `datasets.json` on changes or when stopping the encoder.
 
 ## Limits and Roadmap
 
-- Not production-ready; use only for lab/bench testing until a formal release.
-
-- RT+ tagging with visual builder supporting 2 tags per message. ✅
-
-- EON (Enhanced Other Networks) Group 14A implemented but **experimental** - use with caution and verify on-air behavior. ⚠️
-
-- AF Method B support. ✅
-
-- DAB cross-reference (Group 12A) is experimental, verified on-air. ✅
-
-- Extended ASCII character support (ISO-8859-1/Latin-1 encoding). ✅
-
-- Datasets Mode (Group 5A) for transparent data channel. ✅
+- EON (Enhanced Other Networks) Group 14B TA not implemented. ⚠️
 
 - No packaged EXE release yet
-
-- Support for RBDS variant. ✅
 
 - Support for UECP Input / output (planned)
 
