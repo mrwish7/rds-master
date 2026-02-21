@@ -357,6 +357,7 @@ default_state = {
     
     # Expert
     "ecc": "E3", "lic": "09", "tz_offset": 0.0, "en_ct": 1, "en_id": 1,
+    "en_pin": 0, "pin_day": 0, "pin_hour": 0, "pin_minute": 0,
     "ps_long_32": "RDS MASTER v1.1a", "en_lps": 1, "lps_centered": False, "lps_cr": True,
     "ptyn": "RDSMASTR", "en_ptyn": 1, "ptyn_centered": False,
     "en_dab": 0, "dab_channel": "12C", "dab_eid": "2E01", "dab_mode": 1, "dab_es_flag": 0,
@@ -2987,11 +2988,33 @@ class RDSScheduler:
             return RDSHelper.get_group_bits(10, g_ver, seg, (txt_bytes[seg*4]<<8)|txt_bytes[seg*4+1], (txt_bytes[seg*4+2]<<8)|txt_bytes[seg*4+3])
             
         elif g_type == 1:
-            # In manual mode, transmit if explicitly scheduled; in auto mode, check en_id flag
-            if not state["scheduler_auto"] or state["en_id"]:
-                vars = [0, 3]
-                vnt = vars[int(time.time()/2) % 2]
-                return RDSHelper.get_group_bits(1, g_ver, 0, (vnt << 12) | (int(state['ecc' if vnt==0 else 'lic'], 16) & 0xFF), 0)
+            # In manual mode, transmit if explicitly scheduled; in auto mode, check en_id or en_pin flag
+            if not state["scheduler_auto"] or state["en_id"] or state.get("en_pin", 0):
+                # Group 1A: ECC/LIC in Block 3, PIN in Block 4 (if enabled)
+                # Cycle between ECC (variant 0) and LIC (variant 3) in Block 3
+                variants = [('ecc', 0), ('lic', 3)] if state.get("en_id", 1) else [('ecc', 0)]
+
+                # Cycle through variants every 2 seconds
+                variant_idx = int(time.time() / 2) % len(variants)
+                variant_type, variant_code = variants[variant_idx]
+
+                # Block 3: ECC or LIC with variant code in upper nibble
+                ecc_lic_value = int(state['ecc' if variant_type == 'ecc' else 'lic'], 16) & 0xFF
+                block3 = (variant_code << 12) | ecc_lic_value
+
+                # Block 4: PIN if enabled, otherwise 0
+                block4 = 0
+                if get_effective_value("en_pin"):
+                    # Programme Item Number (PIN) format - RDS Standard
+                    # Block 4 contains 16-bit PIN: day (5 bits, MSB) + hour (5 bits) + minute (6 bits, LSB)
+                    day = int(get_effective_value("pin_day")) & 0x1F  # 5 bits (0-31)
+                    hour = int(get_effective_value("pin_hour")) & 0x1F  # 5 bits (0-23)
+                    minute = int(get_effective_value("pin_minute")) & 0x3F  # 6 bits (0-59)
+
+                    # Pack PIN into 16-bit value: [day:5][hour:5][minute:6]
+                    block4 = (day << 11) | (hour << 6) | minute
+
+                return RDSHelper.get_group_bits(1, g_ver, 0, block3, block4)
 
         elif g_type == 12 and (not state["scheduler_auto"] or state.get("en_dab")):
             # Group 12A: ODA data for DAB linkage (Ensemble table)
@@ -5051,6 +5074,46 @@ UI_HTML = r"""
                          <div><label>Enable ID (1A)</label><input type="checkbox" class="toggle-checkbox" id="en_id" {% if state.en_id %}checked{% endif %} onchange="sync()"></div>
                      </div>
                  </div>
+
+                 <div class="section">
+                    <div class="section-header">Programme Item Number (PIN) - Group 1A</div>
+                    <div class="section-body">
+                         <div class="flex justify-between items-center mb-2">
+                             <div>
+                                 <label>Enable PIN</label>
+                                 <div class="text-[9px] text-gray-500">Broadcast programme start time (day, hour, minute)</div>
+                             </div>
+                             <input type="checkbox" class="toggle-checkbox" id="en_pin" {% if state.en_pin %}checked{% endif %} onchange="sync()">
+                         </div>
+                         <div class="grid grid-cols-3 gap-2">
+                             <div>
+                                 <label>Day (1-31, 0=invalid)</label>
+                                 <select id="pin_day" onchange="sync()">
+                                     <option value="0" {% if state.pin_day == 0 %}selected{% endif %}>0 (Invalid)</option>
+                                     {% for d in range(1, 32) %}
+                                     <option value="{{d}}" {% if state.pin_day == d %}selected{% endif %}>{{d}}</option>
+                                     {% endfor %}
+                                 </select>
+                             </div>
+                             <div>
+                                 <label>Hour (0-23)</label>
+                                 <select id="pin_hour" onchange="sync()">
+                                     {% for h in range(0, 24) %}
+                                     <option value="{{h}}" {% if state.pin_hour == h %}selected{% endif %}>{{"%02d"|format(h)}}</option>
+                                     {% endfor %}
+                                 </select>
+                             </div>
+                             <div>
+                                 <label>Minute (0-59)</label>
+                                 <select id="pin_minute" onchange="sync()">
+                                     {% for m in range(0, 60) %}
+                                     <option value="{{m}}" {% if state.pin_minute == m %}selected{% endif %}>{{"%02d"|format(m)}}</option>
+                                     {% endfor %}
+                                 </select>
+                             </div>
+                         </div>
+                    </div>
+                 </div>
                  
                  <div class="section">
                     <div class="section-header">Dynamic PTYN</div>
@@ -5255,7 +5318,7 @@ UI_HTML = r"""
                          <div class="flex justify-between items-center mb-3">
                              <div>
                                  <label>Dynamic RDS Parameter Control</label>
-                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN) from JSON data</div>
+                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN, PIN) from JSON data</div>
                                  <div class="text-[9px] text-amber-600 font-semibold">⚠️ Changes take effect immediately</div>
                              </div>
                              <input type="checkbox" class="toggle-checkbox" id="dynamic_control_enabled" {% if state.dynamic_control_enabled %}checked{% endif %} onchange="sync()">
@@ -5923,6 +5986,10 @@ UI_HTML = r"""
                             <option value="tp">TP (Traffic Programme)</option>
                             <option value="ta">TA (Traffic Announcement)</option>
                             <option value="pi">PI (Programme Identification)</option>
+                            <option value="en_pin">PIN Enable</option>
+                            <option value="pin_day">PIN Day (1-31)</option>
+                            <option value="pin_hour">PIN Hour (0-23)</option>
+                            <option value="pin_minute">PIN Minute (0-59)</option>
                         </select>
                     </div>
 
@@ -8837,6 +8904,7 @@ UI_HTML = r"""
                 
                 ptyn: getVal('ptyn'), en_ptyn: getVal('en_ptyn'), ptyn_centered: getVal('ptyn_centered'),
                 ecc: getVal('ecc'), lic: getVal('lic'), tz_offset: getVal('tz_offset'), en_ct: getVal('en_ct'), en_id: getVal('en_id'),
+                en_pin: getVal('en_pin'), pin_day: getVal('pin_day'), pin_hour: getVal('pin_hour'), pin_minute: getVal('pin_minute'),
                 ps_long_32: getVal('ps_long_32'), en_lps: getVal('en_lps'), lps_centered: getVal('lps_centered'), lps_cr: getVal('lps_cr'),
                 en_dab: getVal('en_dab'), dab_channel: getVal('dab_channel'),
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
