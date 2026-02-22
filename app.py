@@ -2771,9 +2771,8 @@ class RDSScheduler:
                 segment = self.tdc_5a_ptr % num_segments
                 self.tdc_5a_ptr += 1
 
-                # Block 2 tail: 5-bit address (channel number)
-                channel = state.get("tdc_5a_channel", 0) & 0x1F
-                b2_tail = channel
+                # Block 2 tail: 5-bit address (segment number 0-31)
+                b2_tail = segment & 0x1F
 
                 # Blocks 3 and 4: 4 bytes of data (2 per block)
                 offset = segment * 4
@@ -2829,9 +2828,8 @@ class RDSScheduler:
                 segment = self.tdc_5b_ptr % num_segments
                 self.tdc_5b_ptr += 1
 
-                # Block 2 tail: 5-bit address (channel number)
-                channel = state.get("tdc_5b_channel", 0) & 0x1F
-                b2_tail = channel
+                # Block 2 tail: 5-bit address (segment number 0-31)
+                b2_tail = segment & 0x1F
 
                 # Block 3: PI code (as per Type 5B specification)
                 try:
