@@ -18,6 +18,9 @@ from flask_socketio import SocketIO
 from scipy import signal as dsp_signal
 from scipy.fft import fft
 
+# --- VERSION ---
+VERSION = "v1.1b"
+
 # --- SETTINGS ---
 # Host API filtering: auto-detect based on OS, can be overridden via RDS_HOSTAPI env var
 # On Windows, defaults to MME. On other platforms, no filtering.
@@ -358,7 +361,7 @@ default_state = {
     # Expert
     "ecc": "E3", "lic": "09", "tz_offset": 0.0, "en_ct": 1, "en_id": 1,
     "en_pin": 0, "pin_day": 0, "pin_hour": 0, "pin_minute": 0,
-    "ps_long_32": "RDS MASTER v1.1a", "en_lps": 1, "lps_centered": False, "lps_cr": True,
+    "ps_long_32": f"RDS MASTER {VERSION}", "en_lps": 1, "lps_centered": False, "lps_cr": True,
     "ptyn": "RDSMASTR", "en_ptyn": 1, "ptyn_centered": False,
     "en_dab": 0, "dab_channel": "12C", "dab_eid": "2E01", "dab_mode": 1, "dab_es_flag": 0,
     "dab_sid": "0000", "dab_variant": 0,
@@ -378,10 +381,23 @@ default_state = {
 
     # Settings
     "rds_freq": 57000,
-    
+
+    # Transparent Data Channels (TDC) - Type 5A/5B
+    "en_tdc_5a": False,  # Enable TDC on 5A
+    "en_tdc_5b": False,  # Enable TDC on 5B
+    "tdc_5a_channel": 0,  # Channel number for 5A (0-31)
+    "tdc_5b_channel": 0,  # Channel number for 5B (0-31)
+    "tdc_5a_text": "",  # Custom text for 5A
+    "tdc_5b_text": "",  # Custom text for 5B
+    "tdc_5a_mode": "custom",  # Mode: "custom", "pc_status"
+    "tdc_5b_mode": "custom",  # Mode: "custom", "pc_status"
+    "tdc_pc_show_cpu": True,  # Show CPU usage in PC status
+    "tdc_pc_show_temp": True,  # Show temperature in PC status
+    "tdc_pc_show_ip": True,  # Show local IP in PC status
+
     # Scheduler
-    "group_sequence": "0A 0A 2A 0A", 
-    "scheduler_auto": True 
+    "group_sequence": "0A 0A 2A 0A",
+    "scheduler_auto": True
 }
 
 state = default_state.copy()
@@ -1334,7 +1350,7 @@ def dynamic_control_loop():
                         
                         # Store as override (don't modify state - state is the fallback)
                         dynamic_overrides[rds_param] = new_value
-                        
+
                 except urllib.error.URLError as e:
                     # Network error - silently continue
                     pass
@@ -1420,6 +1436,102 @@ class RDSHelper:
             for i in range(25, -1, -1):
                 bits.append((b >> i) & 1)
         return bits
+
+class PCStatusMonitor:
+    """Helper class to gather PC status information for TDC"""
+    _cache = {}  # Cache status values to prevent constant text changes
+    _cache_time = {}  # Track when each value was last updated
+
+    @staticmethod
+    def get_cpu_usage():
+        """Get CPU usage percentage (cached for 2 seconds)"""
+        now = time.time()
+        if 'cpu' not in PCStatusMonitor._cache_time or (now - PCStatusMonitor._cache_time['cpu']) > 2.0:
+            try:
+                import psutil
+                PCStatusMonitor._cache['cpu'] = f"{psutil.cpu_percent(interval=0.1):.0f}%"
+                PCStatusMonitor._cache_time['cpu'] = now
+            except:
+                PCStatusMonitor._cache['cpu'] = "N/A"
+                PCStatusMonitor._cache_time['cpu'] = now
+        return PCStatusMonitor._cache.get('cpu', 'N/A')
+
+    @staticmethod
+    def get_cpu_temp():
+        """Get CPU temperature (cached for 5 seconds)"""
+        now = time.time()
+        if 'temp' not in PCStatusMonitor._cache_time or (now - PCStatusMonitor._cache_time['temp']) > 5.0:
+            try:
+                import psutil
+                temps = psutil.sensors_temperatures()
+                if temps:
+                    # Try common sensor names
+                    for name in ['coretemp', 'cpu_thermal', 'k10temp', 'zenpower']:
+                        if name in temps:
+                            temp = temps[name][0].current
+                            PCStatusMonitor._cache['temp'] = f"{temp:.0f}C"
+                            PCStatusMonitor._cache_time['temp'] = now
+                            return PCStatusMonitor._cache['temp']
+                PCStatusMonitor._cache['temp'] = "N/A"
+                PCStatusMonitor._cache_time['temp'] = now
+            except:
+                PCStatusMonitor._cache['temp'] = "N/A"
+                PCStatusMonitor._cache_time['temp'] = now
+        return PCStatusMonitor._cache.get('temp', 'N/A')
+
+    @staticmethod
+    def get_local_ip():
+        """Get local IP address (cached for 30 seconds)"""
+        now = time.time()
+        if 'ip' not in PCStatusMonitor._cache_time or (now - PCStatusMonitor._cache_time['ip']) > 30.0:
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(0.1)
+                try:
+                    s.connect(('10.255.255.255', 1))
+                    ip = s.getsockname()[0]
+                except:
+                    ip = '127.0.0.1'
+                finally:
+                    s.close()
+                PCStatusMonitor._cache['ip'] = ip
+                PCStatusMonitor._cache_time['ip'] = now
+            except:
+                PCStatusMonitor._cache['ip'] = "N/A"
+                PCStatusMonitor._cache_time['ip'] = now
+        return PCStatusMonitor._cache.get('ip', 'N/A')
+
+    @staticmethod
+    def get_hostname():
+        """Get system hostname"""
+        if 'hostname' not in PCStatusMonitor._cache:
+            try:
+                import socket
+                PCStatusMonitor._cache['hostname'] = socket.gethostname()
+            except:
+                PCStatusMonitor._cache['hostname'] = "N/A"
+        return PCStatusMonitor._cache['hostname']
+
+    @staticmethod
+    def format_pc_status():
+        """Format PC status string based on enabled options"""
+        parts = []
+
+        # Always add RDS-MASTER branding with version
+        parts.append(f"RDS-MASTER {VERSION}")
+
+        # Add system info
+        if state.get("tdc_pc_show_cpu", True):
+            parts.append(f"CPU: {PCStatusMonitor.get_cpu_usage()}")
+        if state.get("tdc_pc_show_temp", True):
+            temp = PCStatusMonitor.get_cpu_temp()
+            if temp != "N/A":
+                parts.append(f"Temp: {temp}")
+        if state.get("tdc_pc_show_ip", True):
+            parts.append(f"IP: {PCStatusMonitor.get_local_ip()}")
+
+        return " | ".join(parts) if parts else "RDS-MASTER {VERSION}"
 
 class RDSScheduler:
     def __init__(self):
@@ -2070,6 +2182,9 @@ class RDSScheduler:
                 pass  # Skip EON if parsing fails
         if state["en_ptyn"]: seq.append((10,0))  # +4% (single group)
         if state["en_id"]: seq.append((1,0))
+        # Transparent Data Channels
+        if state.get("en_tdc_5a"): seq.append((5,0))  # Group 5A
+        if state.get("en_tdc_5b"): seq.append((5,1))  # Group 5B
         # Half 3A frequency: only add on even counter cycles
         # Group 3A is ODA announcement - add if any ODA is active
         needs_3a = False
@@ -2147,7 +2262,8 @@ class RDSScheduler:
         if state["scheduler_auto"]:
             # Recompute schedule only when relevant state changes or at the start of each cycle.
             sched_sig = (state["en_lps"], state.get("en_eon"), state["en_ptyn"], state["en_id"],
-                         state.get("en_dab"), state["en_rt_plus"], self._custom_groups_cache_str)
+                         state.get("en_dab"), state["en_rt_plus"], state.get("en_tdc_5a"),
+                         state.get("en_tdc_5b"), self._custom_groups_cache_str)
             cached = getattr(self, '_auto_schedule_cache', None)
             if (cached is None or self._auto_schedule_sig != sched_sig or
                     (self.schedule_ptr > 0 and self.schedule_ptr % len(cached) == 0)):
@@ -2595,7 +2711,141 @@ class RDSScheduler:
                  # Emit ODA announcement
                  return RDSHelper.get_group_bits(3, 0, current_oda["group_type"], 
                                                   current_oda["msg"], current_oda["aid"])
-        
+
+        elif g_type == 5:
+            # Group 5A/5B: Transparent Data Channels (TDC)
+            # Type 5A: Full transparent data (4 segments)
+            # Type 5B: PI code in block 3 + transparent data
+
+            # Initialize TDC state tracking if needed
+            if not hasattr(self, 'tdc_5a_ptr'):
+                self.tdc_5a_ptr = 0
+                self.tdc_5b_ptr = 0
+                self.tdc_last_text_5a = ""
+                self.tdc_last_text_5b = ""
+
+            # Get the text to send based on mode
+            if g_ver == 0:  # 5A
+                # Check if dynamic control is providing text
+                if "tdc_5a_text" in dynamic_overrides and dynamic_overrides["tdc_5a_text"]:
+                    # Dynamic control active - use the override text
+                    text = dynamic_overrides["tdc_5a_text"]
+                    # For custom text, only reset pointer if text actually changed
+                    if text != self.tdc_last_text_5a:
+                        self.tdc_last_text_5a = text
+                        self.tdc_5a_ptr = 0
+                else:
+                    # No dynamic override - use local mode setting (fallback to PC status)
+                    mode = state.get("tdc_5a_mode", "custom")
+                    if mode == "pc_status":
+                        text = PCStatusMonitor.format_pc_status()
+                        # For PC status, update text but don't reset pointer (let it cycle)
+                        self.tdc_last_text_5a = text
+                    else:
+                        text = state.get("tdc_5a_text", "")
+                        # For custom text, only reset pointer if text actually changed
+                        if text != self.tdc_last_text_5a:
+                            self.tdc_last_text_5a = text
+                            self.tdc_5a_ptr = 0
+
+                # Support up to 64 characters with CR terminator
+                text = text[:64]  # Truncate to 64 chars max
+
+                # Convert to RDS bytes and add CR (0x0D) terminator
+                text_bytes = text_to_rds_bytes(text)
+                actual_length = len(text_bytes)
+
+                # Add CR terminator if there's room
+                if actual_length < 64:
+                    text_bytes = text_bytes + bytes([0x0D])  # Carriage Return
+                    actual_length += 1
+
+                # Calculate segments needed (round up to nearest segment boundary)
+                # Each segment is 4 bytes, so divide by 4 and round up
+                num_segments = (actual_length + 3) // 4  # Round up division
+
+                # Pad to segment boundary
+                text_bytes = text_bytes.ljust(num_segments * 4, b'\x20')
+
+                # Cycle through only the segments we need
+                segment = self.tdc_5a_ptr % num_segments
+                self.tdc_5a_ptr += 1
+
+                # Block 2 tail: 5-bit address (channel number)
+                channel = state.get("tdc_5a_channel", 0) & 0x1F
+                b2_tail = channel
+
+                # Blocks 3 and 4: 4 bytes of data (2 per block)
+                offset = segment * 4
+                b3_val = (text_bytes[offset] << 8) | text_bytes[offset + 1]
+                b4_val = (text_bytes[offset + 2] << 8) | text_bytes[offset + 3]
+
+                return RDSHelper.get_group_bits(5, 0, b2_tail, b3_val, b4_val)
+
+            else:  # 5B
+                # Check if dynamic control is providing text
+                if "tdc_5b_text" in dynamic_overrides and dynamic_overrides["tdc_5b_text"]:
+                    # Dynamic control active - use the override text
+                    text = dynamic_overrides["tdc_5b_text"]
+                    # For custom text, only reset pointer if text actually changed
+                    if text != self.tdc_last_text_5b:
+                        self.tdc_last_text_5b = text
+                        self.tdc_5b_ptr = 0
+                else:
+                    # No dynamic override - use local mode setting (fallback to PC status)
+                    mode = state.get("tdc_5b_mode", "custom")
+                    if mode == "pc_status":
+                        text = PCStatusMonitor.format_pc_status()
+                        # For PC status, update text but don't reset pointer (let it cycle)
+                        self.tdc_last_text_5b = text
+                    else:
+                        text = state.get("tdc_5b_text", "")
+                        # For custom text, only reset pointer if text actually changed
+                        if text != self.tdc_last_text_5b:
+                            self.tdc_last_text_5b = text
+                            self.tdc_5b_ptr = 0
+
+                # Type 5B has PI in block 3, so only 2 bytes in block 4
+                # Support up to 64 characters with CR terminator
+                text = text[:64]  # Truncate to 64 chars max
+
+                # Convert to RDS bytes and add CR (0x0D) terminator
+                text_bytes = text_to_rds_bytes(text)
+                actual_length = len(text_bytes)
+
+                # Add CR terminator if there's room
+                if actual_length < 64:
+                    text_bytes = text_bytes + bytes([0x0D])  # Carriage Return
+                    actual_length += 1
+
+                # Calculate segments needed (round up to nearest segment boundary)
+                # Each segment is 2 bytes, so divide by 2 and round up
+                num_segments = (actual_length + 1) // 2  # Round up division
+
+                # Pad to segment boundary
+                text_bytes = text_bytes.ljust(num_segments * 2, b'\x20')
+
+                # Cycle through only the segments we need
+                segment = self.tdc_5b_ptr % num_segments
+                self.tdc_5b_ptr += 1
+
+                # Block 2 tail: 5-bit address (channel number)
+                channel = state.get("tdc_5b_channel", 0) & 0x1F
+                b2_tail = channel
+
+                # Block 3: PI code (as per Type 5B specification)
+                try:
+                    pi_val = int(get_effective_value("pi"), 16)
+                except:
+                    pi_val = 0x0000
+                b3_val = pi_val
+
+                # Block 4: 2 bytes of data
+                offset = segment * 2
+                b4_val = (text_bytes[offset] << 8) | text_bytes[offset + 1]
+
+                return RDSHelper.get_group_bits(5, 1, b2_tail, b3_val, b4_val)
+
         elif g_type == 11 and (not state["scheduler_auto"] or state["en_rt_plus"]):
              # --- CORRECTED RT+ PACKING (37 Bits split across blocks) ---
              # Requires 2 tags. If we have 1, we add a dummy. If we have >2, we cycle? 
@@ -3606,7 +3856,7 @@ def run_audio():
 def index():
     if not session.get('auth'): return redirect(url_for('login'))
     inputs, outputs = get_valid_devices()
-    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, auto_start=auto_start, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config, site_name=site_name)
+    return render_template_string(UI_HTML, inputs=inputs, outputs=outputs, state=state, auto_start=auto_start, pty_list_rds=PTY_LIST_RDS, pty_list_rbds=PTY_LIST_RBDS, auth_config=auth_config, site_name=site_name, version=VERSION)
 
 @app.route('/login', methods=['GET','POST'])
 def login():
@@ -3619,7 +3869,7 @@ def login():
             return redirect(url_for('index'))
         else:
             msg = "Invalid credentials"
-    return render_template_string(LOGIN_HTML, msg=msg, user=auth_config.get('user',''), site_name=site_name)
+    return render_template_string(LOGIN_HTML, msg=msg, user=auth_config.get('user',''), site_name=site_name, version=VERSION)
 
 @app.route('/logout')
 def logout():
@@ -4186,7 +4436,7 @@ LOGIN_HTML = r"""
                     <path d="M2602.81 299.932V51.4321H2698.12C2711.61 51.4321 2723.8 54.8046 2734.69 61.5496C2745.58 68.2946 2754.21 77.3471 2760.6 88.7071C2766.99 99.9488 2770.19 112.433 2770.19 126.16C2770.19 137.401 2768.12 147.755 2763.98 157.222C2759.95 166.57 2754.27 174.676 2746.94 181.54C2739.72 188.403 2731.38 193.61 2721.91 197.16L2781.37 299.932H2731.49L2673.98 201.065H2646.12V299.932H2602.81ZM2646.12 157.755H2693.15C2699.31 157.755 2704.93 156.216 2710.02 153.14C2715.1 150.063 2719.19 145.921 2722.26 140.715C2725.34 135.508 2726.88 129.71 2726.88 123.32C2726.88 116.811 2725.34 110.954 2722.26 105.747C2719.19 100.54 2715.1 96.3988 2710.02 93.3221C2704.93 90.2455 2699.31 88.7071 2693.15 88.7071H2646.12V157.755Z" fill="#E52976"/>
                 </svg>
             </div>
-            <div class="text-xs text-gray-400">v1.1a • {{site_name}}</div>
+            <div class="text-xs text-gray-400">{{version}} • {{site_name}}</div>
         </div>
         {% if msg %}
         <div class="mb-4 text-sm text-red-300 bg-red-900/40 border border-red-700 rounded px-3 py-2">{{ msg }}</div>
@@ -5141,6 +5391,91 @@ UI_HTML = r"""
                  </div>
 
                  <div class="section">
+                    <div class="section-header">Transparent Data Channels (TDC) - Groups 5A/5B</div>
+                    <div class="section-body">
+                         <div class="text-[9px] text-gray-500 mb-3">
+                             Send custom data or PC status info on Type 5A/5B groups. Channel numbers identify different data streams (0-31).
+                         </div>
+
+                         <!-- Type 5A Configuration -->
+                         <div class="mb-4 p-2 border border-gray-700 rounded">
+                             <div class="flex justify-between items-center mb-2">
+                                 <div>
+                                     <label class="font-semibold text-blue-300">Type 5A (Full Data)</label>
+                                     <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (16 segments × 4 bytes)</div>
+                                 </div>
+                                 <input type="checkbox" class="toggle-checkbox" id="en_tdc_5a" {% if state.en_tdc_5a %}checked{% endif %} onchange="sync()">
+                             </div>
+                             <div class="grid grid-cols-2 gap-2 mb-2">
+                                 <div>
+                                     <label>Channel Number (0-31)</label>
+                                     <input type="number" id="tdc_5a_channel" min="0" max="31" value="{{state.tdc_5a_channel}}" onchange="sync()">
+                                 </div>
+                                 <div>
+                                     <label>Mode</label>
+                                     <select id="tdc_5a_mode" onchange="sync(); toggleTdcMode('5a')">
+                                         <option value="custom" {% if state.tdc_5a_mode == 'custom' %}selected{% endif %}>Custom Text</option>
+                                         <option value="pc_status" {% if state.tdc_5a_mode == 'pc_status' %}selected{% endif %}>PC Status</option>
+                                     </select>
+                                 </div>
+                             </div>
+                             <div id="tdc_5a_text_container" {% if state.tdc_5a_mode == 'pc_status' %}style="display:none"{% endif %}>
+                                 <label>Custom Text (up to 64 chars, CR-terminated)</label>
+                                 <input type="text" id="tdc_5a_text" maxlength="64" value="{{state.tdc_5a_text}}" onchange="sync()">
+                             </div>
+                         </div>
+
+                         <!-- Type 5B Configuration -->
+                         <div class="mb-4 p-2 border border-gray-700 rounded">
+                             <div class="flex justify-between items-center mb-2">
+                                 <div>
+                                     <label class="font-semibold text-blue-300">Type 5B (PI + Data)</label>
+                                     <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (32 segments × 2 bytes, Block 3 has PI)</div>
+                                 </div>
+                                 <input type="checkbox" class="toggle-checkbox" id="en_tdc_5b" {% if state.en_tdc_5b %}checked{% endif %} onchange="sync()">
+                             </div>
+                             <div class="grid grid-cols-2 gap-2 mb-2">
+                                 <div>
+                                     <label>Channel Number (0-31)</label>
+                                     <input type="number" id="tdc_5b_channel" min="0" max="31" value="{{state.tdc_5b_channel}}" onchange="sync()">
+                                 </div>
+                                 <div>
+                                     <label>Mode</label>
+                                     <select id="tdc_5b_mode" onchange="sync(); toggleTdcMode('5b')">
+                                         <option value="custom" {% if state.tdc_5b_mode == 'custom' %}selected{% endif %}>Custom Text</option>
+                                         <option value="pc_status" {% if state.tdc_5b_mode == 'pc_status' %}selected{% endif %}>PC Status</option>
+                                     </select>
+                                 </div>
+                             </div>
+                             <div id="tdc_5b_text_container" {% if state.tdc_5b_mode == 'pc_status' %}style="display:none"{% endif %}>
+                                 <label>Custom Text (up to 64 chars, CR-terminated)</label>
+                                 <input type="text" id="tdc_5b_text" maxlength="64" value="{{state.tdc_5b_text}}" onchange="sync()">
+                             </div>
+                         </div>
+
+                         <!-- PC Status Options (shown when either mode is pc_status) -->
+                         <div id="tdc_pc_options" {% if state.tdc_5a_mode != 'pc_status' and state.tdc_5b_mode != 'pc_status' %}style="display:none"{% endif %} class="p-2 border border-blue-700 rounded bg-blue-950 bg-opacity-20">
+                             <label class="font-semibold text-blue-300 mb-2 block">PC Status Display Options</label>
+                             <div class="text-[9px] text-gray-400 mb-2">Format: RDS-MASTER v1.1b | CPU: XX% | Temp: XXC | IP: XXX.XXX.XXX.XXX</div>
+                             <div class="grid grid-cols-3 gap-2 text-sm">
+                                 <label class="flex items-center gap-2">
+                                     <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_cpu" {% if state.tdc_pc_show_cpu %}checked{% endif %} onchange="sync()">
+                                     <span>Show CPU</span>
+                                 </label>
+                                 <label class="flex items-center gap-2">
+                                     <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_temp" {% if state.tdc_pc_show_temp %}checked{% endif %} onchange="sync()">
+                                     <span>Show Temp</span>
+                                 </label>
+                                 <label class="flex items-center gap-2">
+                                     <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_ip" {% if state.tdc_pc_show_ip %}checked{% endif %} onchange="sync()">
+                                     <span>Show IP</span>
+                                 </label>
+                             </div>
+                         </div>
+                    </div>
+                 </div>
+
+                 <div class="section">
                     <div class="section-header">DAB Cross-Reference (Group 12A)</div>
                     <div class="section-body">
                          <div class="flex justify-between items-center mb-2">
@@ -5318,7 +5653,7 @@ UI_HTML = r"""
                          <div class="flex justify-between items-center mb-3">
                              <div>
                                  <label>Dynamic RDS Parameter Control</label>
-                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN, PIN) from JSON data</div>
+                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN, PIN, TDC) from JSON data</div>
                                  <div class="text-[9px] text-amber-600 font-semibold">⚠️ Changes take effect immediately</div>
                              </div>
                              <input type="checkbox" class="toggle-checkbox" id="dynamic_control_enabled" {% if state.dynamic_control_enabled %}checked{% endif %} onchange="sync()">
@@ -5990,6 +6325,10 @@ UI_HTML = r"""
                             <option value="pin_day">PIN Day (1-31)</option>
                             <option value="pin_hour">PIN Hour (0-23)</option>
                             <option value="pin_minute">PIN Minute (0-59)</option>
+                            <option value="tdc_5a_text">TDC 5A Text</option>
+                            <option value="tdc_5b_text">TDC 5B Text</option>
+                            <option value="en_tdc_5a">TDC 5A Enable</option>
+                            <option value="en_tdc_5b">TDC 5B Enable</option>
                         </select>
                     </div>
 
@@ -8646,6 +8985,26 @@ UI_HTML = r"""
             if (tgt) tgt.classList.add('active');
         }
 
+        function toggleTdcMode(type) {
+            // type is either '5a' or '5b'
+            const mode = document.getElementById('tdc_' + type + '_mode').value;
+            const textContainer = document.getElementById('tdc_' + type + '_text_container');
+            const pcOptions = document.getElementById('tdc_pc_options');
+
+            if (mode === 'pc_status') {
+                textContainer.style.display = 'none';
+                pcOptions.style.display = 'block';
+            } else {
+                textContainer.style.display = 'block';
+                // Check if the other type is also in pc_status mode
+                const otherType = type === '5a' ? '5b' : '5a';
+                const otherMode = document.getElementById('tdc_' + otherType + '_mode').value;
+                if (otherMode !== 'pc_status') {
+                    pcOptions.style.display = 'none';
+                }
+            }
+        }
+
         function updatePwr() {
             let btn = document.getElementById('pwrBtn');
             if(running) {
@@ -8919,7 +9278,20 @@ UI_HTML = r"""
                 rds2_num_carriers: getVal('rds2_num_carriers'),
                 rds2_carrier1_level: getVal('rds2_carrier1_level'),
                 rds2_carrier2_level: getVal('rds2_carrier2_level'),
-                rds2_carrier3_level: getVal('rds2_carrier3_level')
+                rds2_carrier3_level: getVal('rds2_carrier3_level'),
+
+                // Transparent Data Channels (TDC)
+                en_tdc_5a: getVal('en_tdc_5a'),
+                en_tdc_5b: getVal('en_tdc_5b'),
+                tdc_5a_channel: getVal('tdc_5a_channel'),
+                tdc_5b_channel: getVal('tdc_5b_channel'),
+                tdc_5a_text: getVal('tdc_5a_text'),
+                tdc_5b_text: getVal('tdc_5b_text'),
+                tdc_5a_mode: getVal('tdc_5a_mode'),
+                tdc_5b_mode: getVal('tdc_5b_mode'),
+                tdc_pc_show_cpu: getVal('tdc_pc_show_cpu'),
+                tdc_pc_show_temp: getVal('tdc_pc_show_temp'),
+                tdc_pc_show_ip: getVal('tdc_pc_show_ip')
             };
             socket.emit('update', data);
         }
