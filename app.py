@@ -995,7 +995,9 @@ def switch_dataset(dataset_num):
         # Save current state (auto_start will be cleaned by save_datasets)
         datasets[str(current_dataset)]['state'] = dict(state)
         save_datasets()
-        # Load new dataset state
+        # Reset to default state first, then apply new dataset state
+        state.clear()
+        state.update(default_state.copy())
         new_state = datasets[dataset_num]['state'].copy()
         new_state.pop('auto_start', None)  # Ensure auto_start not in state
         state.update(new_state)
@@ -1303,30 +1305,49 @@ def dynamic_control_loop():
                         new_value = int(value) if str(value).isdigit() else 0
                     
                     elif mapping_type == "conditional":
-                        # If value = X, then output Y, otherwise use default (no override)
-                        condition_value = rule.get("condition_value", "")
-                        output_value = rule.get("output_value", "")
-                        
-                        # Check if current value matches the condition
-                        if str(value) == str(condition_value):
-                            # Condition met - apply output value with proper type conversion
-                            if rds_param in ["ms", "tp", "ta"]:
-                                new_value = int(output_value) if str(output_value).isdigit() else 0
-                            elif rds_param == "pty":
-                                new_value = max(0, min(31, int(output_value))) if str(output_value).isdigit() else 0
-                            elif rds_param == "pi":
-                                # Validate hex format
-                                try:
-                                    new_value = format(int(str(output_value), 16), '04X')
-                                except:
-                                    continue
-                            elif rds_param == "ptyn":
-                                # Truncate to 8 characters and apply EBU Latin
-                                new_value = convert_to_ebu_latin(str(output_value)[:8])
-                            else:
-                                new_value = output_value
-                        else:
-                            # Condition not met - remove override to fall back to default
+                        # Support multiple conditions: if value matches any condition, apply corresponding output
+                        # Supports two formats:
+                        # 1. New format with multiple conditions: {"conditions": [{"match": "X", "output": "Y"}, ...]}
+                        # 2. Old format (backward compat): {"condition_value": "X", "output_value": "Y"}
+
+                        conditions = rule.get("conditions", [])
+
+                        # Backward compatibility: convert old single-condition format to new array format
+                        if not conditions and "condition_value" in rule:
+                            conditions = [{
+                                "match": rule.get("condition_value", ""),
+                                "output": rule.get("output_value", "")
+                            }]
+
+                        # Try to match against all conditions
+                        matched = False
+                        for condition in conditions:
+                            condition_match = condition.get("match", "")
+                            output_value = condition.get("output", "")
+
+                            # Check if current value matches this condition
+                            if str(value) == str(condition_match):
+                                matched = True
+                                # Condition met - apply output value with proper type conversion
+                                if rds_param in ["ms", "tp", "ta"]:
+                                    new_value = int(output_value) if str(output_value).isdigit() else 0
+                                elif rds_param == "pty":
+                                    new_value = max(0, min(31, int(output_value))) if str(output_value).isdigit() else 0
+                                elif rds_param == "pi":
+                                    # Validate hex format
+                                    try:
+                                        new_value = format(int(str(output_value), 16), '04X')
+                                    except:
+                                        continue
+                                elif rds_param == "ptyn":
+                                    # Truncate to 8 characters and apply EBU Latin
+                                    new_value = convert_to_ebu_latin(str(output_value)[:8])
+                                else:
+                                    new_value = output_value
+                                break  # Stop checking other conditions once matched
+
+                        if not matched:
+                            # No condition matched - remove override to fall back to default
                             if rds_param in dynamic_overrides:
                                 del dynamic_overrides[rds_param]
                             continue  # Skip setting new_value so it doesn't get applied
@@ -1380,7 +1401,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -2394,9 +2415,15 @@ class RDSScheduler:
                      if self.af_ptr == 0:
                          b3, self.af_ptr = (224+len(afs))<<8 | self.freq_code(afs[0]), 1
                      else:
-                         f1 = self.freq_code(afs[self.af_ptr])
-                         f2 = self.freq_code(afs[self.af_ptr+1]) if self.af_ptr+1 < len(afs) else 205
-                         b3, self.af_ptr = (f1<<8)|f2, (self.af_ptr+2) if self.af_ptr+2 < len(afs) else 0
+                         # Check if we have more frequencies to send
+                         if self.af_ptr < len(afs):
+                             f1 = self.freq_code(afs[self.af_ptr])
+                             f2 = self.freq_code(afs[self.af_ptr+1]) if self.af_ptr+1 < len(afs) else 205
+                             b3, self.af_ptr = (f1<<8)|f2, (self.af_ptr+2) if self.af_ptr+2 < len(afs) else 0
+                         else:
+                             # All frequencies sent, loop back
+                             self.af_ptr = 0
+                             b3 = (224+len(afs))<<8 | self.freq_code(afs[0])
 
                  elif afs and af_method == "B":
                      # Method B: Frequency pairs with tuning frequency indicator
@@ -2479,8 +2506,20 @@ class RDSScheduler:
             limit = 32 if state["rt_mode"] == "2B" else 64
             current_msg = None
 
-            # Check for new unified message system first
+            # Quick check: if RT text is "None" or empty AND no messages configured, skip Group 2A entirely
+            rt_text_check = get_effective_value("rt_text") or ""
             rt_messages = self.get_rt_messages()
+            if rt_text_check.strip() in ["", "None"] and not rt_messages:
+                # No valid RT - advance schedule and get next group type
+                if state["scheduler_auto"]:
+                    schedule = getattr(self, '_auto_schedule_cache', [(0,0)])
+                else:
+                    schedule = self.parse_schedule_string(state["group_sequence"])
+                g_type, g_ver = schedule[self.schedule_ptr % len(schedule)]
+                self.schedule_ptr += 1
+                return self.next()  # Recursively get next group
+
+            # Check for new unified message system first
             if rt_messages:
                 # New unified message system
                 current_msg, buf, raw = self.get_current_rt_message()
@@ -2668,22 +2707,20 @@ class RDSScheduler:
             return RDSHelper.get_group_bits(2, v, (buf<<4)|a, b3_val, b4_val)
 
         elif g_type == 3:
-             # Group 3A: ODA announcement for DAB, RT+, RDS2/RFT, and custom ODAs
+             # Group 3A: ODA announcement for DAB, RT+, and custom ODAs
              # Build list of all active ODAs
              active_odas = []
-             
+
              # Add DAB if enabled
              if state.get("en_dab"):
                  active_odas.append({"type": "dab", "group_type": 0x18, "aid": 0x0093, "msg": 0x0000})
-             
+
              # Add RT+ if enabled
              if state.get("en_rt_plus"):
                  active_odas.append({"type": "rtplus", "group_type": 22, "aid": 0x4BD7, "msg": 0x0000})
-             
-             # Add RDS2/RFT if enabled
-             if state.get("en_rds2"):
-                 active_odas.append({"type": "rds2", "group_type": 6, "aid": 0xFF7F, "msg": 0x0000})
-             
+
+             # NOTE: RDS2 ODA is NOT included here - it's only announced in the RDS2 stream, not in regular RDS
+
              # Add custom ODAs
              try:
                  custom_oda_json = state.get("custom_oda_list", "[]")
@@ -2817,12 +2854,12 @@ class RDSScheduler:
                     text_bytes = text_bytes + bytes([0x0D])  # Carriage Return
                     actual_length += 1
 
-                # Calculate segments needed (round up to nearest segment boundary)
-                # Each segment is 2 bytes, so divide by 2 and round up
-                num_segments = (actual_length + 1) // 2  # Round up division
+                # Calculate segments needed (round up to nearest segment boundary)  
+                # Each segment is 4 bytes (like 5A), so divide by 4 and round up
+                num_segments = (actual_length + 3) // 4  # Round up division
 
                 # Pad to segment boundary
-                text_bytes = text_bytes.ljust(num_segments * 2, b'\x20')
+                text_bytes = text_bytes.ljust(num_segments * 4, b'\x20')
 
                 # Cycle through only the segments we need
                 segment = self.tdc_5b_ptr % num_segments
@@ -2831,16 +2868,10 @@ class RDSScheduler:
                 # Block 2 tail: 5-bit address (segment number 0-31)
                 b2_tail = segment & 0x1F
 
-                # Block 3: PI code (as per Type 5B specification)
-                try:
-                    pi_val = int(get_effective_value("pi"), 16)
-                except:
-                    pi_val = 0x0000
-                b3_val = pi_val
-
-                # Block 4: 2 bytes of data
-                offset = segment * 2
-                b4_val = (text_bytes[offset] << 8) | text_bytes[offset + 1]
+                # Blocks 3 and 4: 4 bytes of data (2 per block) - same as 5A
+                offset = segment * 4
+                b3_val = (text_bytes[offset] << 8) | text_bytes[offset + 1]
+                b4_val = (text_bytes[offset + 2] << 8) | text_bytes[offset + 3]
 
                 return RDSHelper.get_group_bits(5, 1, b2_tail, b3_val, b4_val)
 
@@ -3196,7 +3227,7 @@ class RDSScheduler:
                 self.lps_seq_start_time, self.lps_ptr = time.time(), 0
                 dur, txt = self.lps_sequence[self.lps_seq_idx % len(self.lps_sequence)]
             if state['lps_cr']:
-                # Strip trailing spaces, append CR, then encode to UTF-8
+                # Strip trailing spaces, append CR, then encode to UTF-8 (Group 15 supports UTF-8)
                 txt_stripped = txt.rstrip()
                 lps_txt = (txt_stripped + '\r').encode('utf-8')
                 if len(lps_txt) < 4:
@@ -3720,7 +3751,11 @@ class RDSDSP:
         # Normalise by π/4: the FIR-filtered Manchester biphase signal has a worst-case
         # peak of 4/π (≈1.27), so multiply by π/4 to make the stated % equal the true peak.
         # This mirrors the pilot, whose peak is exactly lvl_pilot (pure sine, amplitude 1).
-        rds_sig = shaped * (np.pi / 4.0) * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
+        if lvl_rds > 0:
+            rds_sig = shaped * (np.pi / 4.0) * np.sin(2 * np.pi * rds_freq * t + self.p_rds) * lvl_rds
+        else:
+            rds_sig = 0.0  # No signal when level is 0%
+
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
@@ -5427,8 +5462,8 @@ UI_HTML = r"""
                          <div class="mb-4 p-2 border border-gray-700 rounded">
                              <div class="flex justify-between items-center mb-2">
                                  <div>
-                                     <label class="font-semibold text-blue-300">Type 5B (PI + Data)</label>
-                                     <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (32 segments × 2 bytes, Block 3 has PI)</div>
+                                     <label class="font-semibold text-blue-300">Type 5B (Full Data)</label>
+                                     <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (16 segments × 4 bytes)</div>
                                  </div>
                                  <input type="checkbox" class="toggle-checkbox" id="en_tdc_5b" {% if state.en_tdc_5b %}checked{% endif %} onchange="sync()">
                              </div>
