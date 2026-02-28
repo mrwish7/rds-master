@@ -397,7 +397,12 @@ default_state = {
 
     # Scheduler
     "group_sequence": "0A 0A 2A 0A",
-    "scheduler_auto": True
+    "scheduler_auto": True,
+
+    # UECP server
+    "uecp_enabled": False,
+    "uecp_port": 4001,
+    "uecp_host": "0.0.0.0",
 }
 
 state = default_state.copy()
@@ -1401,7 +1406,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -3939,6 +3944,50 @@ def update_settings():
     if changed: save_config()
     return {"ok": True}
 
+@app.route('/uecp_settings', methods=['GET', 'POST'])
+def uecp_settings_route():
+    global _uecp_tcp_server
+    if not session.get('auth'): return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    if request.method == 'GET':
+        return jsonify({
+            "uecp_enabled": state.get("uecp_enabled", False),
+            "uecp_port":    state.get("uecp_port", 4001),
+            "uecp_host":    state.get("uecp_host", "0.0.0.0"),
+            "running":      _uecp_tcp_server is not None,
+        })
+
+    data = request.get_json(silent=True) or {}
+    state["uecp_enabled"] = bool(data.get("uecp_enabled", False))
+    try:
+        state["uecp_port"] = max(1, min(65535, int(data.get("uecp_port", 4001))))
+    except (ValueError, TypeError):
+        state["uecp_port"] = 4001
+    state["uecp_host"] = str(data.get("uecp_host", "0.0.0.0")).strip() or "0.0.0.0"
+    save_config()
+
+    # Stop any existing server
+    if _uecp_tcp_server is not None:
+        try:
+            _uecp_tcp_server.stop()
+        except Exception:
+            pass
+        _uecp_tcp_server = None
+
+    if state["uecp_enabled"]:
+        try:
+            from uecp_server import UECPStateHandler, UECPTCPServer
+            handler = UECPStateHandler(state, save_config)
+            srv = UECPTCPServer(state["uecp_host"], state["uecp_port"], handler)
+            srv.start()
+            _uecp_tcp_server = srv
+            return jsonify({"ok": True,
+                            "status": f"UECP server listening on {srv.host}:{srv.port}"})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)})
+
+    return jsonify({"ok": True, "status": "UECP server disabled"})
+
 @app.route('/fetch-json-structure', methods=['POST'])
 def fetch_json_structure():
     """Fetch JSON from URL and return available fields and sample data."""
@@ -4421,6 +4470,29 @@ def parse_rds_spy_format(text):
 load_config()
 load_datasets()
 
+# --- UECP SERVER ---
+_uecp_tcp_server = None
+
+def _start_uecp_server():
+    global _uecp_tcp_server
+    if not state.get("uecp_enabled"):
+        return
+    try:
+        from uecp_server import UECPStateHandler, UECPTCPServer
+        handler = UECPStateHandler(state, save_config)
+        srv = UECPTCPServer(
+            str(state.get("uecp_host", "0.0.0.0")),
+            int(state.get("uecp_port", 4001)),
+            handler,
+        )
+        srv.start()
+        _uecp_tcp_server = srv
+        print(f"[UECP] Server listening on {srv.host}:{srv.port}")
+    except Exception as e:
+        print(f"[UECP] Failed to start server: {e}")
+
+_start_uecp_server()
+
 def auto_start_if_enabled():
     if auto_start and not state.get("running"):
         # Ensure device indices are set from state
@@ -4664,6 +4736,7 @@ UI_HTML = r"""
                 <div class="tab-btn" onclick="setTab('rds2')">RDS2 Carriers</div>
                 <div class="tab-btn" onclick="setTab('datasets')">Datasets</div>
                 <div class="tab-btn" onclick="setTab('settings')">Settings</div>
+                <div class="tab-btn" onclick="setTab('uecp')">UECP</div>
             </div>
 
             <div id="dashboard" class="content active">
@@ -5983,6 +6056,53 @@ UI_HTML = r"""
                             <a href="/logout" class="text-[12px] text-gray-300 hover:text-white underline">Logout</a>
                         </div>
                         <div id="settings_status" class="text-[11px] text-gray-400 mt-2"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="uecp" class="content">
+                <div class="section">
+                    <div class="section-header">&#9112; UECP Server (Universal Encoder Communications Protocol)</div>
+                    <div class="section-body">
+                        <div class="flex items-center justify-between mb-3">
+                            <div>
+                                <label>Enable UECP TCP Server</label>
+                                <div class="text-[9px] text-gray-500">Accept UECP 6.02 connections to remotely update RDS parameters (PI, PS, PTY, TA/TP, DI, M/S, PIN, RadioText).</div>
+                            </div>
+                            <input type="checkbox" class="toggle-checkbox" id="uecp_enabled" {% if state.uecp_enabled %}checked{% endif %}>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3 mb-3">
+                            <div>
+                                <label>Bind Address</label>
+                                <input type="text" id="uecp_host" value="{{ state.get('uecp_host', '0.0.0.0') }}" placeholder="0.0.0.0">
+                                <div class="text-[9px] text-gray-500 mt-1">Use 0.0.0.0 for all interfaces or 127.0.0.1 for local-only.</div>
+                            </div>
+                            <div>
+                                <label>TCP Port</label>
+                                <input type="number" id="uecp_port" value="{{ state.get('uecp_port', 4001) }}" min="1" max="65535">
+                                <div class="text-[9px] text-gray-500 mt-1">Default UECP port is 4001.</div>
+                            </div>
+                        </div>
+                        <div class="p-3 bg-black/30 rounded border border-gray-700 mb-3 text-[10px] text-gray-400">
+                            <div class="font-bold text-gray-300 mb-1">Supported UECP Message Elements (groups 0A, 1A, 2A)</div>
+                            <div class="grid grid-cols-2 gap-x-4">
+                                <div>0x01 PI &mdash; Programme Identification</div>
+                                <div>0x02 PS &mdash; Programme Service name</div>
+                                <div>0x03 TA/TP &mdash; Traffic flags</div>
+                                <div>0x04 DI &mdash; Decoder Identification</div>
+                                <div>0x05 M/S &mdash; Music/Speech switch</div>
+                                <div>0x06 PIN &mdash; Programme Item Number</div>
+                                <div>0x07 PTY &mdash; Programme Type</div>
+                                <div>0x0A RT &mdash; RadioText (Group 2A)</div>
+                                <div>0x13 AF &mdash; Alternative Frequencies</div>
+                                <div>0x1A SLC &mdash; Slow Labelling Codes (ECC/LIC)</div>
+                            </div>
+                            <div class="mt-2 text-gray-500">Note: receiving an RT update (0x0A) automatically clears the RT Messages list so that UECP has full control of RadioText.</div>
+                        </div>
+                        <div class="flex gap-2 items-center">
+                            <button onclick="saveUECPSettings()" class="bg-pink-600 hover:bg-pink-500 text-white font-semibold rounded px-4 py-2 text-sm transition">Apply</button>
+                        </div>
+                        <div id="uecp_status" class="text-[11px] text-gray-400 mt-2"></div>
                     </div>
                 </div>
             </div>
@@ -9220,6 +9340,27 @@ UI_HTML = r"""
                 } else {
                     if (statusEl) statusEl.innerText = 'Save failed (unauthorized or server error).';
                 }
+            } catch (e) {
+                if (statusEl) statusEl.innerText = 'Save failed (network error).';
+            }
+        }
+
+        async function saveUECPSettings() {
+            const statusEl = document.getElementById('uecp_status');
+            if (statusEl) statusEl.innerText = 'Applying...';
+            const payload = {
+                uecp_enabled: document.getElementById('uecp_enabled').checked,
+                uecp_port:    parseInt(document.getElementById('uecp_port').value, 10) || 4001,
+                uecp_host:    document.getElementById('uecp_host').value.trim() || '0.0.0.0',
+            };
+            try {
+                const res = await fetch('/uecp_settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (statusEl) statusEl.innerText = data.status || data.error || (res.ok ? 'Saved.' : 'Error.');
             } catch (e) {
                 if (statusEl) statusEl.innerText = 'Save failed (network error).';
             }
