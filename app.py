@@ -19,7 +19,7 @@ from scipy import signal as dsp_signal
 from scipy.fft import fft
 
 # --- VERSION ---
-VERSION = "v1.1b"
+VERSION = "v1.1c"
 
 # --- SETTINGS ---
 # Host API filtering: auto-detect based on OS, can be overridden via RDS_HOSTAPI env var
@@ -403,6 +403,16 @@ default_state = {
     "uecp_enabled": False,
     "uecp_port": 4001,
     "uecp_host": "0.0.0.0",
+    
+    # Enhanced RadioText (eRT) - ODA Application
+    "en_ert": False,  # Enable eRT transmission
+    "ert_text": "RDSMaster RDS Encoder — ENHANCED RT (eRT)",  # eRT message text
+    "ert_encoding": "utf8",  # "utf8" or "ucs2" encoding
+    "ert_messages": "[]",  # JSON array of eRT message objects
+    "ert_group_type": 13,  # Application group type for eRT data (11A recommended)
+    "ert_direction": "ltr",  # Text direction: "ltr" (left-to-right) - always 0 per spec
+    "en_ert_rtplus": False,  # Enable RT+ tagging for eRT
+    "ert_rtplus_tags": "[]",  # JSON array of RT+ tag definitions for eRT
 }
 
 state = default_state.copy()
@@ -1411,7 +1421,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'ert_text', 'ert_messages'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -1420,7 +1430,13 @@ class Sanitize:
                     elif isinstance(state[k], int): state[k] = int(v)
                     elif k in skip_ebu_fields:
                         # Store as-is without EBU Latin conversion
-                        state[k] = str(v)
+                        # Guard against None/null being saved as the string "None"
+                        if v is None or str(v) in ('None', 'null'):
+                            if k == 'ert_messages': state[k] = '[]'
+                            elif k == 'ert_text': state[k] = ''
+                            else: state[k] = str(v) if v is not None else ''
+                        else:
+                            state[k] = str(v)
                     else:
                         # Enforce EBU Latin for text fields to ensure spec compliance
                         state[k] = convert_to_ebu_latin(str(v))
@@ -1600,6 +1616,14 @@ class RDSScheduler:
         # New unified RT message system
         self.rt_msg_idx = 0
         self.rt_msg_cycle_count = 0  # Track completed cycles for current message
+        
+        # Enhanced RadioText (eRT) state
+        self.ert_ptr = 0  # Current segment pointer (5-bit, 0-31)
+        self.last_ert_content = ""  # Track content changes
+        self.ert_bytes = b""  # Cached encoded eRT bytes
+        self.ert_msg_index = 0  # Current eRT message index
+        self.ert_msg_cycle_count = 0  # Track completed cycles for current eRT message
+        self.last_ert_messages_sig = ""  # Track changes to eRT message list
 
         # AF Method B transmission cache
         self.af_b_transmissions = []
@@ -2099,6 +2123,233 @@ class RDSScheduler:
                 print(f"[RDS] Error applying tagging policies: {e}", flush=True)
 
         return tags
+    
+    def get_ert_control_bits(self):
+        """Generate eRT control bits for Group 3A message field (Block 4)."""
+        # Bit allocation per IEC 62106-6 Figure C.1:
+        # b0: UCS-2/UTF-8 marker (0=UCS-2, 1=UTF-8)
+        # b1: Text direction (0=left-to-right, always 0 per spec)
+        # b2-b5: Reserved (0)
+        # b6-b15: Reserved future use (0)
+        
+        encoding = state.get("ert_encoding", "utf8")
+        encoding_bit = 1 if encoding == "utf8" else 0
+        direction_bit = 0  # Always left-to-right per spec
+        
+        return (encoding_bit << 0) | (direction_bit << 1)  # Other bits remain 0
+    
+    def encode_ert_text(self, text):
+        """Encode eRT text as UTF-8 or UCS-2 bytes."""
+        if not text:
+            return b"\x0D"  # Just carriage return for empty text
+            
+        encoding = state.get("ert_encoding", "utf8")
+        
+        try:
+            if encoding == "utf8":
+                # UTF-8 encoding
+                encoded = text.encode('utf-8')
+            else:
+                # UCS-2 encoding (big-endian)
+                encoded = text.encode('utf-16-be')
+            
+            # Limit to 127 bytes to leave room for CR terminator
+            if len(encoded) > 127:
+                if encoding == "utf8":
+                    # For UTF-8, we need to be careful not to split multi-byte characters
+                    # Truncate safely by decoding back and re-encoding
+                    truncated = encoded[:127].decode('utf-8', errors='ignore')
+                    encoded = truncated.encode('utf-8')
+                else:
+                    # For UCS-2, each character is 2 bytes, so truncate to even boundary
+                    encoded = encoded[:126]  # 126 bytes = 63 characters
+            
+            # Add carriage return terminator
+            encoded += b"\x0D"
+            
+            return encoded
+            
+        except UnicodeError as e:
+            print(f"eRT encoding error: {e}")
+            return b"eRT encoding error\x0D"
+    
+    def generate_ert_group(self, g_ver):
+        """Generate eRT application group (similar to RT but with 5-bit segment addressing)."""
+        # Only version A supported for eRT
+        if g_ver != 0:
+            return RDSHelper.get_group_bits(0, 0, 0, 0, 0)  # Fallback
+        
+        # Get current eRT text - use effective text from message management
+        ert_text = self.get_effective_ert_text()
+        
+        # Check if text changed - re-encode if needed
+        if ert_text != self.last_ert_content:
+            self.last_ert_content = ert_text
+            self.ert_bytes = self.encode_ert_text(ert_text)
+            self.ert_ptr = 0  # Reset pointer on text change
+        
+        # Calculate how many segments we actually need (like RT termination)
+        message_length = len(self.ert_bytes)
+        segments_needed = (message_length + 3) // 4  # Round up to nearest 4-byte boundary
+        segments_needed = max(1, segments_needed)  # At least 1 segment
+        
+        # If we've transmitted all segments, reset to beginning like RT
+        if self.ert_ptr >= segments_needed:
+            self.ert_ptr = 0
+        
+        # Calculate segment address (5-bit, 0-31) 
+        segment_addr = self.ert_ptr
+        
+        # Get 4 bytes for this segment
+        byte_offset = segment_addr * 4
+        if byte_offset < message_length:
+            # Extract bytes, padding short segments with CR
+            b3_bytes = [0x0D, 0x0D]  # Default CR padding
+            b4_bytes = [0x0D, 0x0D]
+            
+            # Fill with actual message bytes
+            for i in range(4):
+                if byte_offset + i < message_length:
+                    if i < 2:
+                        b3_bytes[i] = self.ert_bytes[byte_offset + i]
+                    else:
+                        b4_bytes[i - 2] = self.ert_bytes[byte_offset + i]
+            
+            b3 = (b3_bytes[0] << 8) | b3_bytes[1]
+            b4 = (b4_bytes[0] << 8) | b4_bytes[1]
+        else:
+            # This shouldn't happen with proper segment limit
+            b3 = 0x0D0D
+            b4 = 0x0D0D
+        
+        # Advance pointer for next transmission
+        self.ert_ptr = (self.ert_ptr + 1) % segments_needed
+        
+        # Block 2: Group type, version, TP, PTY, segment address (5-bit)
+        ert_group_type = state.get("ert_group_type", 13)
+        tail = (get_effective_value("tp") << 10) | (get_effective_value("pty") << 5) | segment_addr
+        
+        return RDSHelper.get_group_bits(ert_group_type, 0, tail, b3, b4)
+
+    # Enhanced RadioText (eRT) Message Management
+    def get_ert_messages(self):
+        """Get enabled eRT messages from the unified message list."""
+        try:
+            messages = json.loads(state.get("ert_messages", "[]"))
+            return [m for m in messages if m.get("enabled", True)]
+        except:
+            return []
+
+    def get_current_ert_message(self):
+        """Get the current active eRT message."""
+        messages = self.get_ert_messages()
+        if not messages:
+            return None
+        
+        if self.ert_msg_index >= len(messages):
+            self.ert_msg_index = 0
+            
+        return messages[self.ert_msg_index] if messages else None
+
+    def advance_to_next_ert_message(self):
+        """Advance to the next eRT message and reset cycles."""
+        messages = self.get_ert_messages()
+        if not messages:
+            return
+            
+        # Check if current message signature changed (message list updated)
+        msg_sig = state.get("ert_messages", "[]")
+        if msg_sig != self.last_ert_messages_sig:
+            self.last_ert_messages_sig = msg_sig
+            self.ert_msg_index = 0  # Reset to first message
+            self.ert_msg_cycle_count = 0
+            return
+
+        # Move to next message
+        self.ert_msg_index = (self.ert_msg_index + 1) % len(messages)
+        self.ert_msg_cycle_count = 0  # Reset cycle count for new message
+
+    def resolve_ert_msg_content(self, msg):
+        """Resolve eRT message content (supports file, URL, or manual sources)."""
+        if not msg:
+            return ""
+            
+        source_type = msg.get("source_type", "manual")
+        content = msg.get("content", "")
+        
+        if source_type == "manual":
+            return content
+        elif source_type == "file":
+            try:
+                with open(content, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+            except Exception as e:
+                print(f"eRT file read error: {e}")
+                return f"Error reading: {content}"
+        elif source_type == "url":
+            try:
+                import requests
+                response = requests.get(content, timeout=5)
+                response.raise_for_status()
+                return response.text.strip()
+            except Exception as e:
+                print(f"eRT URL fetch error: {e}")
+                return f"Error fetching: {content}"
+        
+        return content
+
+    def get_effective_ert_text(self):
+        """Get the effective eRT text based on message management."""
+        messages = self.get_ert_messages()
+        if messages:
+            current_msg = self.get_current_ert_message()
+            if current_msg:
+                # Check if we need to advance to next message
+                cycles_required = current_msg.get("cycles", 1)
+                if self.ert_msg_cycle_count >= cycles_required:
+                    self.advance_to_next_ert_message()
+                    current_msg = self.get_current_ert_message()
+                
+                if current_msg:
+                    resolved_content = self.resolve_ert_msg_content(current_msg)
+                    
+                    # Apply RT+ formatting if enabled for this message
+                    if current_msg.get("rt_plus_enabled", False):
+                        resolved_content = self.apply_ert_rtplus_formatting(current_msg, resolved_content)
+                    
+                    self.ert_msg_cycle_count += 1
+                    return resolved_content
+        
+        # Fallback to manual eRT text
+        fallback = state.get("ert_text", "") or ""
+        if fallback in ("None", "none"):
+            fallback = ""
+        return fallback
+
+    def apply_ert_rtplus_formatting(self, msg, content):
+        """Apply RT+ formatting to eRT message content."""
+        try:
+            rt_plus_tags = msg.get("rt_plus_tags", {})
+            tag1_type = rt_plus_tags.get("tag1_type", -1)
+            tag2_type = rt_plus_tags.get("tag2_type", -1)
+            split_delimiter = msg.get("split_delimiter", " - ")
+            prefix = msg.get("prefix", "")
+            suffix = msg.get("suffix", "")
+            
+            # If no RT+ tags configured, return content as-is
+            if tag1_type < 0 and tag2_type < 0:
+                return content
+            
+            # Build formatted content with prefix/suffix
+            formatted_content = prefix + content + suffix
+            
+            # For eRT, we return the formatted text
+            # The actual RT+ tag positions will be calculated during transmission
+            return formatted_content
+            
+        except Exception as e:
+            print(f"eRT RT+ formatting error: {e}")
+            return content
 
     def freq_code(self, f):
         try: 
@@ -2231,6 +2482,7 @@ class RDSScheduler:
         needs_3a = False
         if state.get("en_dab"): needs_3a = True
         if state.get("en_rt_plus"): needs_3a = True
+        if state.get("en_ert"): needs_3a = True  # Enhanced RadioText ODA
         if state.get("en_rds2"): needs_3a = True
         # Check if custom ODAs are enabled
         if not needs_3a:
@@ -2248,6 +2500,11 @@ class RDSScheduler:
             seq.append((3,0))
         if state["en_rt_plus"]:
             seq.append((11,0))
+        
+        # Add eRT application groups if enabled
+        if state.get("en_ert"):
+            ert_group_type = state.get("ert_group_type", 11)
+            seq.append((ert_group_type, 0))  # eRT groups
 
         # Add enabled custom groups to auto schedule
         # Only add each unique group type once (or multiple times based on schedule_freq)
@@ -2771,7 +3028,22 @@ class RDSScheduler:
 
              # Add RT+ if enabled
              if state.get("en_rt_plus"):
+                 # RT+ uses 11A, so AGTC = (11*2) + 0 = 22
                  active_odas.append({"type": "rtplus", "group_type": 22, "aid": 0x4BD7, "msg": 0x0000})
+             
+             # Add eRT if enabled
+             if state.get("en_ert"):
+                 ert_group_type = state.get("ert_group_type", 13)  # Default to 13A instead of 11A
+                 # eRT AGTC = (group_number*2) + 0 for version A
+                 ert_agtc = (ert_group_type * 2) + 0
+                 active_odas.append({"type": "ert", "group_type": ert_agtc, "aid": 0x6552, "msg": self.get_ert_control_bits()})
+             
+             # Add eRT RT+ if enabled (separate ODA)
+             if state.get("en_ert") and state.get("en_ert_rtplus"):
+                 ert_group_type = state.get("ert_group_type", 13)
+                 # eRT RT+ uses same group as eRT data, AGTC = (group_number*2) + 0
+                 ert_rtplus_agtc = (ert_group_type * 2) + 0  
+                 active_odas.append({"type": "ert_rtplus", "group_type": ert_rtplus_agtc, "aid": 0x4BD8, "msg": 0x0000})
 
              # NOTE: RDS2 ODA is NOT included here - it's only announced in the RDS2 stream, not in regular RDS
 
@@ -2800,8 +3072,14 @@ class RDSScheduler:
                  self.group_3a_toggle = (self.group_3a_toggle + 1) % len(active_odas)
                  
                  # Emit ODA announcement
-                 return RDSHelper.get_group_bits(3, 0, current_oda["group_type"], 
+                 # Application Group Type Code is now pre-encoded in the ODA list
+                 app_group_code = current_oda["group_type"] & 0x1F  # Ensure 5-bit value
+                 return RDSHelper.get_group_bits(3, 0, app_group_code, 
                                                   current_oda["msg"], current_oda["aid"])
+        
+        # Enhanced RadioText (eRT) Application Groups
+        elif g_type == state.get("ert_group_type", 13) and state.get("en_ert"):
+            return self.generate_ert_group(g_ver)
 
         elif g_type == 5:
             # Group 5A/5B: Transparent Data Channels (TDC)
@@ -5480,6 +5758,198 @@ UI_HTML = r"""
                          <div><label>Enable ID (1A)</label><input type="checkbox" class="toggle-checkbox" id="en_id" {% if state.en_id %}checked{% endif %} onchange="sync()"></div>
                      </div>
                  </div>
+                 
+                 <div class="section">
+                    <div class="section-header flex justify-between items-center">
+                        <span>Enhanced RadioText (eRT) Messages</span>
+                        <button onclick="addERTMessage()" class="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs text-white font-bold">+ Add Message</button>
+                    </div>
+                    <div class="section-body">
+                        <div class="mb-3">
+                            <div class="flex justify-between items-center mb-2">
+                                <div>
+                                    <label>Enable eRT</label>
+                                    <div class="text-[9px] text-gray-500">UTF-8/UCS-2 RadioText with 128-byte capacity (AID: 0x6552)</div>
+                                </div>
+                                <input type="checkbox" class="toggle-checkbox" id="en_ert" {% if state.en_ert %}checked{% endif %} onchange="sync()">
+                            </div>
+                        </div>
+                        
+                        <!-- Message List -->
+                        <div id="ert_messages_list" class="space-y-2 mb-3">
+                            <!-- Messages rendered by JavaScript -->
+                        </div>
+
+                        <!-- Empty state -->
+                        <div id="ert_messages_empty" class="text-center py-4 text-gray-500 text-sm" style="display:none">
+                            No messages configured. Click "+ Add Message" to create one.
+                        </div>
+
+                        <!-- Global eRT Settings -->
+                        <div class="flex justify-between items-center bg-[#111] p-2 rounded mt-3">
+                             <div class="flex gap-4 items-end">
+                                 <div>
+                                     <label>Encoding</label>
+                                     <select id="ert_encoding" onchange="sync()">
+                                         <option value="utf8" {% if state.ert_encoding == "utf8" %}selected{% endif %}>UTF-8</option>
+                                         <option value="ucs2" {% if state.ert_encoding == "ucs2" %}selected{% endif %}>UCS-2</option>
+                                     </select>
+                                 </div>
+                                 <div>
+                                     <label>Application Group Type</label>
+                                     <select id="ert_group_type" onchange="sync()">
+                                         {% for gt in range(6, 16) %}
+                                         <option value="{{gt}}" {% if state.ert_group_type == gt %}selected{% endif %}>{{gt}}A</option>
+                                         {% endfor %}
+                                     </select>
+                                 </div>
+                             </div>
+                             <div class="flex gap-4">
+                                 <div class="flex flex-col items-center"><label>RT+ Enable</label><input type="checkbox" class="toggle-checkbox" id="en_ert_rtplus" {% if state.en_ert_rtplus %}checked{% endif %} onchange="sync()"></div>
+                             </div>
+                        </div>
+                     </div>
+                 </div>
+
+                 <!-- eRT Message Edit Modal -->
+                 <div id="ert_msg_modal" class="rtplus-modal-overlay" style="display: none;">
+                     <div class="rtplus-modal" style="max-width: 600px;">
+                         <div class="rtplus-modal-header">
+                             <div>
+                                 <div class="text-lg font-bold text-white" id="ert_msg_modal_title">Edit eRT Message</div>
+                                 <div class="text-xs text-gray-400">Configure enhanced RadioText message content</div>
+                             </div>
+                             <button onclick="closeERTMsgModal()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+                         </div>
+
+                         <div class="rtplus-modal-body space-y-4">
+                             <input type="hidden" id="ert_msg_edit_id">
+
+                             <!-- Cycles -->
+                             <div>
+                                 <label class="text-xs text-gray-400 mb-1 block">Cycles (How many times to display this message)</label>
+                                 <input type="number" id="ert_msg_cycles" value="2" min="1" max="50" class="w-24 bg-[#111] border border-[#444] rounded px-2 py-1">
+                             </div>
+
+                             <!-- Source Type -->
+                             <div>
+                                 <label class="text-xs text-gray-400 mb-1 block">Source Type</label>
+                                 <div class="flex gap-4">
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="radio" name="ert_msg_source" value="manual" checked class="accent-[#d946ef]" onchange="updateERTSourceUI()">
+                                         <span class="text-sm text-gray-300">Manual</span>
+                                     </label>
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="radio" name="ert_msg_source" value="file" class="accent-[#d946ef]" onchange="updateERTSourceUI()">
+                                         <span class="text-sm text-gray-300">File</span>
+                                     </label>
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="radio" name="ert_msg_source" value="url" class="accent-[#d946ef]" onchange="updateERTSourceUI()">
+                                         <span class="text-sm text-gray-300">URL</span>
+                                     </label>
+                                 </div>
+                             </div>
+
+                             <!-- Manual Content -->
+                             <div id="ert_msg_manual_content">
+                                 <label class="text-xs text-gray-400 mb-1 block">eRT Text (UTF-8/UCS-2, max 128 bytes)</label>
+                                 <textarea id="ert_msg_text" rows="3" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 font-mono text-sm" placeholder="Enter your enhanced RadioText message..." oninput="updateERTMsgPreview()"></textarea>
+                                 <div class="text-xs text-gray-500 mt-1">Supports international characters, emojis, and extended character sets</div>
+                             </div>
+
+                             <!-- File/URL Content -->
+                             <div id="ert_msg_external_content" style="display:none">
+                                 <label class="text-xs text-gray-400 mb-1 block" id="ert_content_label">File Path</label>
+                                 <input type="text" id="ert_msg_content" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="/path/to/file.txt" oninput="updateERTMsgPreview()">
+                                 <div class="text-xs text-gray-500 mt-1" id="ert_content_hint">Path to text file containing eRT content</div>
+                             </div>
+
+                             <!-- Content Preview -->
+                             <div class="bg-[#111] border border-[#444] rounded p-2">
+                                 <div class="text-xs text-gray-400 mb-1">Content Preview:</div>
+                                 <div id="ert_msg_preview" class="text-xs font-mono text-green-400">No content to preview</div>
+                             </div>
+
+                             <!-- Enable/Disable Toggle -->
+                             <div class="flex items-center justify-between">
+                                 <label class="text-sm text-gray-300">Message Enabled</label>
+                                 <input type="checkbox" id="ert_msg_enabled" checked class="toggle-checkbox">
+                             </div>
+
+                             <!-- RT+ Configuration for eRT -->
+                             <div class="bg-[#1a1a1a] border border-[#333] rounded p-3 space-y-3">
+                                 <div class="flex justify-between items-center">
+                                     <label class="text-xs text-orange-400 font-bold">RT+ Tags for eRT</label>
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <span class="text-xs text-gray-400">Enable RT+ for this eRT message</span>
+                                         <input type="checkbox" id="ert_msg_rtplus_enabled" class="toggle-checkbox" onchange="updateERTRTPlusUI()">
+                                     </label>
+                                 </div>
+
+                                 <!-- RT+ Tagging Options -->
+                                 <div id="ert_msg_rtplus_options" style="display:none" class="space-y-4">
+                                     <!-- Simple RT+ Tagging -->
+                                     <div class="bg-[#252525] border border-orange-600/50 rounded p-3 space-y-3">
+                                         <div class="text-orange-400 font-bold text-sm">🎯 RT+ Tag Configuration</div>
+                                         
+                                         <div class="grid grid-cols-2 gap-3">
+                                             <div>
+                                                 <label class="text-xs text-orange-400">Tag 1 Type</label>
+                                                 <select id="ert_msg_tag1_type" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs">
+                                                     <option value="1">1: Title</option>
+                                                     <option value="4" selected>4: Artist</option>
+                                                     <option value="2">2: Album</option>
+                                                     <option value="33">33: Prog.Now</option>
+                                                     <option value="31">31: Stn.Short</option>
+                                                     <option value="32">32: Stn.Long</option>
+                                                     <option value="-1">No Tag</option>
+                                                 </select>
+                                             </div>
+                                             <div>
+                                                 <label class="text-xs text-cyan-400">Tag 2 Type</label>
+                                                 <select id="ert_msg_tag2_type" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs">
+                                                     <option value="1" selected>1: Title</option>
+                                                     <option value="4">4: Artist</option>
+                                                     <option value="2">2: Album</option>
+                                                     <option value="33">33: Prog.Now</option>
+                                                     <option value="32">32: Stn.Long</option>
+                                                     <option value="36">36: Host</option>
+                                                     <option value="-1">No Tag</option>
+                                                 </select>
+                                             </div>
+                                         </div>
+
+                                         <div class="grid grid-cols-3 gap-3">
+                                             <div>
+                                                 <label class="text-xs text-gray-400">Split Pattern</label>
+                                                 <input type="text" id="ert_msg_split_pattern" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" value=" - " placeholder="e.g. ' - '">
+                                             </div>
+                                             <div>
+                                                 <label class="text-xs text-gray-400">Prefix</label>
+                                                 <input type="text" id="ert_msg_prefix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text before tags">
+                                             </div>
+                                             <div>
+                                                 <label class="text-xs text-gray-400">Suffix</label>
+                                                 <input type="text" id="ert_msg_suffix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text after tags">
+                                             </div>
+                                         </div>
+
+                                         <!-- RT+ Preview -->
+                                         <div class="bg-[#111] border border-[#444] rounded p-2">
+                                             <div class="text-xs text-gray-400 mb-1">RT+ Preview:</div>
+                                             <div id="ert_rtplus_preview" class="text-xs font-mono text-green-400">Artist - Title</div>
+                                         </div>
+                                     </div>
+                                 </div>
+                             </div>
+                         </div>
+
+                         <div class="rtplus-modal-footer">
+                             <button onclick="closeERTMsgModal()" class="px-4 py-2 bg-[#444] hover:bg-[#555] rounded text-sm">Cancel</button>
+                             <button onclick="saveERTMessage()" class="px-4 py-2 bg-[#d946ef] hover:bg-[#c026d3] rounded text-sm text-white font-bold">Save</button>
+                         </div>
+                     </div>
+                 </div>
 
                  <div class="section">
                     <div class="section-header">Programme Item Number (PIN) - Group 1A</div>
@@ -7226,8 +7696,9 @@ UI_HTML = r"""
         }
 
         function escapeHtml(text) {
+            if (text == null || text == undefined) return '';
             var div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = String(text);
             return div.innerHTML;
         }
 
@@ -8779,8 +9250,9 @@ UI_HTML = r"""
         }
 
         function escapeHtml(text) {
+            if (text == null || text == undefined) return '';
             var div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = String(text);
             return div.innerHTML;
         }
 
@@ -9489,6 +9961,10 @@ UI_HTML = r"""
                 ecc: getVal('ecc'), lic: getVal('lic'), tz_offset: getVal('tz_offset'), en_ct: getVal('en_ct'), en_id: getVal('en_id'),
                 en_pin: getVal('en_pin'), pin_day: getVal('pin_day'), pin_hour: getVal('pin_hour'), pin_minute: getVal('pin_minute'),
                 ps_long_32: getVal('ps_long_32'), en_lps: getVal('en_lps'), lps_centered: getVal('lps_centered'), lps_cr: getVal('lps_cr'),
+                // Enhanced RadioText (eRT)
+                en_ert: getVal('en_ert'), ert_text: getVal('ert_text') || '', ert_encoding: getVal('ert_encoding'), 
+                ert_group_type: getVal('ert_group_type'), en_ert_rtplus: getVal('en_ert_rtplus'),
+                ert_messages: JSON.stringify(ertMessages),
                 en_dab: getVal('en_dab'), dab_channel: getVal('dab_channel'),
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
                 dab_sid: getVal('dab_sid'), dab_variant: getVal('dab_variant'),
@@ -12016,6 +12492,438 @@ UI_HTML = r"""
                 document.getElementById('af_list').value = allFreqs.join(', ');
             }
         }
+
+        // ============= ENHANCED RADIOTEXT (eRT) MESSAGE MANAGEMENT =============
+        var ertMessages = [];
+        var pendingNewERTMessage = null;
+
+        // Load eRT messages from state
+        try {
+            var ertMessagesStr = {{ state.ert_messages|tojson }};
+            if (ertMessagesStr && ertMessagesStr !== "[]") {
+                ertMessages = JSON.parse(ertMessagesStr);
+            }
+        } catch (e) {
+            console.error('Failed to parse eRT messages:', e);
+            ertMessages = [];
+        }
+
+        function updateERTModeUI() {
+            var mode = document.querySelector('input[name="ert_message_mode"]:checked').value;
+            var manualUI = document.getElementById('ert_manual_ui');
+            var builderUI = document.getElementById('ert_builder_ui');
+            
+            if (mode === 'manual') {
+                manualUI.style.display = 'block';
+                builderUI.style.display = 'none';
+            } else {
+                manualUI.style.display = 'none';
+                builderUI.style.display = 'block';
+                renderERTMessages();
+            }
+        }
+
+        function renderERTMessages() {
+            var container = document.getElementById('ert_messages_list');
+            var empty = document.getElementById('ert_messages_empty');
+            
+            if (!container || !empty) return;
+            
+            if (ertMessages.length === 0) {
+                container.innerHTML = '';
+                empty.style.display = 'block';
+                return;
+            }
+            
+            empty.style.display = 'none';
+            var html = '';
+            
+            for (var i = 0; i < ertMessages.length; i++) {
+                var msg = ertMessages[i];
+                var enabled = msg.enabled !== false; // Default to enabled
+                
+                // Handle content more robustly
+                var rawContent = msg.content;
+                if (rawContent == null || rawContent == undefined || rawContent === 'null' || rawContent === 'undefined') {
+                    rawContent = '';
+                }
+                var preview = String(rawContent).substring(0, 60);
+                if (String(rawContent).length > 60) preview += '...';
+                
+                // Debug log to help identify issues
+                console.log('eRT Message:', msg.id, 'Raw Content:', msg.content, 'Processed Content:', rawContent, 'Preview:', preview);
+                
+                var sourceIcon = '';
+                switch (msg.source_type) {
+                    case 'manual': sourceIcon = '✏️'; break;
+                    case 'file': sourceIcon = '📁'; break;
+                    case 'url': sourceIcon = '🌐'; break;
+                    default: sourceIcon = '📝'; break;
+                }
+                
+                html += '<div class="bg-[#1a1a1a] border border-[#333] rounded p-2 flex justify-between items-center cursor-pointer hover:bg-[#222]" onclick="editERTMessage(\'' + msg.id + '\')">';
+                html += '<div class="flex-1 min-w-0">';
+                html += '<div class="flex items-center gap-2">';
+                html += '<span>' + sourceIcon + '</span>';
+                html += '<span class="text-sm font-medium text-white">' + (msg.source_type || 'manual').toUpperCase() + '</span>';
+                html += '<span class="text-xs text-gray-400">(' + (msg.cycles || 2) + ' cycles)</span>';
+                if (msg.rt_plus_enabled) html += '<span class="text-xs bg-orange-900 text-orange-200 px-2 py-1 rounded">RT+</span>';
+                if (!enabled) html += '<span class="text-xs bg-red-900 text-red-200 px-2 py-1 rounded">DISABLED</span>';
+                html += '</div>';
+                if (preview) {
+                    html += '<div class="text-xs text-gray-400 mt-1 truncate">' + escapeHtml(preview) + '</div>';
+                }
+                html += '</div>';
+                html += '<div class="flex gap-1">';
+                html += '<button onclick="event.stopPropagation(); toggleERTMessage(\'' + msg.id + '\')" title="' + (enabled ? 'Disable' : 'Enable') + '" class="px-2 py-1 text-xs ' + (enabled ? 'bg-green-800 text-green-200' : 'bg-gray-800 text-gray-400') + ' rounded">●</button>';
+                html += '<button onclick="event.stopPropagation(); deleteERTMessage(\'' + msg.id + '\')" title="Delete" class="px-2 py-1 text-xs bg-red-800 text-red-200 rounded hover:bg-red-700">×</button>';
+                html += '</div>';
+                html += '</div>';
+            }
+            
+            container.innerHTML = html;
+        }
+
+        function addERTMessage() {
+            var newMsg = {
+                id: 'ert_msg_' + Date.now(),
+                cycles: 2,
+                source_type: 'manual',
+                content: '',
+                enabled: true
+            };
+            
+            pendingNewERTMessage = newMsg;
+            editERTMessage(newMsg.id);
+        }
+
+        function editERTMessage(id) {
+            var msg = ertMessages.find(function(m) { return m.id === id; });
+            if (!msg && pendingNewERTMessage && pendingNewERTMessage.id === id) {
+                msg = pendingNewERTMessage;
+            }
+            
+            if (!msg) return;
+            
+            // Populate form
+            document.getElementById('ert_msg_edit_id').value = id;
+            document.getElementById('ert_msg_cycles').value = msg.cycles || 2;
+            document.getElementById('ert_msg_enabled').checked = msg.enabled !== false;
+            
+            // Set source type
+            var sourceRadios = document.querySelectorAll('input[name="ert_msg_source"]');
+            sourceRadios.forEach(function(radio) {
+                radio.checked = radio.value === (msg.source_type || 'manual');
+            });
+            
+            // Set content based on source type
+            if (msg.source_type === 'manual') {
+                document.getElementById('ert_msg_text').value = msg.content || '';
+            } else {
+                document.getElementById('ert_msg_content').value = msg.content || '';
+            }
+            
+            // Set RT+ configuration
+            document.getElementById('ert_msg_rtplus_enabled').checked = msg.rt_plus_enabled || false;
+            
+            if (msg.rt_plus_tags) {
+                document.getElementById('ert_msg_tag1_type').value = msg.rt_plus_tags.tag1_type || 4;
+                document.getElementById('ert_msg_tag2_type').value = msg.rt_plus_tags.tag2_type || 1;
+            }
+            
+            document.getElementById('ert_msg_split_pattern').value = msg.split_delimiter || ' - ';
+            document.getElementById('ert_msg_prefix').value = msg.prefix || '';
+            document.getElementById('ert_msg_suffix').value = msg.suffix || '';
+            
+            updateERTSourceUI();
+            updateERTRTPlusUI();
+            updateERTMsgPreview();
+            
+            document.getElementById('ert_msg_modal_title').textContent = pendingNewERTMessage ? 'Add eRT Message' : 'Edit eRT Message';
+            document.getElementById('ert_msg_modal').style.display = 'flex';
+        }
+
+        function updateERTSourceUI() {
+            var sourceType = document.querySelector('input[name="ert_msg_source"]:checked').value;
+            var manualContent = document.getElementById('ert_msg_manual_content');
+            var externalContent = document.getElementById('ert_msg_external_content');
+            var contentLabel = document.getElementById('ert_content_label');
+            var contentHint = document.getElementById('ert_content_hint');
+            
+            if (sourceType === 'manual') {
+                manualContent.style.display = 'block';
+                externalContent.style.display = 'none';
+            } else {
+                manualContent.style.display = 'none';
+                externalContent.style.display = 'block';
+                
+                if (sourceType === 'file') {
+                    contentLabel.textContent = 'File Path';
+                    contentHint.textContent = 'Path to text file containing eRT content';
+                    document.getElementById('ert_msg_content').placeholder = '/path/to/file.txt';
+                } else if (sourceType === 'url') {
+                    contentLabel.textContent = 'URL';
+                    contentHint.textContent = 'URL to fetch eRT content from';
+                    document.getElementById('ert_msg_content').placeholder = 'https://example.com/api/text';
+                }
+            }
+            updateERTMsgPreview();
+        }
+
+        function updateERTMsgPreview() {
+            var sourceType = document.querySelector('input[name="ert_msg_source"]:checked').value;
+            var previewDiv = document.getElementById('ert_msg_preview');
+            
+            if (!previewDiv) return;
+            
+            var content = '';
+            
+            if (sourceType === 'manual') {
+                content = document.getElementById('ert_msg_text').value || '';
+            } else if (sourceType === 'file') {
+                var filePath = document.getElementById('ert_msg_content').value;
+                if (filePath) {
+                    // Show loading indicator and fetch file content
+                    previewDiv.innerHTML = '<div class="text-xs text-yellow-400">📁 Loading file content...</div>';
+                    fetchERTFileContent(filePath);
+                    return;
+                } else {
+                    content = '';
+                }
+            } else if (sourceType === 'url') {
+                var url = document.getElementById('ert_msg_content').value;
+                if (url) {
+                    previewDiv.innerHTML = '<div class="text-xs text-yellow-400">🌐 Loading URL content...</div>';
+                    fetchERTURLContent(url);
+                    return;
+                } else {
+                    content = '';
+                }
+            }
+            
+            if (content) {
+                var truncated = content.length > 100 ? content.substring(0, 100) + '...' : content;
+                previewDiv.innerHTML = '<div class="text-xs text-green-400">' + escapeHtml(truncated) + '</div>';
+            } else {
+                previewDiv.innerHTML = '<div class="text-xs text-gray-500">No content to preview</div>';
+            }
+        }
+
+        function fetchERTFileContent(filePath) {
+            fetch('/resolve-content', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    source_type: 'file', 
+                    content: filePath 
+                })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var previewDiv = document.getElementById('ert_msg_preview');
+                if (previewDiv) {
+                    if (data.ok) {
+                        var content = data.resolved || '';
+                        var truncated = content.length > 100 ? content.substring(0, 100) + '...' : content;
+                        previewDiv.innerHTML = '<div class="text-xs text-green-400">' + escapeHtml(truncated) + '</div>';
+                    } else {
+                        previewDiv.innerHTML = '<div class="text-xs text-red-400">❌ ' + (data.error || 'Failed to load file') + '</div>';
+                    }
+                }
+            })
+            .catch(function(e) {
+                var previewDiv = document.getElementById('ert_msg_preview');
+                if (previewDiv) {
+                    previewDiv.innerHTML = '<div class="text-xs text-red-400">❌ Error loading file</div>';
+                }
+            });
+        }
+
+        function fetchERTURLContent(url) {
+            fetch('/resolve-content', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    source_type: 'url', 
+                    content: url 
+                })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var previewDiv = document.getElementById('ert_msg_preview');
+                if (previewDiv) {
+                    if (data.ok) {
+                        var content = data.resolved || '';
+                        var truncated = content.length > 100 ? content.substring(0, 100) + '...' : content;
+                        previewDiv.innerHTML = '<div class="text-xs text-green-400">' + escapeHtml(truncated) + '</div>';
+                    } else {
+                        previewDiv.innerHTML = '<div class="text-xs text-red-400">❌ ' + (data.error || 'Failed to load URL') + '</div>';
+                    }
+                }
+            })
+            .catch(function(e) {
+                var previewDiv = document.getElementById('ert_msg_preview');
+                if (previewDiv) {
+                    previewDiv.innerHTML = '<div class="text-xs text-red-400">❌ Error loading URL</div>';
+                }
+            });
+        }
+
+        function updateERTRTPlusUI() {
+            var enabled = document.getElementById('ert_msg_rtplus_enabled').checked;
+            var options = document.getElementById('ert_msg_rtplus_options');
+            
+            if (options) {
+                options.style.display = enabled ? 'block' : 'none';
+            }
+            
+            if (enabled) {
+                updateERTRTPlusPreview();
+            }
+        }
+
+        function updateERTRTPlusPreview() {
+            var tag1Type = parseInt(document.getElementById('ert_msg_tag1_type').value);
+            var tag2Type = parseInt(document.getElementById('ert_msg_tag2_type').value);
+            var splitPattern = document.getElementById('ert_msg_split_pattern').value || ' - ';
+            var prefix = document.getElementById('ert_msg_prefix').value || '';
+            var suffix = document.getElementById('ert_msg_suffix').value || '';
+            
+            var preview = prefix;
+            
+            if (tag1Type >= 0) {
+                preview += '[Tag1: ' + getTagTypeName(tag1Type) + ']';
+            }
+            
+            if (tag1Type >= 0 && tag2Type >= 0) {
+                preview += splitPattern;
+            }
+            
+            if (tag2Type >= 0) {
+                preview += '[Tag2: ' + getTagTypeName(tag2Type) + ']';
+            }
+            
+            preview += suffix;
+            
+            var previewEl = document.getElementById('ert_rtplus_preview');
+            if (previewEl) {
+                previewEl.textContent = preview || 'No tags configured';
+            }
+        }
+
+        function getTagTypeName(typeId) {
+            var tagNames = {
+                1: 'Title', 2: 'Album', 4: 'Artist', 31: 'Stn.Short', 
+                32: 'Stn.Long', 33: 'Prog.Now', 36: 'Host'
+            };
+            return tagNames[typeId] || 'Type' + typeId;
+        }
+
+        function saveERTMessage() {
+            var id = document.getElementById('ert_msg_edit_id').value;
+            var msg = ertMessages.find(function(m) { return m.id === id; });
+            
+            if (!msg && pendingNewERTMessage && pendingNewERTMessage.id === id) {
+                msg = pendingNewERTMessage;
+                ertMessages.push(msg);
+                pendingNewERTMessage = null;
+            }
+            
+            if (!msg) return;
+            
+            // Save basic fields
+            msg.cycles = parseInt(document.getElementById('ert_msg_cycles').value) || 2;
+            msg.enabled = document.getElementById('ert_msg_enabled').checked;
+            msg.source_type = document.querySelector('input[name="ert_msg_source"]:checked').value;
+            
+            // Save content based on source type
+            if (msg.source_type === 'manual') {
+                var textElement = document.getElementById('ert_msg_text');
+                if (textElement) {
+                    msg.content = textElement.value || '';
+                    console.log('Saving manual eRT content:', msg.content);
+                } else {
+                    console.error('ert_msg_text element not found!');
+                    msg.content = '';
+                }
+            } else {
+                var contentElement = document.getElementById('ert_msg_content');
+                if (contentElement) {
+                    msg.content = contentElement.value || '';
+                    console.log('Saving file/URL eRT content:', msg.content);
+                } else {
+                    console.error('ert_msg_content element not found!');
+                    msg.content = '';
+                }
+            }
+            
+            // Save RT+ configuration
+            msg.rt_plus_enabled = document.getElementById('ert_msg_rtplus_enabled').checked;
+            
+            if (msg.rt_plus_enabled) {
+                msg.rt_plus_tags = {
+                    tag1_type: parseInt(document.getElementById('ert_msg_tag1_type').value) || 4,
+                    tag2_type: parseInt(document.getElementById('ert_msg_tag2_type').value) || 1
+                };
+                msg.split_delimiter = document.getElementById('ert_msg_split_pattern').value || ' - ';
+                msg.prefix = document.getElementById('ert_msg_prefix').value || '';
+                msg.suffix = document.getElementById('ert_msg_suffix').value || '';
+            } else {
+                // Clear RT+ fields if disabled
+                msg.rt_plus_tags = {};
+                msg.split_delimiter = '';
+                msg.prefix = '';
+                msg.suffix = '';
+            }
+            
+            closeERTMsgModal();
+            renderERTMessages();
+            syncERTMessages();
+        }
+
+        function closeERTMsgModal() {
+            document.getElementById('ert_msg_modal').style.display = 'none';
+            pendingNewERTMessage = null;
+        }
+
+        function toggleERTMessage(id) {
+            var msg = ertMessages.find(function(m) { return m.id === id; });
+            if (msg) {
+                msg.enabled = !msg.enabled;
+                renderERTMessages();
+                syncERTMessages();
+            }
+        }
+
+        function deleteERTMessage(id) {
+            if (!confirm('Delete this eRT message?')) return;
+            ertMessages = ertMessages.filter(function(m) { return m.id !== id; });
+            renderERTMessages();
+            syncERTMessages();
+        }
+
+        function syncERTMessages() {
+            socket.emit('update', { ert_messages: JSON.stringify(ertMessages) });
+        }
+
+        // Initialize eRT UI on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            renderERTMessages();
+            
+            // Add event listeners for eRT RT+ preview updates
+            var ertTagElements = [
+                'ert_msg_tag1_type', 'ert_msg_tag2_type', 
+                'ert_msg_split_pattern', 'ert_msg_prefix', 'ert_msg_suffix'
+            ];
+            
+            ertTagElements.forEach(function(id) {
+                var element = document.getElementById(id);
+                if (element) {
+                    element.addEventListener('change', updateERTRTPlusPreview);
+                    element.addEventListener('input', updateERTRTPlusPreview);
+                }
+            });
+        });
 
     </script>
 </body>
