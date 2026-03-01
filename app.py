@@ -790,7 +790,8 @@ def load_config():
     
     # Fix datasets.json if auto_start was missing
     if auto_start_was_missing:
-        load_datasets()  # Load datasets into memory
+        # Don't reload datasets here, just save to add auto_start
+        # Loading datasets again would overwrite the state we just loaded
         save_datasets()  # This will add auto_start to the root level
         print(f"✓ Added auto_start={auto_start} to datasets.json")
 
@@ -997,17 +998,21 @@ def switch_dataset(dataset_num):
     global state, current_dataset
     dataset_num = str(dataset_num)
     if dataset_num in datasets:
-        # Save current state (auto_start will be cleaned by save_datasets)
+        # Save current state to the CURRENT dataset before switching
         datasets[str(current_dataset)]['state'] = dict(state)
-        save_datasets()
+        
+        # Switch to new dataset
+        current_dataset = int(dataset_num)
+        
         # Reset to default state first, then apply new dataset state
         state.clear()
         state.update(default_state.copy())
         new_state = datasets[dataset_num]['state'].copy()
         new_state.pop('auto_start', None)  # Ensure auto_start not in state
         state.update(new_state)
-        current_dataset = int(dataset_num)
-        save_config()
+        
+        # Save datasets and current dataset info
+        save_datasets()
         return True
     return False
 
@@ -2096,8 +2101,18 @@ class RDSScheduler:
         return tags
 
     def freq_code(self, f):
-        try: return round((float(f) - 87.5) / 0.1) if 87.6 <= float(f) <= 107.9 else 205
-        except: return 205
+        try: 
+            freq_val = float(f)
+            # Extended FM band support (87.5-108.0 MHz)
+            if 87.5 <= freq_val <= 108.0:
+                code = round((freq_val - 87.5) / 0.1)
+                # Ensure code is within valid 8-bit range (0-204)
+                return min(204, max(0, code))
+            else:
+                return 205  # "No AF exists" code
+        except (ValueError, TypeError) as e:
+            print(f"Warning: Invalid AF frequency '{f}': {e}")
+            return 205
 
     def split(self, text, width=8, center=False):
         pad = lambda s: s.center(width) if center else s.ljust(width)
@@ -2411,33 +2426,67 @@ class RDSScheduler:
             b3 = 0xE0E0
             
             if state["en_af"] and g_ver == 0:
-                 # Split by comma or space, accept both separators
-                 afs = [x.strip() for x in re.split(r'[,\s]+', state["af_list"]) if x.strip()]
-                 af_method = state.get("af_method", "A")
+                 # Split by comma or space, accept both separators and validate frequencies
+                 af_list_raw = state.get("af_list", "").strip()
+                 if not af_list_raw:
+                     # No AF list provided, don't send AF data
+                     pass
+                 else:
+                     afs_raw = [x.strip() for x in re.split(r'[,\s]+', af_list_raw) if x.strip()]
+                     # Validate and filter frequencies
+                     afs = []
+                     for freq in afs_raw:
+                         try:
+                             freq_val = float(freq)
+                             if 87.5 <= freq_val <= 108.0:
+                                 afs.append(freq)
+                             else:
+                                 print(f"Warning: AF frequency {freq} MHz is outside valid FM band (87.5-108.0)")
+                         except (ValueError, TypeError):
+                             print(f"Warning: Invalid AF frequency format: '{freq}'")
+                     
+                     af_method = state.get("af_method", "A")
 
-                 if afs and af_method == "A":
-                     # Method A: List all frequencies with count code
-                     if self.af_ptr == 0:
-                         b3, self.af_ptr = (224+len(afs))<<8 | self.freq_code(afs[0]), 1
-                     else:
-                         # Check if we have more frequencies to send
-                         if self.af_ptr < len(afs):
-                             f1 = self.freq_code(afs[self.af_ptr])
-                             f2 = self.freq_code(afs[self.af_ptr+1]) if self.af_ptr+1 < len(afs) else 205
-                             b3, self.af_ptr = (f1<<8)|f2, (self.af_ptr+2) if self.af_ptr+2 < len(afs) else 0
-                         else:
-                             # All frequencies sent, loop back
+                     if afs and af_method == "A":
+                         # Method A: List all frequencies with count code
+                         try:
+                             if self.af_ptr == 0:
+                                 first_code = self.freq_code(afs[0])
+                                 if first_code == 205:
+                                     raise ValueError(f"Invalid first AF frequency: {afs[0]}")
+                                 b3, self.af_ptr = (224+len(afs))<<8 | first_code, 1
+                             else:
+                                 # Check if we have more frequencies to send
+                                 if self.af_ptr < len(afs):
+                                     f1 = self.freq_code(afs[self.af_ptr])
+                                     f2 = self.freq_code(afs[self.af_ptr+1]) if self.af_ptr+1 < len(afs) else 205
+                                     if f1 == 205:
+                                         print(f"Warning: Skipping invalid AF frequency: {afs[self.af_ptr]}")
+                                         self.af_ptr += 1
+                                         # Skip this iteration, try next frequency
+                                         return self.next()
+                                     b3, self.af_ptr = (f1<<8)|f2, (self.af_ptr+2) if self.af_ptr+2 < len(afs) else 0
+                                 else:
+                                     # All frequencies sent, loop back
+                                     self.af_ptr = 0
+                                     first_code = self.freq_code(afs[0])
+                                     if first_code == 205:
+                                         raise ValueError(f"Invalid first AF frequency on loop: {afs[0]}")
+                                     b3 = (224+len(afs))<<8 | first_code
+                         except (ValueError, IndexError) as e:
+                             print(f"AF Method A encoding error: {e}")
+                             # Reset AF state and skip AF transmission
                              self.af_ptr = 0
-                             b3 = (224+len(afs))<<8 | self.freq_code(afs[0])
 
-                 elif afs and af_method == "B":
-                     # Method B: Frequency pairs with tuning frequency indicator
-                     # Parse af_pairs JSON structure (json already imported at module level)
-                     try:
-                         af_pairs_json = state.get("af_pairs", "[]")
-                         af_pairs = json.loads(af_pairs_json) if af_pairs_json else []
-                     except:
-                         af_pairs = []
+                     elif afs and af_method == "B":
+                         # Method B: Frequency pairs with tuning frequency indicator
+                         # Parse af_pairs JSON structure (json already imported at module level)
+                         try:
+                             af_pairs_json = state.get("af_pairs", "[]")
+                             af_pairs = json.loads(af_pairs_json) if af_pairs_json else []
+                         except Exception as e:
+                             print(f"Warning: AF pairs JSON parsing error: {e}")
+                             af_pairs = []
 
                      # Fallback to af_list format if no pairs defined
                      if not af_pairs and afs:
@@ -4467,8 +4516,9 @@ def parse_rds_spy_format(text):
 
     return groups
 
-load_config()
-load_datasets()
+# Load configuration and datasets - order matters!
+load_datasets()  # Load datasets first to populate the datasets dict
+load_config()    # Then load config which applies the current dataset's state
 
 # --- UECP SERVER ---
 _uecp_tcp_server = None
