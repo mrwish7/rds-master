@@ -1627,7 +1627,8 @@ class RDSScheduler:
 
         # AF Method B transmission cache
         self.af_b_transmissions = []
-        self.last_af_pairs = ""
+        self.af_b_ptr = 0       # separate pointer - not shared with Method A af_ptr
+        self._af_b_cache_key = ""  # combined key: method|af_pairs_json|af_list
         self.rt_msg_cache = {}  # Cache resolved content per message id
         self.last_rt_messages_sig = ""  # Track changes to message list
 
@@ -2703,6 +2704,8 @@ class RDSScheduler:
                              print(f"Warning: Invalid AF frequency format: '{freq}'")
                      
                      af_method = state.get("af_method", "A")
+                     af_pairs = []
+                     af_pairs_json = "[]"
 
                      if afs and af_method == "A":
                          # Method A: List all frequencies with count code
@@ -2737,7 +2740,6 @@ class RDSScheduler:
 
                      elif afs and af_method == "B":
                          # Method B: Frequency pairs with tuning frequency indicator
-                         # Parse af_pairs JSON structure (json already imported at module level)
                          try:
                              af_pairs_json = state.get("af_pairs", "[]")
                              af_pairs = json.loads(af_pairs_json) if af_pairs_json else []
@@ -2745,70 +2747,61 @@ class RDSScheduler:
                              print(f"Warning: AF pairs JSON parsing error: {e}")
                              af_pairs = []
 
-                     # Fallback to af_list format if no pairs defined
-                     if not af_pairs and afs:
-                         af_pairs = [{
-                             'main': afs[0],
-                             'alts': ', '.join(afs[1:]) if len(afs) > 1 else '',
-                             'regional': False
-                         }]
+                         # Fallback: treat af_list as tuning=afs[0], alts=afs[1:]
+                         if not af_pairs and afs:
+                             af_pairs = [{
+                                 'main': afs[0],
+                                 'alts': ', '.join(afs[1:]) if len(afs) > 1 else '',
+                                 'regional': False
+                             }]
 
-                     if af_pairs:
-                        # Check if pairs changed - rebuild transmission list if so
-                        if af_pairs_json != self.last_af_pairs:
-                            self.last_af_pairs = af_pairs_json
-                            self.af_b_transmissions = []
-                            self.af_ptr = 0
+                         # Change-detection key includes af_list so fallback rebuilds when list changes
+                         af_b_key = f"B|{af_pairs_json}|{af_list_raw}"
 
-                            # Build transmission list - Method B
-                            # Count ALL frequencies across all pairs (including main freq repetitions)
-                            # Group pairs by main frequency
-                            freq_groups = {}
-                            for pair in af_pairs:
-                                main_freq = pair.get('main', '').strip()
-                                alts_str = pair.get('alts', '')
-                                is_regional = pair.get('regional', False)
-                                if not main_freq:
-                                    continue
+                         if af_pairs:
+                             # Rebuild transmission list when anything relevant changes
+                             if af_b_key != self._af_b_cache_key:
+                                 self._af_b_cache_key = af_b_key
+                                 self.af_b_transmissions = []
+                                 self.af_b_ptr = 0
 
-                                alt_freqs = [f.strip() for f in alts_str.split(',') if f.strip()]
-                                if not alt_freqs:
-                                    continue
+                                 # Group pairs by main frequency
+                                 freq_groups = {}
+                                 for pair in af_pairs:
+                                     main_freq = pair.get('main', '').strip()
+                                     alts_str = pair.get('alts', '')
+                                     is_regional = pair.get('regional', False)
+                                     if not main_freq:
+                                         continue
+                                     alt_freqs = [f.strip() for f in alts_str.split(',') if f.strip()]
+                                     if not alt_freqs:
+                                         continue
+                                     if main_freq not in freq_groups:
+                                         freq_groups[main_freq] = {'alts': [], 'regional': is_regional}
+                                     freq_groups[main_freq]['alts'].extend(alt_freqs)
+                                     if is_regional:
+                                         freq_groups[main_freq]['regional'] = True
 
-                                if main_freq not in freq_groups:
-                                    freq_groups[main_freq] = {'alts': [], 'regional': is_regional}
+                                 for main_freq, group_data in freq_groups.items():
+                                     alt_list = group_data['alts']
+                                     is_regional = group_data['regional']
+                                     total_freqs = 1 + (len(alt_list) * 2)
+                                     tuning_indicator = 250 if is_regional else self.freq_code(main_freq)
+                                     self.af_b_transmissions.append(((224 + total_freqs) << 8) | tuning_indicator)
+                                     for alt_freq in alt_list:
+                                         self.af_b_transmissions.append(
+                                             (self.freq_code(main_freq) << 8) | self.freq_code(alt_freq)
+                                         )
 
-                                freq_groups[main_freq]['alts'].extend(alt_freqs)
-                                if is_regional:
-                                    freq_groups[main_freq]['regional'] = True
-
-                            # Transmit each frequency group
-                            for main_freq, group_data in freq_groups.items():
-                                alt_list = group_data['alts']
-                                is_regional = group_data['regional']
-
-                                # Count code: 224 + total number of frequency codes transmitted
-                                # = 1 (linking freq in count code) + len(alt_list) * 2 (pairs of tuning+alt)
-                                total_freqs = 1 + (len(alt_list) * 2)
-                                # Use code 250 (filler) for regional variant, otherwise main freq
-                                tuning_indicator = 250 if is_regional else self.freq_code(main_freq)
-                                self.af_b_transmissions.append(((224 + total_freqs) << 8) | tuning_indicator)
-
-                                # Then transmit all main/alt pairs
-                                for alt_freq in alt_list:
-                                    self.af_b_transmissions.append(
-                                        (self.freq_code(main_freq) << 8) | self.freq_code(alt_freq)
-                                    )
-
-                        # Cycle through transmissions
-                        if self.af_b_transmissions:
-                            b3 = self.af_b_transmissions[self.af_ptr % len(self.af_b_transmissions)]
-                            self.af_ptr = (self.af_ptr + 1) % len(self.af_b_transmissions)
-                        else:
-                            b3 = 0xE0E0
-                     else:
-                         b3 = 0xE0E0
-                         self.af_ptr = 0
+                             # Cycle through transmissions
+                             if self.af_b_transmissions:
+                                 b3 = self.af_b_transmissions[self.af_b_ptr % len(self.af_b_transmissions)]
+                                 self.af_b_ptr = (self.af_b_ptr + 1) % len(self.af_b_transmissions)
+                             else:
+                                 b3 = 0xE0E0
+                         else:
+                             b3 = 0xE0E0
+                             self.af_b_ptr = 0
             
             if g_ver == 1: b3 = int(state["pi"], 16)
             return RDSHelper.get_group_bits(0, g_ver, tail, b3, (txt_bytes[seg*2]<<8)|txt_bytes[seg*2+1])
