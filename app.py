@@ -19,7 +19,7 @@ from scipy import signal as dsp_signal
 from scipy.fft import fft
 
 # --- VERSION ---
-VERSION = "v1.1c"
+VERSION = "v1.2"
 
 # --- SETTINGS ---
 # Host API filtering: auto-detect based on OS, can be overridden via RDS_HOSTAPI env var
@@ -413,6 +413,8 @@ default_state = {
     "ert_direction": "ltr",  # Text direction: "ltr" (left-to-right) - always 0 per spec
     "en_ert_rtplus": False,  # Enable RT+ tagging for eRT
     "ert_rtplus_tags": "[]",  # JSON array of RT+ tag definitions for eRT
+    "ert_rtplus_group_type": 6,  # Application group type for eRT RT+ (separate from eRT data group)
+    "ert_source": "ert",  # Content source: "ert" = eRT message manager, "rt" = mirror RT message manager
 }
 
 state = default_state.copy()
@@ -429,6 +431,9 @@ def get_effective_value(param):
 monitor_data = {
     "ps": "OFF AIR",
     "rt": "",
+    "ert": "",
+    "en_ert": False,
+    "ert_rtplus_info": "",
     "lps": "",
     "ptyn": "",
     "af": "",
@@ -1182,10 +1187,16 @@ def monitor_pusher_loop():
             
             # Pilot generation: disabled if pass-through is enabled and an input device is selected, or when genlock is active
             monitor_data["pilot_generated"] = not ((state.get("passthrough") and state.get("device_in_idx") != -1) or state.get("genlock"))
+            monitor_data["en_ert"] = bool(state.get("en_ert", False))
+            # Fallback: if scheduler hasn't fired an eRT group yet, show the configured text
+            if monitor_data["en_ert"] and not monitor_data.get("ert"):
+                monitor_data["ert"] = state.get("ert_text", "")
+            elif not monitor_data["en_ert"]:
+                monitor_data["ert"] = ""
             socketio.emit('monitor', monitor_data)
         else:
              socketio.emit('monitor', {
-                 "ps": "OFF AIR", "rt": "Encoder Stopped", 
+                 "ps": "OFF AIR", "rt": "Encoder Stopped", "ert": "", "en_ert": False, "ert_rtplus_info": "",
                  "lps": "", "ptyn": "", "af_list": "", "af_method": "A", "af_pairs": "[]", "pty_idx": 0, "rt_plus_info": "", "pi": "----",
                  "heartbeat": monitor_data["heartbeat"],
                  "pilot_generated": False,
@@ -1421,7 +1432,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'ert_text', 'ert_messages'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'ert_text', 'ert_messages', 'ert_source'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -1624,6 +1635,10 @@ class RDSScheduler:
         self.ert_msg_index = 0  # Current eRT message index
         self.ert_msg_cycle_count = 0  # Track completed cycles for current eRT message
         self.last_ert_messages_sig = ""  # Track changes to eRT message list
+        # eRT RT+ (separate group, AID: 0x4BD8)
+        self.ert_rt_plus_tags = []     # [(type, byte_start, byte_len), ...]
+        self.ert_rt_plus_toggle = 0    # Toggle bit for eRT RT+ group
+        self._ert_rt_plus_tags_sig = ""  # Change-detection key for toggle
 
         # AF Method B transmission cache
         self.af_b_transmissions = []
@@ -2182,8 +2197,101 @@ class RDSScheduler:
         
         # Get current eRT text - use effective text from message management
         ert_text = self.get_effective_ert_text()
-        
-        # Check if text changed - re-encode if needed
+        monitor_data["ert"] = ert_text
+
+        # Compute eRT RT+ tag info for dashboard display
+        if state.get("en_ert_rtplus") and state.get("en_ert"):
+            try:
+                ert_src = state.get("ert_source", "ert")
+                if ert_src == "rt":
+                    # For RT-mirrored eRT, just reuse the already-computed RT+ display info
+                    monitor_data["ert_rtplus_info"] = monitor_data.get("rt_plus_info", "")
+                else:
+                    messages = self.get_ert_messages()
+                    current_msg = self.get_current_ert_message() if messages else None
+                    if current_msg and current_msg.get("rt_plus_enabled", False):
+                        rt_plus_tags = current_msg.get("rt_plus_tags", {})
+                        tag1_type = int(rt_plus_tags.get("tag1_type", -1))
+                        tag2_type = int(rt_plus_tags.get("tag2_type", -1))
+                        split_delim = current_msg.get("split_delimiter", " - ")
+                        prefix = current_msg.get("prefix", "")
+                        suffix = current_msg.get("suffix", "")
+                        base = ert_text
+                        if prefix and base.startswith(prefix):
+                            base = base[len(prefix):]
+                        if suffix and base.endswith(suffix):
+                            base = base[:-len(suffix)]
+                        parts = base.split(split_delim, 1) if split_delim else [base]
+                        tag_strs = []
+                        for type_code, part in zip([tag1_type, tag2_type], parts):
+                            if type_code >= 0:
+                                type_name = RTPLUS_CONTENT_TYPES.get(type_code, ("Unknown",))[0]
+                                tag_strs.append(f"{type_name}: {part.strip()}")
+                        monitor_data["ert_rtplus_info"] = " | ".join(tag_strs)
+                    else:
+                        monitor_data["ert_rtplus_info"] = ""
+            except Exception:
+                monitor_data["ert_rtplus_info"] = ""
+        else:
+            monitor_data["ert_rtplus_info"] = ""
+
+        # Compute byte-level RT+ tag positions for the dedicated eRT RT+ group
+        if state.get("en_ert_rtplus") and state.get("en_ert"):
+            try:
+                ert_source = state.get("ert_source", "ert")
+                if ert_source == "rt":
+                    # Mirror RT+ tags — already computed by the Group 2A handler
+                    # with no side-effects.  rt_plus_tags uses character offsets;
+                    # for ASCII content (typical) char offset == UTF-8 byte offset.
+                    new_tags = list(self.rt_plus_tags) if hasattr(self, 'rt_plus_tags') else []
+                    tags_sig = f"{ert_text}|rt|{new_tags}"
+                    if tags_sig != self._ert_rt_plus_tags_sig:
+                        self._ert_rt_plus_tags_sig = tags_sig
+                        self.ert_rt_plus_toggle = 1 - self.ert_rt_plus_toggle
+                    self.ert_rt_plus_tags = new_tags
+                else:
+                    # ert_source == "ert": compute byte positions from the eRT message config
+                    messages = self.get_ert_messages()
+                    current_msg = self.get_current_ert_message() if messages else None
+                    if current_msg and current_msg.get("rt_plus_enabled", False):
+                        rt_plus_tags_cfg = current_msg.get("rt_plus_tags", {})
+                        tag1_type = int(rt_plus_tags_cfg.get("tag1_type", -1))
+                        tag2_type = int(rt_plus_tags_cfg.get("tag2_type", -1))
+                        split_delim = current_msg.get("split_delimiter", " - ")
+                        prefix = current_msg.get("prefix", "")
+                        suffix = current_msg.get("suffix", "")
+                        enc = 'utf-8' if state.get("ert_encoding", "utf8") == "utf8" else 'utf-16-be'
+                        base = ert_text
+                        if prefix and base.startswith(prefix):
+                            base = base[len(prefix):]
+                        if suffix and base.endswith(suffix):
+                            base = base[:-len(suffix)]
+                        prefix_byte_len = len(prefix.encode(enc)) if prefix else 0
+                        new_tags = []
+                        if split_delim and tag1_type >= 0 and tag2_type >= 0:
+                            parts = base.split(split_delim, 1)
+                            offset = prefix_byte_len
+                            for i, (part, type_code) in enumerate(zip(parts, [tag1_type, tag2_type])):
+                                if type_code >= 0:
+                                    part_byte_len = len(part.encode(enc))
+                                    new_tags.append((type_code, offset, part_byte_len))
+                                if i == 0:
+                                    offset += len(parts[0].encode(enc)) + len(split_delim.encode(enc))
+                        elif tag1_type >= 0:
+                            new_tags.append((tag1_type, prefix_byte_len, len(base.encode(enc))))
+                        tags_sig = f"{ert_text}|ert|{new_tags}"
+                        if tags_sig != self._ert_rt_plus_tags_sig:
+                            self._ert_rt_plus_tags_sig = tags_sig
+                            self.ert_rt_plus_toggle = 1 - self.ert_rt_plus_toggle
+                        self.ert_rt_plus_tags = new_tags
+                    else:
+                        self.ert_rt_plus_tags = []
+            except Exception as e:
+                print(f"[eRT RT+] tag computation error: {e}")
+                self.ert_rt_plus_tags = []
+        else:
+            self.ert_rt_plus_tags = []
+
         if ert_text != self.last_ert_content:
             self.last_ert_content = ert_text
             self.ert_bytes = self.encode_ert_text(ert_text)
@@ -2301,6 +2409,17 @@ class RDSScheduler:
 
     def get_effective_ert_text(self):
         """Get the effective eRT text based on message management."""
+        # If source is "rt", mirror the currently active RT text.
+        # IMPORTANT: do NOT call get_current_rt_message() here — that function
+        # has side effects (flips rt_ab_flag, mutates rt_msg_cache, etc.) which
+        # would corrupt Group 2A / Group 11A RT+ when fired from the eRT path.
+        # monitor_data["rt"] is already kept current by the Group 2A handler
+        # with no re-entrancy risk.
+        ert_source = state.get("ert_source", "ert")
+        if ert_source == "rt":
+            raw = monitor_data.get("rt", "")
+            return raw.rstrip('\r').rstrip()  # strip padding/CR added by RT encoder
+
         messages = self.get_ert_messages()
         if messages:
             current_msg = self.get_current_ert_message()
@@ -2506,6 +2625,9 @@ class RDSScheduler:
         if state.get("en_ert"):
             ert_group_type = state.get("ert_group_type", 11)
             seq.append((ert_group_type, 0))  # eRT groups
+        if state.get("en_ert") and state.get("en_ert_rtplus"):
+            ert_rtplus_group_type = state.get("ert_rtplus_group_type", 6)
+            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group
 
         # Add enabled custom groups to auto schedule
         # Only add each unique group type once (or multiple times based on schedule_freq)
@@ -2562,7 +2684,8 @@ class RDSScheduler:
             # Recompute schedule only when relevant state changes or at the start of each cycle.
             sched_sig = (state["en_lps"], state.get("en_eon"), state["en_ptyn"], state["en_id"],
                          state.get("en_dab"), state["en_rt_plus"], state.get("en_tdc_5a"),
-                         state.get("en_tdc_5b"), self._custom_groups_cache_str)
+                         state.get("en_tdc_5b"), state.get("en_ert"), state.get("en_ert_rtplus"),
+                         self._custom_groups_cache_str)
             cached = getattr(self, '_auto_schedule_cache', None)
             if (cached is None or self._auto_schedule_sig != sched_sig or
                     (self.schedule_ptr > 0 and self.schedule_ptr % len(cached) == 0)):
@@ -3031,11 +3154,11 @@ class RDSScheduler:
                  ert_agtc = (ert_group_type * 2) + 0
                  active_odas.append({"type": "ert", "group_type": ert_agtc, "aid": 0x6552, "msg": self.get_ert_control_bits()})
              
-             # Add eRT RT+ if enabled (separate ODA)
+             # Add eRT RT+ if enabled (separate ODA on its own dedicated group)
              if state.get("en_ert") and state.get("en_ert_rtplus"):
-                 ert_group_type = state.get("ert_group_type", 13)
-                 # eRT RT+ uses same group as eRT data, AGTC = (group_number*2) + 0
-                 ert_rtplus_agtc = (ert_group_type * 2) + 0  
+                 ert_rtplus_group_type = state.get("ert_rtplus_group_type", 6)
+                 # eRT RT+ AGTC = (group_number*2) + 0 for version A
+                 ert_rtplus_agtc = (ert_rtplus_group_type * 2) + 0
                  active_odas.append({"type": "ert_rtplus", "group_type": ert_rtplus_agtc, "aid": 0x4BD8, "msg": 0x0000})
 
              # NOTE: RDS2 ODA is NOT included here - it's only announced in the RDS2 stream, not in regular RDS
@@ -3073,6 +3196,33 @@ class RDSScheduler:
         # Enhanced RadioText (eRT) Application Groups
         elif g_type == state.get("ert_group_type", 13) and state.get("en_ert"):
             return self.generate_ert_group(g_ver)
+
+        # eRT RT+ (ODA AID: 0x4BD8) — same wire format as Group 11A RT+ but for eRT content
+        elif g_type == state.get("ert_rtplus_group_type", 6) and state.get("en_ert") and state.get("en_ert_rtplus"):
+            t1_typ, t1_start, t1_len = 0, 0, 0
+            t2_typ, t2_start, t2_len = 0, 0, 0
+
+            tags_to_send = list(self.ert_rt_plus_tags[:2])
+
+            # SMART SORT: Tag 2 slot has 5-bit length field (max 32). Tag 1 has 6-bit (max 64).
+            # If we have 2 tags, put the longer-content one in the Tag 1 slot.
+            if len(tags_to_send) == 2:
+                if tags_to_send[1][2] > 31 and tags_to_send[0][2] <= 31:
+                    tags_to_send.reverse()
+
+            if len(tags_to_send) > 0:
+                t1_typ, t1_start, t1_len = tags_to_send[0]
+                if t1_len > 0: t1_len -= 1  # Spec: length marker is len-1
+            if len(tags_to_send) > 1:
+                t2_typ, t2_start, t2_len = tags_to_send[1]
+                if t2_len > 0: t2_len -= 1
+
+            toggle = self.ert_rt_plus_toggle & 1
+            b2_tail = (toggle << 4) | 0x08 | ((t1_typ >> 3) & 0x07)
+            b3_val  = ((t1_typ & 0x07) << 13) | ((t1_start & 0x3F) << 7) | ((t1_len & 0x3F) << 1) | ((t2_typ >> 5) & 0x01)
+            b4_val  = ((t2_typ & 0x1F) << 11) | ((t2_start & 0x3F) << 5) | (t2_len & 0x1F)
+
+            return RDSHelper.get_group_bits(state.get("ert_rtplus_group_type", 6), 0, b2_tail, b3_val, b4_val)
 
         elif g_type == 5:
             # Group 5A/5B: Transparent Data Channels (TDC)
@@ -5086,6 +5236,15 @@ UI_HTML = r"""
                                  <div class="live-display sub text-orange-300 whitespace-pre-line" id="live_rt_plus"></div>
                              </div>
 
+                             <div id="live_ert_row" style="display:none">
+                                 <label class="flex justify-between"><span>Enhanced RadioText (eRT)</span> <span class="text-xs text-gray-400">ODA AID: 0458</span></label>
+                                 <div class="live-display sub text-cyan-300" id="live_ert"></div>
+                                 <div id="live_ert_rtplus_row" style="display:none" class="mt-1">
+                                     <label class="text-xs text-gray-400">eRT RT+ Tags <span class="text-gray-500">(AID: 4BD8)</span></label>
+                                     <div class="live-display sub text-orange-300 whitespace-pre-line" id="live_ert_rtplus"></div>
+                                 </div>
+                             </div>
+
                              <div class="grid grid-cols-3 gap-2">
                                  <div>
                                      <label>Live PI</label>
@@ -5755,7 +5914,7 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header flex justify-between items-center">
                         <span>Enhanced RadioText (eRT) Messages</span>
-                        <button onclick="addERTMessage()" class="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs text-white font-bold">+ Add Message</button>
+                        <button id="ert_add_msg_btn" onclick="addERTMessage()" class="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs text-white font-bold">+ Add Message</button>
                     </div>
                     <div class="section-body">
                         <div class="mb-3">
@@ -5766,16 +5925,31 @@ UI_HTML = r"""
                                 </div>
                                 <input type="checkbox" class="toggle-checkbox" id="en_ert" {% if state.en_ert %}checked{% endif %} onchange="sync()">
                             </div>
-                        </div>
-                        
-                        <!-- Message List -->
-                        <div id="ert_messages_list" class="space-y-2 mb-3">
-                            <!-- Messages rendered by JavaScript -->
+                            <div class="flex items-center gap-3 mt-2">
+                                <label class="text-xs text-gray-400 shrink-0">Content Source</label>
+                                <select id="ert_source" onchange="sync(); updateERTSourceUI()">
+                                    <option value="ert" {% if state.ert_source != 'rt' %}selected{% endif %}>eRT Messages</option>
+                                    <option value="rt" {% if state.ert_source == 'rt' %}selected{% endif %}>RT Message Manager (UTF-8, 128 bytes)</option>
+                                </select>
+                            </div>
                         </div>
 
-                        <!-- Empty state -->
-                        <div id="ert_messages_empty" class="text-center py-4 text-gray-500 text-sm" style="display:none">
-                            No messages configured. Click "+ Add Message" to create one.
+                        <!-- Source: eRT messages section -->
+                        <div id="ert_msg_section">
+                            <!-- Message List -->
+                            <div id="ert_messages_list" class="space-y-2 mb-3">
+                                <!-- Messages rendered by JavaScript -->
+                            </div>
+
+                            <!-- Empty state -->
+                            <div id="ert_messages_empty" class="text-center py-4 text-gray-500 text-sm" style="display:none">
+                                No messages configured. Click "+ Add Message" to create one.
+                            </div>
+                        </div>
+
+                        <!-- Source: RT message manager note -->
+                        <div id="ert_source_rt_note" style="display:none" class="mb-3 p-3 bg-[#0a1a0a] border border-green-900/50 rounded text-xs text-gray-400">
+                            eRT will transmit the same content as the <span class="text-green-400 font-semibold">RT Message Manager</span>, re-encoded as UTF-8 up to 128 bytes. Cycling follows RT &mdash; when RT advances to the next message, eRT follows. Manage messages in the <span class="text-white">RadioText &rarr; RT Messages</span> section.
                         </div>
 
                         <!-- Global eRT Settings -->
@@ -5799,6 +5973,16 @@ UI_HTML = r"""
                              </div>
                              <div class="flex gap-4">
                                  <div class="flex flex-col items-center"><label>RT+ Enable</label><input type="checkbox" class="toggle-checkbox" id="en_ert_rtplus" {% if state.en_ert_rtplus %}checked{% endif %} onchange="sync()"></div>
+                                 <div>
+                                     <label>RT+ Group</label>
+                                     <select id="ert_rtplus_group_type" onchange="sync()">
+                                         {% for gt in range(4, 16) %}
+                                         {% if gt != 11 %}
+                                         <option value="{{gt}}" {% if state.ert_rtplus_group_type == gt %}selected{% endif %}>{{gt}}A</option>
+                                         {% endif %}
+                                         {% endfor %}
+                                     </select>
+                                 </div>
                              </div>
                         </div>
                      </div>
@@ -6075,7 +6259,7 @@ UI_HTML = r"""
                          <!-- PC Status Options (shown when either mode is pc_status) -->
                          <div id="tdc_pc_options" {% if state.tdc_5a_mode != 'pc_status' and state.tdc_5b_mode != 'pc_status' %}style="display:none"{% endif %} class="p-2 border border-blue-700 rounded bg-blue-950 bg-opacity-20">
                              <label class="font-semibold text-blue-300 mb-2 block">PC Status Display Options</label>
-                             <div class="text-[9px] text-gray-400 mb-2">Format: RDS-MASTER v1.1b | CPU: XX% | Temp: XXC | IP: XXX.XXX.XXX.XXX</div>
+                             <div class="text-[9px] text-gray-400 mb-2">Format: RDS-MASTER v1.2 | CPU: XX% | Temp: XXC | IP: XXX.XXX.XXX.XXX</div>
                              <div class="grid grid-cols-3 gap-2 text-sm">
                                  <label class="flex items-center gap-2">
                                      <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_cpu" {% if state.tdc_pc_show_cpu %}checked{% endif %} onchange="sync()">
@@ -9696,6 +9880,15 @@ UI_HTML = r"""
             setText('live_lps', data.lps);
             setText('live_ptyn', data.ptyn);
             setText('live_pi', data.pi);
+
+            // eRT row - show/hide based on en_ert
+            const ertRow = document.getElementById('live_ert_row');
+            if (ertRow) ertRow.style.display = data.en_ert ? '' : 'none';
+            setText('live_ert', data.ert || '');
+            const ertRtplusRow = document.getElementById('live_ert_rtplus_row');
+            const ertRtplusInfo = data.ert_rtplus_info || '';
+            if (ertRtplusRow) ertRtplusRow.style.display = (data.en_ert && ertRtplusInfo) ? '' : 'none';
+            setText('live_ert_rtplus', ertRtplusInfo ? ertRtplusInfo.split(' | ').join('\n') : '');
             
             // Format RT+ tags with type names
             if (data.rt_plus_info && data.rt_plus_info !== "No RT+" && data.rt_plus_info !== "") {
@@ -9957,6 +10150,8 @@ UI_HTML = r"""
                 // Enhanced RadioText (eRT)
                 en_ert: getVal('en_ert'), ert_text: getVal('ert_text') || '', ert_encoding: getVal('ert_encoding'), 
                 ert_group_type: getVal('ert_group_type'), en_ert_rtplus: getVal('en_ert_rtplus'),
+                ert_rtplus_group_type: getVal('ert_rtplus_group_type') || 6,
+                ert_source: getVal('ert_source') || 'ert',
                 ert_messages: JSON.stringify(ertMessages),
                 en_dab: getVal('en_dab'), dab_channel: getVal('dab_channel'),
                 dab_eid: getVal('dab_eid'), dab_mode: getVal('dab_mode'), dab_es_flag: getVal('dab_es_flag'),
@@ -12899,9 +13094,21 @@ UI_HTML = r"""
             socket.emit('update', { ert_messages: JSON.stringify(ertMessages) });
         }
 
+        function updateERTSourceUI() {
+            var src = document.getElementById('ert_source');
+            var isRT = src && src.value === 'rt';
+            var addBtn = document.getElementById('ert_add_msg_btn');
+            var msgSection = document.getElementById('ert_msg_section');
+            var rtNote = document.getElementById('ert_source_rt_note');
+            if (addBtn) addBtn.style.display = isRT ? 'none' : '';
+            if (msgSection) msgSection.style.display = isRT ? 'none' : '';
+            if (rtNote) rtNote.style.display = isRT ? '' : 'none';
+        }
+
         // Initialize eRT UI on page load
         document.addEventListener('DOMContentLoaded', function() {
             renderERTMessages();
+            updateERTSourceUI();
             
             // Add event listeners for eRT RT+ preview updates
             var ertTagElements = [
