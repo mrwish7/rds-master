@@ -11,6 +11,7 @@ import collections
 import configparser
 import urllib.request
 import json
+import tempfile
 from datetime import datetime, timezone, date
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
@@ -882,6 +883,22 @@ def migrate_rt_messages():
         state["rt_messages"] = json.dumps(messages)
         print(f"Migrated {len(messages)} RT message(s) from legacy config.")
 
+def _atomic_write_json(filepath, data):
+    """Write JSON atomically: write to temp file then rename, so the original
+    is never truncated unless the write fully succeeds."""
+    dir_name = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, filepath)  # atomic on same filesystem
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
 def save_config():
     """Save configuration to datasets.json."""
     try:
@@ -911,8 +928,9 @@ def save_config():
         if 'auth' not in data:
             data['auth'] = {}
         
-        # Get current dataset
-        current = str(data.get('current', 1))
+        # Get current dataset — use in-memory variable, NOT what's in the file
+        # The file's 'current' may be stale (race with save_datasets, or deleted dataset)
+        current = str(current_dataset)
         
         # Update current dataset state
         if current not in data['datasets']:
@@ -939,9 +957,8 @@ def save_config():
             print(f"Error: State contains non-serializable data: {e}")
             return
         
-        # Save
-        with open(DATASETS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        # Save atomically (temp file + rename) so file is never left corrupted
+        _atomic_write_json(DATASETS_FILE, data)
     except Exception as e:
         print(f"Error saving config: {e}")
         import traceback
@@ -977,11 +994,21 @@ def save_datasets():
     """Save datasets along with auth and system settings."""
     global auto_start
     try:
-        # Load existing data to preserve auth and system
+        # Load existing data to preserve auth and system (best-effort — if file is
+        # unreadable/corrupt we start fresh rather than aborting the whole save)
         data = {}
         if os.path.exists(DATASETS_FILE):
-            with open(DATASETS_FILE, 'r') as f:
-                data = json.load(f)
+            try:
+                with open(DATASETS_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        data = json.loads(content)
+            except Exception as read_err:
+                print(f"Warning: could not read {DATASETS_FILE} before save_datasets ({read_err}), continuing with empty base")
+        
+        # Sync live state into current dataset slot before writing
+        if str(current_dataset) in datasets:
+            datasets[str(current_dataset)]['state'] = dict(state)
         
         # Clean up: remove auto_start from all dataset states before saving
         datasets_clean = {}
@@ -1004,8 +1031,15 @@ def save_datasets():
         if 'system' not in data:
             data['system'] = {}
         
-        with open(DATASETS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        # Validate JSON serializability before writing
+        try:
+            json.dumps(data)
+        except (TypeError, ValueError) as e:
+            print(f"Error: Dataset state contains non-serializable data: {e}")
+            return
+
+        # Save atomically (temp file + rename) so file is never left corrupted
+        _atomic_write_json(DATASETS_FILE, data)
     except Exception as e:
         print(f"Error saving datasets: {e}")
 
@@ -1646,6 +1680,7 @@ class RDSScheduler:
         self._af_b_cache_key = ""  # combined key: method|af_pairs_json|af_list
         self.rt_msg_cache = {}  # Cache resolved content per message id
         self.last_rt_messages_sig = ""  # Track changes to message list
+        self.ert_msg_last_good = {}  # Last successfully resolved eRT content per message id
 
         # Cache parsed custom groups to avoid json.loads() on every next() call
         self._custom_groups_cache = []
@@ -2199,23 +2234,33 @@ class RDSScheduler:
         ert_text = self.get_effective_ert_text()
         monitor_data["ert"] = ert_text
 
+        def _ert_tag_cfg_from_policies(msg):
+            """Extract tag config from the first enabled default policy in tagging_policies."""
+            try:
+                policies = json.loads(msg.get("tagging_policies", "[]") or "[]")
+                for p in policies:
+                    if p.get("enabled", True) and p.get("type") == "default":
+                        s = p.get("settings", {})
+                        return (int(s.get("tag1_type", -1)),
+                                int(s.get("tag2_type", -1)),
+                                s.get("split_pattern", " - "),
+                                s.get("prefix", ""),
+                                s.get("suffix", ""))
+            except Exception:
+                pass
+            return (-1, -1, " - ", "", "")
+
         # Compute eRT RT+ tag info for dashboard display
         if state.get("en_ert_rtplus") and state.get("en_ert"):
             try:
                 ert_src = state.get("ert_source", "ert")
                 if ert_src == "rt":
-                    # For RT-mirrored eRT, just reuse the already-computed RT+ display info
                     monitor_data["ert_rtplus_info"] = monitor_data.get("rt_plus_info", "")
                 else:
                     messages = self.get_ert_messages()
                     current_msg = self.get_current_ert_message() if messages else None
                     if current_msg and current_msg.get("rt_plus_enabled", False):
-                        rt_plus_tags = current_msg.get("rt_plus_tags", {})
-                        tag1_type = int(rt_plus_tags.get("tag1_type", -1))
-                        tag2_type = int(rt_plus_tags.get("tag2_type", -1))
-                        split_delim = current_msg.get("split_delimiter", " - ")
-                        prefix = current_msg.get("prefix", "")
-                        suffix = current_msg.get("suffix", "")
+                        tag1_type, tag2_type, split_delim, prefix, suffix = _ert_tag_cfg_from_policies(current_msg)
                         base = ert_text
                         if prefix and base.startswith(prefix):
                             base = base[len(prefix):]
@@ -2240,9 +2285,6 @@ class RDSScheduler:
             try:
                 ert_source = state.get("ert_source", "ert")
                 if ert_source == "rt":
-                    # Mirror RT+ tags — already computed by the Group 2A handler
-                    # with no side-effects.  rt_plus_tags uses character offsets;
-                    # for ASCII content (typical) char offset == UTF-8 byte offset.
                     new_tags = list(self.rt_plus_tags) if hasattr(self, 'rt_plus_tags') else []
                     tags_sig = f"{ert_text}|rt|{new_tags}"
                     if tags_sig != self._ert_rt_plus_tags_sig:
@@ -2250,16 +2292,10 @@ class RDSScheduler:
                         self.ert_rt_plus_toggle = 1 - self.ert_rt_plus_toggle
                     self.ert_rt_plus_tags = new_tags
                 else:
-                    # ert_source == "ert": compute byte positions from the eRT message config
                     messages = self.get_ert_messages()
                     current_msg = self.get_current_ert_message() if messages else None
                     if current_msg and current_msg.get("rt_plus_enabled", False):
-                        rt_plus_tags_cfg = current_msg.get("rt_plus_tags", {})
-                        tag1_type = int(rt_plus_tags_cfg.get("tag1_type", -1))
-                        tag2_type = int(rt_plus_tags_cfg.get("tag2_type", -1))
-                        split_delim = current_msg.get("split_delimiter", " - ")
-                        prefix = current_msg.get("prefix", "")
-                        suffix = current_msg.get("suffix", "")
+                        tag1_type, tag2_type, split_delim, prefix, suffix = _ert_tag_cfg_from_policies(current_msg)
                         enc = 'utf-8' if state.get("ert_encoding", "utf8") == "utf8" else 'utf-16-be'
                         base = ert_text
                         if prefix and base.startswith(prefix):
@@ -2333,7 +2369,16 @@ class RDSScheduler:
         
         # Advance pointer for next transmission
         self.ert_ptr = (self.ert_ptr + 1) % segments_needed
-        
+
+        # A full pass just completed — count it as one cycle
+        if self.ert_ptr == 0:
+            self.ert_msg_cycle_count += 1
+            current_msg_for_cycle = self.get_current_ert_message()
+            if current_msg_for_cycle:
+                cycles_required = current_msg_for_cycle.get("cycles", 1)
+                if self.ert_msg_cycle_count >= cycles_required:
+                    self.advance_to_next_ert_message()
+
         # Block 2: Group type, version, TP, PTY, segment address (5-bit)
         ert_group_type = state.get("ert_group_type", 13)
         tail = (get_effective_value("tp") << 10) | (get_effective_value("pty") << 5) | segment_addr
@@ -2379,32 +2424,47 @@ class RDSScheduler:
         self.ert_msg_cycle_count = 0  # Reset cycle count for new message
 
     def resolve_ert_msg_content(self, msg):
-        """Resolve eRT message content (supports file, URL, or manual sources)."""
+        """Resolve eRT message content (supports file, URL, or manual sources).
+        On network/file error the last successfully resolved content is returned
+        so a transient dropout does not corrupt on-air output."""
         if not msg:
             return ""
-            
+
+        msg_id = msg.get("id", "")
         source_type = msg.get("source_type", "manual")
         content = msg.get("content", "")
-        
+
         if source_type == "manual":
+            # Manual content is always authoritative — no fallback needed
+            if msg_id:
+                self.ert_msg_last_good[msg_id] = content
             return content
+
         elif source_type == "file":
             try:
                 with open(content, "r", encoding="utf-8") as f:
-                    return f.read().strip()
+                    result = f.read().strip()
+                if msg_id:
+                    self.ert_msg_last_good[msg_id] = result
+                return result
             except Exception as e:
                 print(f"eRT file read error: {e}")
-                return f"Error reading: {content}"
+                # Return last good content if available, else empty string
+                return self.ert_msg_last_good.get(msg_id, "")
+
         elif source_type == "url":
             try:
-                import requests
-                response = requests.get(content, timeout=5)
-                response.raise_for_status()
-                return response.text.strip()
+                import urllib.request as _ur
+                req = _ur.Request(content, headers={"User-Agent": "RDS-Encoder/1.0"})
+                with _ur.urlopen(req, timeout=5) as resp:
+                    result = resp.read().decode("utf-8", errors="replace").strip()
+                if msg_id:
+                    self.ert_msg_last_good[msg_id] = result
+                return result
             except Exception as e:
                 print(f"eRT URL fetch error: {e}")
-                return f"Error fetching: {content}"
-        
+                return self.ert_msg_last_good.get(msg_id, "")
+
         return content
 
     def get_effective_ert_text(self):
@@ -2424,21 +2484,11 @@ class RDSScheduler:
         if messages:
             current_msg = self.get_current_ert_message()
             if current_msg:
-                # Check if we need to advance to next message
-                cycles_required = current_msg.get("cycles", 1)
-                if self.ert_msg_cycle_count >= cycles_required:
-                    self.advance_to_next_ert_message()
-                    current_msg = self.get_current_ert_message()
-                
-                if current_msg:
-                    resolved_content = self.resolve_ert_msg_content(current_msg)
-                    
-                    # Apply RT+ formatting if enabled for this message
-                    if current_msg.get("rt_plus_enabled", False):
-                        resolved_content = self.apply_ert_rtplus_formatting(current_msg, resolved_content)
-                    
-                    self.ert_msg_cycle_count += 1
-                    return resolved_content
+                resolved_content = self.resolve_ert_msg_content(current_msg)
+                # Apply RT+ formatting if enabled for this message
+                if current_msg.get("rt_plus_enabled", False):
+                    resolved_content = self.apply_ert_rtplus_formatting(current_msg, resolved_content)
+                return resolved_content
         
         # Fallback to manual eRT text
         fallback = state.get("ert_text", "") or ""
@@ -2447,29 +2497,20 @@ class RDSScheduler:
         return fallback
 
     def apply_ert_rtplus_formatting(self, msg, content):
-        """Apply RT+ formatting to eRT message content."""
+        """Apply RT+ formatting (prefix/suffix from first enabled default policy)."""
         try:
-            rt_plus_tags = msg.get("rt_plus_tags", {})
-            tag1_type = rt_plus_tags.get("tag1_type", -1)
-            tag2_type = rt_plus_tags.get("tag2_type", -1)
-            split_delimiter = msg.get("split_delimiter", " - ")
-            prefix = msg.get("prefix", "")
-            suffix = msg.get("suffix", "")
-            
-            # If no RT+ tags configured, return content as-is
-            if tag1_type < 0 and tag2_type < 0:
-                return content
-            
-            # Build formatted content with prefix/suffix
-            formatted_content = prefix + content + suffix
-            
-            # For eRT, we return the formatted text
-            # The actual RT+ tag positions will be calculated during transmission
-            return formatted_content
-            
+            policies = json.loads(msg.get("tagging_policies", "[]") or "[]")
+            for p in policies:
+                if p.get("enabled", True) and p.get("type") == "default":
+                    s = p.get("settings", {})
+                    prefix = s.get("prefix", "")
+                    suffix = s.get("suffix", "")
+                    if prefix or suffix:
+                        return prefix + content + suffix
+                    return content
         except Exception as e:
             print(f"eRT RT+ formatting error: {e}")
-            return content
+        return content
 
     def freq_code(self, f):
         try: 
@@ -4650,11 +4691,23 @@ def switch_to_dataset(num):
 
 @app.route('/datasets/<int:num>', methods=['DELETE'])
 def delete_dataset(num):
+    global current_dataset
     if not session.get('auth'): return jsonify({'error': 'Not authenticated'}), 401
-    if str(num) in datasets and len(datasets) > 1:
-        del datasets[str(num)]
+    num_str = str(num)
+    if num_str in datasets and len(datasets) > 1:
+        # If deleting the active dataset, switch to another one first
+        # so current_dataset never points to a non-existent slot
+        if current_dataset == int(num):
+            other_key = next(k for k in sorted(datasets.keys(), key=int) if k != num_str)
+            current_dataset = int(other_key)
+            state.clear()
+            state.update(default_state.copy())
+            new_state = datasets[other_key]['state'].copy()
+            new_state.pop('auto_start', None)
+            state.update(new_state)
+        del datasets[num_str]
         save_datasets()
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'current_dataset': current_dataset})
     return jsonify({'error': 'Cannot delete last dataset'}), 400
 
 # Dynamic Control API Routes
@@ -6013,15 +6066,15 @@ UI_HTML = r"""
                                  <label class="text-xs text-gray-400 mb-1 block">Source Type</label>
                                  <div class="flex gap-4">
                                      <label class="flex items-center gap-2 cursor-pointer">
-                                         <input type="radio" name="ert_msg_source" value="manual" checked class="accent-[#d946ef]" onchange="updateERTSourceUI()">
+                                         <input type="radio" name="ert_msg_source" value="manual" checked class="accent-[#d946ef]" onchange="updateERTMsgSourceUI()">
                                          <span class="text-sm text-gray-300">Manual</span>
                                      </label>
                                      <label class="flex items-center gap-2 cursor-pointer">
-                                         <input type="radio" name="ert_msg_source" value="file" class="accent-[#d946ef]" onchange="updateERTSourceUI()">
+                                         <input type="radio" name="ert_msg_source" value="file" class="accent-[#d946ef]" onchange="updateERTMsgSourceUI()">
                                          <span class="text-sm text-gray-300">File</span>
                                      </label>
                                      <label class="flex items-center gap-2 cursor-pointer">
-                                         <input type="radio" name="ert_msg_source" value="url" class="accent-[#d946ef]" onchange="updateERTSourceUI()">
+                                         <input type="radio" name="ert_msg_source" value="url" class="accent-[#d946ef]" onchange="updateERTMsgSourceUI()">
                                          <span class="text-sm text-gray-300">URL</span>
                                      </label>
                                  </div>
@@ -6056,67 +6109,171 @@ UI_HTML = r"""
                              <!-- RT+ Configuration for eRT -->
                              <div class="bg-[#1a1a1a] border border-[#333] rounded p-3 space-y-3">
                                  <div class="flex justify-between items-center">
-                                     <label class="text-xs text-orange-400 font-bold">RT+ Tags for eRT</label>
+                                     <label class="text-xs text-orange-400 font-bold">eRT+ Tags</label>
                                      <label class="flex items-center gap-2 cursor-pointer">
-                                         <span class="text-xs text-gray-400">Enable RT+ for this eRT message</span>
+                                         <span class="text-xs text-gray-400">Enable for this message</span>
                                          <input type="checkbox" id="ert_msg_rtplus_enabled" class="toggle-checkbox" onchange="updateERTRTPlusUI()">
                                      </label>
                                  </div>
 
-                                 <!-- RT+ Tagging Options -->
+                                 <!-- eRT+ Tagging Options -->
                                  <div id="ert_msg_rtplus_options" style="display:none" class="space-y-4">
-                                     <!-- Simple RT+ Tagging -->
-                                     <div class="bg-[#252525] border border-orange-600/50 rounded p-3 space-y-3">
-                                         <div class="text-orange-400 font-bold text-sm">🎯 RT+ Tag Configuration</div>
-                                         
-                                         <div class="grid grid-cols-2 gap-3">
-                                             <div>
-                                                 <label class="text-xs text-orange-400">Tag 1 Type</label>
-                                                 <select id="ert_msg_tag1_type" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs">
-                                                     <option value="1">1: Title</option>
-                                                     <option value="4" selected>4: Artist</option>
-                                                     <option value="2">2: Album</option>
-                                                     <option value="33">33: Prog.Now</option>
-                                                     <option value="31">31: Stn.Short</option>
-                                                     <option value="32">32: Stn.Long</option>
-                                                     <option value="-1">No Tag</option>
-                                                 </select>
-                                             </div>
-                                             <div>
-                                                 <label class="text-xs text-cyan-400">Tag 2 Type</label>
-                                                 <select id="ert_msg_tag2_type" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs">
-                                                     <option value="1" selected>1: Title</option>
-                                                     <option value="4">4: Artist</option>
-                                                     <option value="2">2: Album</option>
-                                                     <option value="33">33: Prog.Now</option>
-                                                     <option value="32">32: Stn.Long</option>
-                                                     <option value="36">36: Host</option>
-                                                     <option value="-1">No Tag</option>
-                                                 </select>
-                                             </div>
-                                         </div>
 
-                                         <div class="grid grid-cols-3 gap-3">
-                                             <div>
-                                                 <label class="text-xs text-gray-400">Split Pattern</label>
-                                                 <input type="text" id="ert_msg_split_pattern" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" value=" - " placeholder="e.g. ' - '">
-                                             </div>
-                                             <div>
-                                                 <label class="text-xs text-gray-400">Prefix</label>
-                                                 <input type="text" id="ert_msg_prefix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text before tags">
-                                             </div>
-                                             <div>
-                                                 <label class="text-xs text-gray-400">Suffix</label>
-                                                 <input type="text" id="ert_msg_suffix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text after tags">
-                                             </div>
-                                         </div>
+                                     <!-- Sample text for manual mode -->
+                                     <div id="ert_msg_rtplus_sample_wrap" style="display:none">
+                                         <label class="text-xs text-gray-400 mb-1 block">Sample Text for Rule Testing</label>
+                                         <input type="text" id="ert_msg_sample_text" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1" placeholder="e.g. Adele - Rolling in the Deep" oninput="updateERTSampleText(); updateERTRTPlusPreview()">
+                                         <div class="text-[10px] text-gray-500 mt-1">💡 Enter sample text to preview how tagging rules apply</div>
+                                     </div>
 
-                                         <!-- RT+ Preview -->
-                                         <div class="bg-[#111] border border-[#444] rounded p-2">
-                                             <div class="text-xs text-gray-400 mb-1">RT+ Preview:</div>
-                                             <div id="ert_rtplus_preview" class="text-xs font-mono text-green-400">Artist - Title</div>
+                                     <!-- Policy Manager -->
+                                     <div class="bg-[#252525] border border-blue-600/50 rounded p-3">
+                                         <div class="flex items-center justify-between mb-3">
+                                             <div class="flex items-center gap-2">
+                                                 <div class="text-blue-400 font-bold">🎯 Tagging Policies</div>
+                                                 <div class="text-xs text-blue-300">Define how content gets tagged</div>
+                                             </div>
+                                             <button onclick="addERTTaggingPolicy()" class="px-3 py-1 bg-blue-800 hover:bg-blue-700 rounded text-xs text-white font-bold">+ Add Policy</button>
+                                         </div>
+                                         <div id="ert_tagging_policies_list" class="space-y-2"></div>
+                                         <div class="text-[9px] text-gray-500 mt-3 border-t border-gray-700 pt-2">
+                                             💡 <strong>Default</strong>: Base tagging • <strong>Sub-tagging</strong>: Conditional rules • Evaluated top-to-bottom
                                          </div>
                                      </div>
+
+                                     <!-- Policy Editor -->
+                                     <div id="ert_policy_editor" style="display:none" class="bg-[#1a1a1a] border border-purple-600/50 rounded p-4 space-y-3">
+                                         <div class="flex items-center justify-between">
+                                             <h3 class="text-purple-400 font-bold" id="ert_policy_editor_title">Edit Policy</h3>
+                                             <button onclick="closeERTPolicyEditor()" class="text-gray-400 hover:text-white">✕</button>
+                                         </div>
+                                         <div class="grid grid-cols-2 gap-3">
+                                             <div>
+                                                 <label class="text-xs text-gray-400 block mb-1">Policy Name</label>
+                                                 <input type="text" id="ert_policy_name" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" placeholder="e.g. Default Music">
+                                             </div>
+                                             <div>
+                                                 <label class="text-xs text-gray-400 block mb-1">Policy Type</label>
+                                                 <select id="ert_policy_type" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-sm" onchange="updateERTPolicyEditor()">
+                                                     <option value="default">Default</option>
+                                                     <option value="sub">Sub-tagging</option>
+                                                 </select>
+                                             </div>
+                                         </div>
+                                         <!-- Default Policy Settings -->
+                                         <div id="ert_default_policy_settings" class="space-y-3">
+                                             <div class="text-xs text-green-400 font-bold">📍 Default Tagging Settings</div>
+                                             <div class="grid grid-cols-2 gap-3">
+                                                 <div>
+                                                     <label class="text-xs text-orange-400">Tag 1 Type</label>
+                                                     <select id="ert_policy_default_tag1" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs"></select>
+                                                 </div>
+                                                 <div>
+                                                     <label class="text-xs text-cyan-400">Tag 2 Type</label>
+                                                     <select id="ert_policy_default_tag2" class="w-full bg-[#111] border border-cyan-900/50 rounded px-2 py-1 text-xs"></select>
+                                                 </div>
+                                             </div>
+                                             <div class="grid grid-cols-3 gap-3">
+                                                 <div>
+                                                     <label class="text-xs text-gray-400">Split Pattern</label>
+                                                     <input type="text" id="ert_policy_default_split" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" value=" - ">
+                                                 </div>
+                                                 <div>
+                                                     <label class="text-xs text-gray-400">Prefix</label>
+                                                     <input type="text" id="ert_policy_default_prefix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text before">
+                                                 </div>
+                                                 <div>
+                                                     <label class="text-xs text-gray-400">Suffix</label>
+                                                     <input type="text" id="ert_policy_default_suffix" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="Text after">
+                                                 </div>
+                                             </div>
+                                         </div>
+                                         <!-- Sub-tagging Policy Settings -->
+                                         <div id="ert_sub_policy_settings" style="display:none" class="space-y-3">
+                                             <div class="text-xs text-cyan-400 font-bold">🎯 Content Trigger (Optional)</div>
+                                             <div class="bg-[#0a0a0a] p-3 rounded border border-cyan-900/30 space-y-2">
+                                                 <div class="grid grid-cols-2 gap-3">
+                                                     <div>
+                                                         <label class="text-xs text-gray-400">Trigger Type</label>
+                                                         <select id="ert_policy_sub_trigger_type" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs">
+                                                             <option value="none">No Trigger (Always Apply)</option>
+                                                             <option value="contains">Content contains text</option>
+                                                             <option value="starts_with">Content starts with text</option>
+                                                             <option value="ends_with">Content ends with text</option>
+                                                             <option value="equals">Content exactly equals</option>
+                                                             <option value="regex">Content matches regex</option>
+                                                         </select>
+                                                     </div>
+                                                     <div>
+                                                         <label class="text-xs text-gray-400">Trigger Pattern</label>
+                                                         <input type="text" id="ert_policy_sub_trigger_pattern" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="e.g. Station Name">
+                                                     </div>
+                                                 </div>
+                                             </div>
+                                             <div class="text-xs text-purple-400 font-bold">⚡ Sub-tagging Condition</div>
+                                             <div class="grid grid-cols-3 gap-3">
+                                                 <div>
+                                                     <label class="text-xs text-gray-400">Condition</label>
+                                                     <select id="ert_policy_sub_condition" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs">
+                                                         <option value="starts_with">Starts with</option>
+                                                         <option value="ends_with">Ends with</option>
+                                                         <option value="contains">Contains</option>
+                                                         <option value="equals">Exactly equals</option>
+                                                         <option value="regex">Regex pattern</option>
+                                                     </select>
+                                                 </div>
+                                                 <div>
+                                                     <label class="text-xs text-gray-400">Pattern</label>
+                                                     <input type="text" id="ert_policy_sub_pattern" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs" placeholder="e.g. +++, Live:">
+                                                 </div>
+                                                 <div>
+                                                     <label class="text-xs text-gray-400">Tag Action</label>
+                                                     <select id="ert_policy_sub_action" class="w-full bg-[#111] border border-[#444] rounded px-2 py-1 text-xs">
+                                                         <option value="tag_all">Tag entire content</option>
+                                                         <option value="tag_after">Tag content after pattern</option>
+                                                         <option value="tag_before">Tag content before pattern</option>
+                                                         <option value="tag_match">Tag only the match</option>
+                                                     </select>
+                                                 </div>
+                                             </div>
+                                             <div class="grid grid-cols-2 gap-3">
+                                                 <div>
+                                                     <label class="text-xs text-orange-400">Tag Type</label>
+                                                     <select id="ert_policy_sub_tag_type" class="w-full bg-[#111] border border-orange-900/50 rounded px-2 py-1 text-xs"></select>
+                                                 </div>
+                                                 <div class="flex items-center gap-2 mt-4">
+                                                     <input type="checkbox" id="ert_policy_sub_strip_pattern" class="accent-purple-600">
+                                                     <span class="text-xs text-gray-300">Remove pattern from tagged text</span>
+                                                 </div>
+                                             </div>
+                                         </div>
+                                         <div class="flex gap-2 pt-3 border-t border-gray-700">
+                                             <button onclick="saveERTPolicyEditor()" class="px-4 py-2 bg-green-800 hover:bg-green-700 rounded text-sm text-white font-bold">Save Policy</button>
+                                             <button onclick="closeERTPolicyEditor()" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded text-sm text-white">Cancel</button>
+                                         </div>
+                                     </div>
+
+                                     <!-- Live Preview -->
+                                     <div class="bg-[#000] border border-[#333] rounded p-3">
+                                         <div class="flex justify-between items-center mb-2">
+                                             <div class="flex items-center gap-2">
+                                                 <label class="text-xs text-gray-400 font-bold">PREVIEW</label>
+                                                 <span class="text-gray-500">-</span>
+                                                 <span id="ert_msg_rule_applied" class="text-gray-400 text-xs">Current policy: –</span>
+                                             </div>
+                                             <div class="text-xs">
+                                                 <span id="ert_msg_char_count" class="text-green-400">0</span>
+                                                 <span class="text-gray-500">/128</span>
+                                                 <span class="text-gray-600 ml-1">bytes</span>
+                                             </div>
+                                         </div>
+                                         <div id="ert_rtplus_preview" class="font-mono text-sm text-gray-300 min-h-[20px] whitespace-pre"></div>
+                                         <div class="mt-2 grid grid-cols-2 gap-2 text-xs">
+                                             <div class="text-orange-400">Tag 1: <span id="ert_msg_tag1_info" class="text-orange-300">-</span></div>
+                                             <div class="text-cyan-400">Tag 2: <span id="ert_msg_tag2_info" class="text-cyan-300">-</span></div>
+                                         </div>
+                                     </div>
+
                                  </div>
                              </div>
                          </div>
@@ -12813,17 +12970,21 @@ UI_HTML = r"""
             
             // Set RT+ configuration
             document.getElementById('ert_msg_rtplus_enabled').checked = msg.rt_plus_enabled || false;
-            
-            if (msg.rt_plus_tags) {
-                document.getElementById('ert_msg_tag1_type').value = msg.rt_plus_tags.tag1_type || 4;
-                document.getElementById('ert_msg_tag2_type').value = msg.rt_plus_tags.tag2_type || 1;
-            }
-            
-            document.getElementById('ert_msg_split_pattern').value = msg.split_delimiter || ' - ';
-            document.getElementById('ert_msg_prefix').value = msg.prefix || '';
-            document.getElementById('ert_msg_suffix').value = msg.suffix || '';
-            
-            updateERTSourceUI();
+
+            // Load tagging policies
+            ertTaggingPolicies = [];
+            try {
+                if (msg.tagging_policies) {
+                    ertTaggingPolicies = JSON.parse(msg.tagging_policies) || [];
+                }
+            } catch(e) {}
+
+            // Reset sample text
+            ertGlobalSampleText = msg.sample_text || 'Artist - Song Title';
+            var sampleEl = document.getElementById('ert_msg_sample_text');
+            if (sampleEl) sampleEl.value = ertGlobalSampleText;
+
+            updateERTMsgSourceUI();
             updateERTRTPlusUI();
             updateERTMsgPreview();
             
@@ -12831,7 +12992,7 @@ UI_HTML = r"""
             document.getElementById('ert_msg_modal').style.display = 'flex';
         }
 
-        function updateERTSourceUI() {
+        function updateERTMsgSourceUI() {
             var sourceType = document.querySelector('input[name="ert_msg_source"]:checked').value;
             var manualContent = document.getElementById('ert_msg_manual_content');
             var externalContent = document.getElementById('ert_msg_external_content');
@@ -12859,7 +13020,7 @@ UI_HTML = r"""
         }
 
         function updateERTMsgPreview() {
-            var sourceType = document.querySelector('input[name="ert_msg_source"]:checked').value;
+            var sourceType = document.querySelector('input[name="ert_msg_source"]:checked') ? document.querySelector('input[name="ert_msg_source"]:checked').value : 'manual';
             var previewDiv = document.getElementById('ert_msg_preview');
             
             if (!previewDiv) return;
@@ -12957,54 +13118,309 @@ UI_HTML = r"""
             });
         }
 
+        // ============= eRT TAGGING POLICIES =============
+        var ertTaggingPolicies = [];
+        var ertCurrentEditingPolicyId = null;
+        var ertGlobalSampleText = 'Artist - Song Title';
+
+        function updateERTSampleText() {
+            var el = document.getElementById('ert_msg_sample_text');
+            if (el) ertGlobalSampleText = el.value || 'Artist - Song Title';
+        }
+
         function updateERTRTPlusUI() {
             var enabled = document.getElementById('ert_msg_rtplus_enabled').checked;
             var options = document.getElementById('ert_msg_rtplus_options');
-            
-            if (options) {
-                options.style.display = enabled ? 'block' : 'none';
+            if (options) options.style.display = enabled ? 'block' : 'none';
+            // Show sample text input only for manual source mode
+            var sampleWrap = document.getElementById('ert_msg_rtplus_sample_wrap');
+            if (sampleWrap) {
+                var srcEl = document.querySelector('input[name="ert_msg_source"]:checked');
+                var isManual = !srcEl || srcEl.value === 'manual';
+                sampleWrap.style.display = (enabled && isManual) ? 'block' : 'none';
             }
-            
             if (enabled) {
+                renderERTTaggingPolicies();
                 updateERTRTPlusPreview();
             }
         }
 
         function updateERTRTPlusPreview() {
-            var tag1Type = parseInt(document.getElementById('ert_msg_tag1_type').value);
-            var tag2Type = parseInt(document.getElementById('ert_msg_tag2_type').value);
-            var splitPattern = document.getElementById('ert_msg_split_pattern').value || ' - ';
-            var prefix = document.getElementById('ert_msg_prefix').value || '';
-            var suffix = document.getElementById('ert_msg_suffix').value || '';
-            
-            var preview = prefix;
-            
-            if (tag1Type >= 0) {
-                preview += '[Tag1: ' + getTagTypeName(tag1Type) + ']';
-            }
-            
-            if (tag1Type >= 0 && tag2Type >= 0) {
-                preview += splitPattern;
-            }
-            
-            if (tag2Type >= 0) {
-                preview += '[Tag2: ' + getTagTypeName(tag2Type) + ']';
-            }
-            
-            preview += suffix;
-            
             var previewEl = document.getElementById('ert_rtplus_preview');
-            if (previewEl) {
-                previewEl.textContent = preview || 'No tags configured';
+            var tag1Info = document.getElementById('ert_msg_tag1_info');
+            var tag2Info = document.getElementById('ert_msg_tag2_info');
+            var countEl = document.getElementById('ert_msg_char_count');
+            var ruleEl = document.getElementById('ert_msg_rule_applied');
+            if (!previewEl) return;
+
+            // Get sample text
+            var srcEl = document.querySelector('input[name="ert_msg_source"]:checked');
+            var isManual = !srcEl || srcEl.value === 'manual';
+            var sampleInput = document.getElementById('ert_msg_sample_text');
+            var content = isManual
+                ? (sampleInput && sampleInput.value ? sampleInput.value : ertGlobalSampleText)
+                : (document.getElementById('ert_msg_content') ? document.getElementById('ert_msg_content').value || ertGlobalSampleText : ertGlobalSampleText);
+
+            var result = applyERTTaggingPolicies(content);
+            var preview = result.text || content;
+            var limit = 128;
+
+            // Character count
+            if (countEl) {
+                countEl.textContent = preview.length;
+                countEl.className = preview.length > limit ? 'text-red-400' : (preview.length > 100 ? 'text-yellow-400' : 'text-green-400');
+            }
+
+            // Applied policy label
+            if (ruleEl) {
+                if (result.appliedPolicy) {
+                    ruleEl.textContent = 'Current policy: ' + result.appliedPolicy;
+                    ruleEl.className = 'text-blue-400 text-xs';
+                } else {
+                    ruleEl.textContent = 'Current policy: –';
+                    ruleEl.className = 'text-gray-400 text-xs';
+                }
+            }
+
+            // Build highlighted preview HTML
+            var t1s = result.tag1Start, t1l = result.tag1Len, t2s = result.tag2Start, t2l = result.tag2Len;
+            var html = '';
+            var rtpEnabled = document.getElementById('ert_msg_rtplus_enabled') && document.getElementById('ert_msg_rtplus_enabled').checked;
+            if (rtpEnabled && (t1l > 0 || t2l > 0)) {
+                for (var i = 0; i < preview.length; i++) {
+                    var ch = escapeHtml(preview[i]);
+                    if (t1l > 0 && i >= t1s && i < t1s + t1l) {
+                        html += '<span class="rtplus-tag-1">' + ch + '</span>';
+                    } else if (t2l > 0 && i >= t2s && i < t2s + t2l) {
+                        html += '<span class="rtplus-tag-2">' + ch + '</span>';
+                    } else {
+                        html += ch;
+                    }
+                }
+            } else {
+                html = escapeHtml(preview);
+            }
+            previewEl.innerHTML = html || '<span class="text-gray-600">(empty)</span>';
+
+            // Tag info
+            if (tag1Info) {
+                if (result.tag1Len > 0) {
+                    var t1name = RTPLUS_TYPES[result.tag1Type] ? RTPLUS_TYPES[result.tag1Type][0] : 'Type' + result.tag1Type;
+                    tag1Info.textContent = t1name + ' [' + result.tag1Start + '-' + (result.tag1Start + result.tag1Len - 1) + ']';
+                } else { tag1Info.textContent = '-'; }
+            }
+            if (tag2Info) {
+                if (result.tag2Len > 0) {
+                    var t2name = RTPLUS_TYPES[result.tag2Type] ? RTPLUS_TYPES[result.tag2Type][0] : 'Type' + result.tag2Type;
+                    tag2Info.textContent = t2name + ' [' + result.tag2Start + '-' + (result.tag2Start + result.tag2Len - 1) + ']';
+                } else { tag2Info.textContent = '-'; }
             }
         }
 
-        function getTagTypeName(typeId) {
-            var tagNames = {
-                1: 'Title', 2: 'Album', 4: 'Artist', 31: 'Stn.Short', 
-                32: 'Stn.Long', 33: 'Prog.Now', 36: 'Host'
-            };
-            return tagNames[typeId] || 'Type' + typeId;
+        function applyERTTaggingPolicies(content) {
+            // Same logic as applyTaggingPolicies but uses ertTaggingPolicies
+            var result = { text: content, tag1Start: -1, tag1Len: 0, tag1Type: 0,
+                           tag2Start: -1, tag2Len: 0, tag2Type: 0, appliedPolicy: '' };
+            for (var i = 0; i < ertTaggingPolicies.length; i++) {
+                var policy = ertTaggingPolicies[i];
+                if (!policy.enabled) continue;
+                if (policy.type === 'default') {
+                    var prefix = policy.settings.prefix || '';
+                    var suffix = policy.settings.suffix || '';
+                    var splitPattern = policy.settings.split_pattern || ' - ';
+                    result.text = prefix + content + suffix;
+                    result.appliedPolicy = policy.name;
+                    result.tag1Type = parseInt(policy.settings.tag1_type) || 0;
+                    result.tag2Type = parseInt(policy.settings.tag2_type) || 0;
+                    if (splitPattern && content.indexOf(splitPattern) !== -1) {
+                        var parts = content.split(splitPattern, 2);
+                        result.tag1Start = prefix.length;
+                        result.tag1Len = parts[0].length;
+                        result.tag2Start = prefix.length + parts[0].length + splitPattern.length;
+                        result.tag2Len = parts[1].length;
+                    } else {
+                        result.tag1Start = prefix.length;
+                        result.tag1Len = content.length;
+                    }
+                    continue;
+                } else if (policy.type === 'sub') {
+                    if (policy.settings.trigger_type && policy.settings.trigger_type !== 'none') {
+                        var tpat = policy.settings.trigger_pattern || '';
+                        if (!tpat) continue;
+                        var tmatch = false;
+                        try {
+                            switch (policy.settings.trigger_type) {
+                                case 'contains': tmatch = content.toLowerCase().includes(tpat.toLowerCase()); break;
+                                case 'starts_with': tmatch = content.toLowerCase().startsWith(tpat.toLowerCase()); break;
+                                case 'ends_with': tmatch = content.toLowerCase().endsWith(tpat.toLowerCase()); break;
+                                case 'equals': tmatch = content.toLowerCase() === tpat.toLowerCase(); break;
+                                case 'regex': tmatch = new RegExp(tpat, 'i').test(content); break;
+                            }
+                        } catch(e) {}
+                        if (!tmatch) continue;
+                    }
+                    var matches = false;
+                    var pat = policy.settings.pattern || '';
+                    try {
+                        switch (policy.settings.condition) {
+                            case 'starts_with': matches = content.toLowerCase().startsWith(pat.toLowerCase()); break;
+                            case 'ends_with': matches = content.toLowerCase().endsWith(pat.toLowerCase()); break;
+                            case 'contains': matches = content.toLowerCase().includes(pat.toLowerCase()); break;
+                            case 'equals': matches = content.toLowerCase() === pat.toLowerCase(); break;
+                            case 'regex': matches = new RegExp(pat, 'i').test(content); break;
+                        }
+                    } catch(e) {}
+                    if (matches) {
+                        result.appliedPolicy = policy.name;
+                        result.tag1Type = parseInt(policy.settings.tag_type) || 0;
+                        result.tag2Type = 0;
+                        var tagStart = 0, tagContent = content;
+                        switch (policy.settings.action) {
+                            case 'tag_after':  var ai = content.indexOf(pat); if (ai !== -1) { tagStart = ai + pat.length; tagContent = content.substring(tagStart); } break;
+                            case 'tag_before': var bi = content.indexOf(pat); if (bi !== -1) { tagContent = content.substring(0, bi); } break;
+                            case 'tag_match':  var mi = content.indexOf(pat); if (mi !== -1) { tagStart = mi; tagContent = pat; } break;
+                        }
+                        if (policy.settings.strip_pattern && policy.settings.action !== 'tag_match')
+                            tagContent = tagContent.replace(new RegExp(escapeRegex(pat), 'gi'), '');
+                        result.tag1Start = tagStart;
+                        result.tag1Len = tagContent.length;
+                        return result;
+                    }
+                }
+            }
+            return result;
+        }
+
+        function addERTTaggingPolicy() {
+            var policy = { id: Date.now(), name: 'New Policy', type: 'default', enabled: true,
+                settings: { tag1_type: 4, tag2_type: 1, split_pattern: ' - ', prefix: '', suffix: '',
+                             trigger_type: 'none', trigger_pattern: '', condition: 'starts_with',
+                             pattern: '', action: 'tag_all', tag_type: 1, strip_pattern: false } };
+            ertTaggingPolicies.push(policy);
+            renderERTTaggingPolicies();
+            editERTTaggingPolicy(policy.id);
+        }
+
+        function editERTTaggingPolicy(policyId) {
+            var policy = ertTaggingPolicies.find(function(p) { return p.id === policyId; });
+            if (!policy) return;
+            ertCurrentEditingPolicyId = policyId;
+            document.getElementById('ert_policy_name').value = policy.name;
+            document.getElementById('ert_policy_type').value = policy.type;
+            populateRTPlusSelect(document.getElementById('ert_policy_default_tag1'), policy.settings.tag1_type || 4);
+            populateRTPlusSelect(document.getElementById('ert_policy_default_tag2'), policy.settings.tag2_type || 1);
+            populateRTPlusSelect(document.getElementById('ert_policy_sub_tag_type'), policy.settings.tag_type || 1);
+            document.getElementById('ert_policy_default_split').value = policy.settings.split_pattern || ' - ';
+            document.getElementById('ert_policy_default_prefix').value = policy.settings.prefix || '';
+            document.getElementById('ert_policy_default_suffix').value = policy.settings.suffix || '';
+            document.getElementById('ert_policy_sub_trigger_type').value = policy.settings.trigger_type || 'none';
+            document.getElementById('ert_policy_sub_trigger_pattern').value = policy.settings.trigger_pattern || '';
+            document.getElementById('ert_policy_sub_condition').value = policy.settings.condition || 'starts_with';
+            document.getElementById('ert_policy_sub_pattern').value = policy.settings.pattern || '';
+            document.getElementById('ert_policy_sub_action').value = policy.settings.action || 'tag_all';
+            document.getElementById('ert_policy_sub_strip_pattern').checked = policy.settings.strip_pattern || false;
+            updateERTPolicyEditor();
+            document.getElementById('ert_policy_editor').style.display = 'block';
+            document.getElementById('ert_policy_editor_title').textContent = 'Edit Policy: ' + policy.name;
+        }
+
+        function updateERTPolicyEditor() {
+            var type = document.getElementById('ert_policy_type').value;
+            document.getElementById('ert_default_policy_settings').style.display = type === 'default' ? 'block' : 'none';
+            document.getElementById('ert_sub_policy_settings').style.display = type === 'sub' ? 'block' : 'none';
+        }
+
+        function saveERTPolicyEditor() {
+            if (!ertCurrentEditingPolicyId) return;
+            var policy = ertTaggingPolicies.find(function(p) { return p.id === ertCurrentEditingPolicyId; });
+            if (!policy) return;
+            policy.name = document.getElementById('ert_policy_name').value;
+            policy.type = document.getElementById('ert_policy_type').value;
+            if (policy.type === 'default') {
+                policy.settings.tag1_type = parseInt(document.getElementById('ert_policy_default_tag1').value);
+                policy.settings.tag2_type = parseInt(document.getElementById('ert_policy_default_tag2').value);
+                policy.settings.split_pattern = document.getElementById('ert_policy_default_split').value;
+                policy.settings.prefix = document.getElementById('ert_policy_default_prefix').value;
+                policy.settings.suffix = document.getElementById('ert_policy_default_suffix').value;
+            } else {
+                policy.settings.trigger_type = document.getElementById('ert_policy_sub_trigger_type').value;
+                policy.settings.trigger_pattern = document.getElementById('ert_policy_sub_trigger_pattern').value;
+                policy.settings.condition = document.getElementById('ert_policy_sub_condition').value;
+                policy.settings.pattern = document.getElementById('ert_policy_sub_pattern').value;
+                policy.settings.action = document.getElementById('ert_policy_sub_action').value;
+                policy.settings.tag_type = parseInt(document.getElementById('ert_policy_sub_tag_type').value);
+                policy.settings.strip_pattern = document.getElementById('ert_policy_sub_strip_pattern').checked;
+            }
+            closeERTPolicyEditor();
+            renderERTTaggingPolicies();
+            updateERTRTPlusPreview();
+        }
+
+        function closeERTPolicyEditor() {
+            ertCurrentEditingPolicyId = null;
+            document.getElementById('ert_policy_editor').style.display = 'none';
+        }
+
+        function deleteERTTaggingPolicy(policyId) {
+            if (!confirm('Delete this tagging policy?')) return;
+            ertTaggingPolicies = ertTaggingPolicies.filter(function(p) { return p.id !== policyId; });
+            renderERTTaggingPolicies();
+            updateERTRTPlusPreview();
+        }
+
+        function toggleERTTaggingPolicy(policyId) {
+            var p = ertTaggingPolicies.find(function(p) { return p.id === policyId; });
+            if (p) { p.enabled = !p.enabled; renderERTTaggingPolicies(); updateERTRTPlusPreview(); }
+        }
+
+        function moveERTTaggingPolicy(policyId, direction) {
+            var idx = ertTaggingPolicies.findIndex(function(p) { return p.id === policyId; });
+            if (idx === -1) return;
+            if (direction === 'up' && idx > 0) {
+                var t = ertTaggingPolicies[idx]; ertTaggingPolicies[idx] = ertTaggingPolicies[idx-1]; ertTaggingPolicies[idx-1] = t;
+            } else if (direction === 'down' && idx < ertTaggingPolicies.length - 1) {
+                var t = ertTaggingPolicies[idx]; ertTaggingPolicies[idx] = ertTaggingPolicies[idx+1]; ertTaggingPolicies[idx+1] = t;
+            }
+            renderERTTaggingPolicies();
+            updateERTRTPlusPreview();
+        }
+
+        function renderERTTaggingPolicies() {
+            var container = document.getElementById('ert_tagging_policies_list');
+            if (!container) return;
+            container.innerHTML = '';
+            if (ertTaggingPolicies.length === 0) {
+                container.innerHTML = '<div class="text-center text-gray-500 text-xs py-4 border border-gray-700 rounded">No policies defined. Click "+ Add Policy" to create one.</div>';
+                return;
+            }
+            ertTaggingPolicies.forEach(function(policy, index) {
+                var typeIcon = policy.type === 'default' ? '📍' : '⚡';
+                var typeColor = policy.type === 'default' ? 'green' : 'purple';
+                var typeText = policy.type === 'default' ? 'Default' : 'Sub-tagging';
+                var description = '';
+                if (policy.type === 'default') {
+                    var t1n = RTPLUS_TYPES[policy.settings.tag1_type] ? RTPLUS_TYPES[policy.settings.tag1_type][0] : 'Unknown';
+                    var t2n = RTPLUS_TYPES[policy.settings.tag2_type] ? RTPLUS_TYPES[policy.settings.tag2_type][0] : 'Unknown';
+                    description = t1n + ' + ' + t2n + ' • Split: "' + (policy.settings.split_pattern || ' - ') + '"';
+                } else {
+                    var ttn = RTPLUS_TYPES[policy.settings.tag_type] ? RTPLUS_TYPES[policy.settings.tag_type][0] : 'Unknown';
+                    description = ttn + ' • ' + (policy.settings.condition || '').replace('_', ' ') + ': "' + (policy.settings.pattern || '') + '"';
+                }
+                var html = '<div class="bg-[#1a1a1a] border border-' + typeColor + '-800/50 rounded p-3">';
+                html += '<div class="flex items-center justify-between mb-2">';
+                html += '<div class="flex items-center gap-3"><label class="flex items-center gap-2 cursor-pointer">';
+                html += '<input type="checkbox" ' + (policy.enabled ? 'checked' : '') + ' onchange="toggleERTTaggingPolicy(' + policy.id + ')" class="accent-' + typeColor + '-600">';
+                html += '<div class="flex items-center gap-2"><span class="text-lg">' + typeIcon + '</span>';
+                html += '<div><div class="text-sm font-bold text-white">' + escapeHtml(policy.name) + '</div>';
+                html += '<div class="text-xs text-' + typeColor + '-400">' + typeText + '</div></div></div></label></div>';
+                html += '<div class="flex gap-1">';
+                html += '<button onclick="moveERTTaggingPolicy(' + policy.id + ', \'up\')" ' + (index === 0 ? 'disabled' : '') + ' class="w-6 h-6 text-xs bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded">↑</button>';
+                html += '<button onclick="moveERTTaggingPolicy(' + policy.id + ', \'down\')" ' + (index === ertTaggingPolicies.length - 1 ? 'disabled' : '') + ' class="w-6 h-6 text-xs bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600 rounded">↓</button>';
+                html += '<button onclick="editERTTaggingPolicy(' + policy.id + ')" class="w-6 h-6 text-xs bg-blue-800 hover:bg-blue-700 rounded text-white">✏</button>';
+                html += '<button onclick="deleteERTTaggingPolicy(' + policy.id + ')" class="w-6 h-6 text-xs bg-red-800 hover:bg-red-700 rounded text-white">×</button>';
+                html += '</div></div><div class="text-xs text-gray-400">' + description + '</div></div>';
+                container.innerHTML += html;
+            });
         }
 
         function saveERTMessage() {
@@ -13047,22 +13463,10 @@ UI_HTML = r"""
             
             // Save RT+ configuration
             msg.rt_plus_enabled = document.getElementById('ert_msg_rtplus_enabled').checked;
-            
-            if (msg.rt_plus_enabled) {
-                msg.rt_plus_tags = {
-                    tag1_type: parseInt(document.getElementById('ert_msg_tag1_type').value) || 4,
-                    tag2_type: parseInt(document.getElementById('ert_msg_tag2_type').value) || 1
-                };
-                msg.split_delimiter = document.getElementById('ert_msg_split_pattern').value || ' - ';
-                msg.prefix = document.getElementById('ert_msg_prefix').value || '';
-                msg.suffix = document.getElementById('ert_msg_suffix').value || '';
-            } else {
-                // Clear RT+ fields if disabled
-                msg.rt_plus_tags = {};
-                msg.split_delimiter = '';
-                msg.prefix = '';
-                msg.suffix = '';
-            }
+            msg.tagging_policies = msg.rt_plus_enabled ? JSON.stringify(ertTaggingPolicies) : '[]';
+            // Store sample text for reload
+            var sampleEl = document.getElementById('ert_msg_sample_text');
+            msg.sample_text = sampleEl ? (sampleEl.value || '') : '';
             
             closeERTMsgModal();
             renderERTMessages();
