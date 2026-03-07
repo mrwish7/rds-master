@@ -31,6 +31,8 @@ Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper DX and
 
 - Basic remote control of PTY/PTYN/M-S/TP-TA via JSON
 
+- UECP input
+
 - Enhanced Other Networks (EON) Group 14A support with PS/AF/Mapped AF/PTY transmission.
 - FM-DAB linking via ODA
 - Manual RDS group input from RDS Spy recording / Airomate-standard txt file 
@@ -83,7 +85,7 @@ python app.py
 
 - No packaged EXE release yet
 
-- Support for UECP Input / output (planned)
+- Support for UECP output (planned)
 
 - Support for MRDS1322 RDS encoder chip (planned)
 
