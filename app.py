@@ -2229,9 +2229,19 @@ class RDSScheduler:
         # Only version A supported for eRT
         if g_ver != 0:
             return RDSHelper.get_group_bits(0, 0, 0, 0, 0)  # Fallback
-        
+
         # Get current eRT text - use effective text from message management
         ert_text = self.get_effective_ert_text()
+
+        # Special handling for RT copy mode: don't switch mid-transmission
+        # eRT takes longer to transmit than RT (UTF-8 encoding = more bytes),
+        # so we need to finish the current message before picking up the new RT content
+        ert_source = state.get("ert_source", "ert")
+        if ert_source == "rt" and self.ert_ptr != 0 and ert_text != self.last_ert_content:
+            # We're in RT copy mode, mid-transmission, and RT content changed
+            # Continue with the current cached content until this transmission completes
+            ert_text = self.last_ert_content
+
         monitor_data["ert"] = ert_text
 
         def _ert_tag_cfg_from_policies(msg):
