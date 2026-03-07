@@ -44,6 +44,7 @@ MEC_PTY:     int = 0x07   # Programme Type
 MEC_RT:      int = 0x0A   # RadioText (Group 2A)
 MEC_AF:      int = 0x13   # Alternative Frequencies (Method A)
 MEC_SLC:     int = 0x1A   # Slow Labelling Codes (Group 1A Block C)
+MEC_FFG:     int = 0x24   # Free Format Group (freeform data into any RDS group)
 
 MEC_NAMES: dict[int, str] = {
     MEC_PI:      "PI",
@@ -56,6 +57,7 @@ MEC_NAMES: dict[int, str] = {
     MEC_RT:      "RT",
     MEC_AF:      "AF",
     MEC_SLC:     "SLC",
+    MEC_FFG:     "FFG",
 }
 
 # MECs with a fixed data length (no MEL_len byte on the wire)
@@ -68,6 +70,11 @@ _FIXED_MEL: dict[int, int] = {
     MEC_PIN:     2,
     MEC_PTY:     1,
     MEC_SLC:     2,
+}
+
+# MECs with no DSN/PSN fields AND a fixed data length (no mel_len byte either)
+_NO_ADDR_FIXED_MEL: dict[int, int] = {
+    MEC_FFG: 6,  # group/ver(1) + buf_cfg+b2_tail(1) + block_c(2) + block_d(2)
 }
 
 # MECs that are variable-length (have an explicit MEL_len byte)
@@ -139,6 +146,17 @@ def _parse_elements(mem: bytes) -> list[UECPElement]:
         pos += 1
 
         is_global = mec in _GLOBAL_MECS
+
+        if mec in _NO_ADDR_FIXED_MEL:
+            # No DSN, no PSN, fixed-length data immediately after MEC
+            dsn = psn = 0x00
+            data_len = _NO_ADDR_FIXED_MEL[mec]
+            if pos + data_len > len(mem):
+                break
+            data = mem[pos: pos + data_len]
+            pos += data_len
+            elements.append(UECPElement(mec=mec, dsn=dsn, psn=psn, data=data))
+            continue
 
         if is_global:
             dsn = psn = 0x00
