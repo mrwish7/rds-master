@@ -2810,6 +2810,12 @@ class RDSScheduler:
                        (b3_val == 0xE0E0 and b4_val == 0xE0E0):
                         pass  # Skip this custom group, fall through to built-in handlers
                     else:
+                        if custom.get("one_shot"):
+                            # Remove this entry; next _get_custom_groups() call re-parses
+                            all_groups = self._get_custom_groups()
+                            state["custom_groups"] = json.dumps(
+                                [g for g in all_groups if g is not custom]
+                            )
                         return RDSHelper.get_group_bits(g_type, g_ver, b2_tail, b3_val, b4_val)
                 except Exception as e:
                     print(f"[Custom Groups] Error creating group: {e}")
@@ -6938,7 +6944,7 @@ UI_HTML = r"""
                             </div>
                         </div>
                         <div class="p-3 bg-black/30 rounded border border-gray-700 mb-3 text-[10px] text-gray-400">
-                            <div class="font-bold text-gray-300 mb-1">Supported UECP Message Elements (groups 0A, 1A, 2A)</div>
+                            <div class="font-bold text-gray-300 mb-1">Supported UECP Message Elements</div>
                             <div class="grid grid-cols-2 gap-x-4">
                                 <div>0x01 PI &mdash; Programme Identification</div>
                                 <div>0x02 PS &mdash; Programme Service name</div>
@@ -6950,6 +6956,7 @@ UI_HTML = r"""
                                 <div>0x0A RT &mdash; RadioText (Group 2A)</div>
                                 <div>0x13 AF &mdash; Alternative Frequencies</div>
                                 <div>0x1A SLC &mdash; Slow Labelling Codes (ECC/LIC)</div>
+                                <div>0x24 FF &mdash; Free Format Group (any group, cyclic or one-shot)</div>
                             </div>
                             <div class="mt-2 text-gray-500">Note: receiving an RT update (0x0A) automatically clears the RT Messages list so that UECP has full control of RadioText.</div>
                         </div>

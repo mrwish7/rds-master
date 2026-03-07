@@ -25,6 +25,7 @@ re-encodes the stored Unicode string to RDS bytes when transmitting groups.
 """
 from __future__ import annotations
 
+import json
 import logging
 import socketserver
 import threading
@@ -32,10 +33,15 @@ import threading
 from uecp_parser import (
     UECPParser, UECPFrame, UECPElement,
     MEC_PI, MEC_PS, MEC_TA_TP, MEC_DI_PTYI, MEC_MS, MEC_PIN, MEC_PTY, MEC_RT,
-    MEC_AF, MEC_SLC, MEC_NAMES,
+    MEC_AF, MEC_SLC, MEC_FFG, MEC_NAMES,
     RT_BUF_CFG_MASK, RT_BUF_CFG_SHIFT,
     RT_BUF_CLEAR,
 )
+
+# MEC 0x24 Free Format Group — buffer config values (bits 6-5 of byte 2)
+FFG_BUF_ONCE  = 0b00  # transmit once then discard
+FFG_BUF_ADD   = 0b10  # add to cyclic buffer for this group
+FFG_BUF_CLEAR = 0b11  # remove all buffered entries for this group
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +77,7 @@ class UECPStateHandler:
             MEC_RT:      self._handle_rt,
             MEC_AF:      self._handle_af,
             MEC_SLC:     self._handle_slc,
+            MEC_FFG:     self._handle_ffg,
         }
 
     # ------------------------------------------------------------------
@@ -324,6 +331,73 @@ class UECPStateHandler:
             log.debug("UECP: SLC variant %d data=0x%03X (not mapped to state field)", variant, slc_word & 0xFFF)
 
         self._state["en_id"] = 1
+
+
+    def _handle_ffg(self, elem: UECPElement) -> None:
+        """0x24 – Free Format Group.
+
+        Injects freeform data into any RDS group via the custom_groups buffer.
+
+        Wire layout (no DSN/PSN — 6 data bytes directly after MEC):
+          elem.data[0] – bits 4-1: group type (0-15), bit 0: version (0=A, 1=B)
+          elem.data[1] – bit 7: always 0, bits 6-5: buffer config, bits 4-0: Block B lower 5 bits
+          elem.data[2:4] – Block C (16-bit, big-endian)
+          elem.data[4:6] – Block D (16-bit, big-endian)
+
+        Buffer config (elem.data[1] bits 6-5):
+          0b00  FFG_BUF_ONCE  – transmit once then remove from buffer
+          0b01              – reserved, ignored
+          0b10  FFG_BUF_ADD  – add to cyclic buffer for this group
+          0b11  FFG_BUF_CLEAR – remove all buffered entries for this group
+        """
+        if len(elem.data) < 6:
+            log.warning("UECP FFG: expected 6 data bytes, got %d", len(elem.data))
+            return
+
+        group_type = (elem.data[0] >> 1) & 0x0F
+        group_ver  = elem.data[0] & 0x01
+        buf_cfg    = (elem.data[1] >> 5) & 0x03
+        b2_tail    = elem.data[1] & 0x1F
+        block_c    = (elem.data[2] << 8) | elem.data[3]
+        block_d    = (elem.data[4] << 8) | elem.data[5]
+        group_label = f"{group_type}{'A' if group_ver == 0 else 'B'}"
+
+        try:
+            existing = json.loads(self._state.get("custom_groups", "[]"))
+        except Exception:
+            existing = []
+
+        if buf_cfg == FFG_BUF_CLEAR:
+            before = len(existing)
+            existing = [g for g in existing
+                        if not (g.get("type") == group_type
+                                and g.get("version") == group_ver
+                                and g.get("uecp_ffg"))]
+            self._state["custom_groups"] = json.dumps(existing)
+            log.info("UECP FFG: cleared buffer for group %s (%d entry/entries removed)",
+                     group_label, before - len(existing))
+
+        elif buf_cfg == FFG_BUF_ONCE or buf_cfg == FFG_BUF_ADD:
+            entry = {
+                "type":         group_type,
+                "version":      group_ver,
+                "b2_tail":      f"{b2_tail:02X}",
+                "b3":           f"{block_c:04X}",
+                "b4":           f"{block_d:04X}",
+                "enabled":      True,
+                "schedule_freq": 1,
+                "uecp_ffg":     True,
+            }
+            if buf_cfg == FFG_BUF_ONCE:
+                entry["one_shot"] = True
+            existing.append(entry)
+            self._state["custom_groups"] = json.dumps(existing)
+            log.info("UECP FFG: %s group %s b2=%02X b3=%04X b4=%04X",
+                     "one-shot" if buf_cfg == FFG_BUF_ONCE else "buffered",
+                     group_label, b2_tail, block_c, block_d)
+
+        else:
+            log.debug("UECP FFG: buf_cfg 0b01 (reserved) ignored for group %s", group_label)
 
 
 # ---------------------------------------------------------------------------
