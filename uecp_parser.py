@@ -45,6 +45,8 @@ MEC_RT:      int = 0x0A   # RadioText (Group 2A)
 MEC_AF:      int = 0x13   # Alternative Frequencies (Method A)
 MEC_SLC:     int = 0x1A   # Slow Labelling Codes (Group 1A Block C)
 MEC_FFG:     int = 0x24   # Free Format Group (freeform data into any RDS group)
+MEC_ODA_SET:  int = 0x40   # ODA Set (assign ODA AID to a group, signal via Group 3A)
+MEC_ODA_DATA: int = 0x46   # ODA Data (send group data for a registered ODA AID)
 
 MEC_NAMES: dict[int, str] = {
     MEC_PI:      "PI",
@@ -58,6 +60,8 @@ MEC_NAMES: dict[int, str] = {
     MEC_AF:      "AF",
     MEC_SLC:     "SLC",
     MEC_FFG:     "FFG",
+    MEC_ODA_SET:  "ODA_SET",
+    MEC_ODA_DATA: "ODA_DATA",
 }
 
 # MECs with a fixed data length (no MEL_len byte on the wire)
@@ -74,14 +78,16 @@ _FIXED_MEL: dict[int, int] = {
 
 # MECs with no DSN/PSN fields AND a fixed data length (no mel_len byte either)
 _NO_ADDR_FIXED_MEL: dict[int, int] = {
-    MEC_FFG: 6,  # group/ver(1) + buf_cfg+b2_tail(1) + block_c(2) + block_d(2)
+    MEC_FFG:     6,  # group/ver(1) + buf_cfg+b2_tail(1) + block_c(2) + block_d(2)
+    MEC_ODA_SET: 7,  # group/ver(1) + buf_cfg(1) + aid(2) + msg(2) + timeout(1)
 }
 
 # MECs that are variable-length (have an explicit MEL_len byte)
 _VARIABLE_MEL: frozenset[int] = frozenset({MEC_RT, MEC_AF})
 
-# Global MECs: no DSN/PSN fields
-_GLOBAL_MECS: frozenset[int] = frozenset({0x0D, 0x19, 0x1C, 0x1E, 0x23, 0x27, 0x2C})
+# Global MECs: no DSN/PSN fields, variable-length with explicit mel_len byte
+_GLOBAL_MECS: frozenset[int] = frozenset({0x0D, 0x19, 0x1C, 0x1E, 0x23, 0x27, 0x2C,
+                                           MEC_ODA_DATA})
 
 # MECs that have DSN but NO PSN field on the wire
 _NO_PSN_MECS: frozenset[int] = frozenset({MEC_SLC})

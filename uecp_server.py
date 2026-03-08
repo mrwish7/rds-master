@@ -33,7 +33,7 @@ import threading
 from uecp_parser import (
     UECPParser, UECPFrame, UECPElement,
     MEC_PI, MEC_PS, MEC_TA_TP, MEC_DI_PTYI, MEC_MS, MEC_PIN, MEC_PTY, MEC_RT,
-    MEC_AF, MEC_SLC, MEC_FFG, MEC_NAMES,
+    MEC_AF, MEC_SLC, MEC_FFG, MEC_ODA_SET, MEC_ODA_DATA, MEC_NAMES,
     RT_BUF_CFG_MASK, RT_BUF_CFG_SHIFT,
     RT_BUF_CLEAR,
 )
@@ -78,7 +78,10 @@ class UECPStateHandler:
             MEC_AF:      self._handle_af,
             MEC_SLC:     self._handle_slc,
             MEC_FFG:     self._handle_ffg,
+            MEC_ODA_SET:  self._handle_oda_set,
+            MEC_ODA_DATA: self._handle_oda_data,
         }
+        self._oda_timers: dict[str, threading.Timer] = {}
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -378,6 +381,14 @@ class UECPStateHandler:
                      group_label, before - len(existing))
 
         elif buf_cfg == FFG_BUF_ONCE or buf_cfg == FFG_BUF_ADD:
+            if buf_cfg == FFG_BUF_ONCE:
+                # Replace any pending one-shot for this group so a rapid stream
+                # doesn't accumulate stale entries
+                existing = [g for g in existing
+                            if not (g.get("type") == group_type
+                                    and g.get("version") == group_ver
+                                    and g.get("uecp_ffg")
+                                    and g.get("one_shot"))]
             entry = {
                 "type":         group_type,
                 "version":      group_ver,
@@ -398,6 +409,172 @@ class UECPStateHandler:
 
         else:
             log.debug("UECP FFG: buf_cfg 0b01 (reserved) ignored for group %s", group_label)
+
+    def _handle_oda_set(self, elem: UECPElement) -> None:
+        """0x40 – ODA Set (assign ODA AID to a group, announce via Group 3A).
+
+        Wire layout (no DSN/PSN — 7 data bytes directly after MEC):
+          elem.data[0]   – bits 5-1: group number (0-31), bit 0: version (0=A, 1=B)
+          elem.data[1:3] – ODA Application ID (16-bit, big-endian)
+          elem.data[3]   – buffer config (bits 6-5, same values as FFG; ignored for now)
+          elem.data[4:6] – Message bits for Group 3A Block C (usually 0x0000)
+          elem.data[6]   – data input timeout in minutes (0 = no timeout)
+
+        Adds or replaces an entry in state['custom_oda_list'].  If timeout > 0,
+        a background timer removes the entry after the specified number of minutes.
+        """
+        if len(elem.data) < 7:
+            log.warning("UECP ODA_SET: expected 7 data bytes, got %d", len(elem.data))
+            return
+
+        group_num = (elem.data[0] >> 1) & 0x1F
+        group_ver = elem.data[0] & 0x01
+        aid       = (elem.data[1] << 8) | elem.data[2]
+        buf_cfg   = (elem.data[3] >> 5) & 0x03
+        msg       = (elem.data[4] << 8) | elem.data[5]
+        timeout   = elem.data[6]
+
+        # AGTC = (group_number << 1) | version — matches custom_oda_list 'group_type'
+        agtc = (group_num << 1) | group_ver
+        aid_str = f"{aid:04X}"
+        group_label = f"{group_num}{'A' if group_ver == 0 else 'B'}"
+
+        try:
+            existing = json.loads(self._state.get("custom_oda_list", "[]"))
+        except Exception:
+            existing = []
+
+        # Replace any existing UECP-injected entry with the same AID
+        existing = [e for e in existing
+                    if not (e.get("uecp_oda") and e.get("aid", "").upper() == aid_str)]
+
+        existing.append({
+            "group_type": agtc,
+            "aid":        aid_str,
+            "msg":        f"{msg:04X}",
+            "enabled":    True,
+            "uecp_oda":   True,
+        })
+        self._state["custom_oda_list"] = json.dumps(existing)
+        log.info("UECP ODA_SET: AID=0x%04X group=%s buf_cfg=0b%02b msg=0x%04X timeout=%dmin",
+                 aid, group_label, buf_cfg, msg, timeout)
+
+        # Cancel any existing timeout timer for this AID, then start a new one
+        timer_key = f"oda_{aid_str}"
+        old_timer = self._oda_timers.pop(timer_key, None)
+        if old_timer is not None:
+            old_timer.cancel()
+
+        if timeout > 0:
+            def _remove_oda(aid_str=aid_str, timeout=timeout):
+                try:
+                    current = json.loads(self._state.get("custom_oda_list", "[]"))
+                    current = [e for e in current
+                               if not (e.get("uecp_oda") and e.get("aid", "").upper() == aid_str)]
+                    self._state["custom_oda_list"] = json.dumps(current)
+                    log.info("UECP ODA_SET: AID=0x%s removed after %dmin timeout",
+                             aid_str, timeout)
+                except Exception:
+                    log.exception("UECP ODA_SET: error removing AID=0x%s on timeout", aid_str)
+                finally:
+                    self._oda_timers.pop(timer_key, None)
+
+            t = threading.Timer(timeout * 60.0, _remove_oda)
+            t.daemon = True
+            t.start()
+            self._oda_timers[timer_key] = t
+
+    def _handle_oda_data(self, elem: UECPElement) -> None:
+        """0x46 – ODA Data (send group data for a registered ODA AID).
+
+        Wire layout (no DSN/PSN — mel_len byte followed by mel_len data bytes):
+          mel_len = 0x08 is the only size handled (regular A-type group message).
+
+          elem.data[0:2] – ODA Application ID (16-bit, big-endian)
+          elem.data[2]   – config: bit 7=0, bit 6=short-msg(0), bits 5-4=priority (ignored),
+                                   bits 3-2=mode (ignored), bits 1-0=buffer config (as FFG)
+          elem.data[3]   – bits 4-0: Block B lower 5 bits (b2_tail)
+          elem.data[4:6] – Block C (16-bit, big-endian)
+          elem.data[6:8] – Block D (16-bit, big-endian)
+
+        The AID must be registered in state['custom_oda_list'] (either manually or via
+        MEC40) to resolve which RDS group the data belongs to.  Buffer config behaviour
+        is identical to FFG (0b00=once, 0b10=add, 0b11=clear).
+        """
+        if len(elem.data) != 8:
+            log.debug("UECP ODA_DATA: unsupported mel_len=%d (only 8 handled), skipping",
+                      len(elem.data))
+            return
+
+        aid     = (elem.data[0] << 8) | elem.data[1]
+        config  = elem.data[2]
+        buf_cfg = config & 0x03
+        b2_tail = elem.data[3] & 0x1F
+        block_c = (elem.data[4] << 8) | elem.data[5]
+        block_d = (elem.data[6] << 8) | elem.data[7]
+        aid_str = f"{aid:04X}"
+
+        # Resolve RDS group from the registered ODA list
+        try:
+            oda_list = json.loads(self._state.get("custom_oda_list", "[]"))
+        except Exception:
+            oda_list = []
+
+        matching = [o for o in oda_list
+                    if o.get("enabled", True) and o.get("aid", "").upper() == aid_str]
+        if not matching:
+            log.debug("UECP ODA_DATA: AID=0x%04X not found in ODA list, ignoring", aid)
+            return
+
+        agtc      = matching[0].get("group_type", 0)
+        group_num = (agtc >> 1) & 0x0F
+        group_ver =  agtc & 0x01
+        group_label = f"{group_num}{'A' if group_ver == 0 else 'B'}"
+
+        try:
+            existing = json.loads(self._state.get("custom_groups", "[]"))
+        except Exception:
+            existing = []
+
+        if buf_cfg == FFG_BUF_CLEAR:
+            before = len(existing)
+            existing = [g for g in existing
+                        if not (g.get("type") == group_num
+                                and g.get("version") == group_ver
+                                and g.get("uecp_oda_data"))]
+            self._state["custom_groups"] = json.dumps(existing)
+            log.info("UECP ODA_DATA: cleared buffer for AID=0x%04X group %s (%d removed)",
+                     aid, group_label, before - len(existing))
+
+        elif buf_cfg == FFG_BUF_ONCE or buf_cfg == FFG_BUF_ADD:
+            if buf_cfg == FFG_BUF_ONCE:
+                # Replace any pending one-shot for this group so a rapid stream
+                # doesn't accumulate stale entries
+                existing = [g for g in existing
+                            if not (g.get("type") == group_num
+                                    and g.get("version") == group_ver
+                                    and g.get("uecp_oda_data")
+                                    and g.get("one_shot"))]
+            entry = {
+                "type":          group_num,
+                "version":       group_ver,
+                "b2_tail":       f"{b2_tail:02X}",
+                "b3":            f"{block_c:04X}",
+                "b4":            f"{block_d:04X}",
+                "enabled":       True,
+                "schedule_freq": 1,
+                "uecp_oda_data": True,
+            }
+            if buf_cfg == FFG_BUF_ONCE:
+                entry["one_shot"] = True
+            existing.append(entry)
+            self._state["custom_groups"] = json.dumps(existing)
+            log.info("UECP ODA_DATA: %s AID=0x%04X → group %s b2=%02X b3=%04X b4=%04X",
+                     "one-shot" if buf_cfg == FFG_BUF_ONCE else "buffered",
+                     aid, group_label, b2_tail, block_c, block_d)
+
+        else:
+            log.debug("UECP ODA_DATA: buf_cfg 0b01 (reserved) ignored for AID=0x%04X", aid)
 
 
 # ---------------------------------------------------------------------------
