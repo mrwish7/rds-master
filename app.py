@@ -1481,7 +1481,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'ert_text', 'ert_messages', 'ert_source'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'custom_oda_list', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'ert_text', 'ert_messages', 'ert_source'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -2942,11 +2942,19 @@ class RDSScheduler:
                         pass  # Skip this custom group, fall through to built-in handlers
                     else:
                         if custom.get("one_shot"):
-                            # Remove this entry; next _get_custom_groups() call re-parses
+                            # Remove by value equality (not identity) so the removal
+                            # is correct even if the UECP thread updated the cache
+                            # between when we read matching_groups and now.
+                            # Only the first matching entry is removed.
                             all_groups = self._get_custom_groups()
-                            state["custom_groups"] = json.dumps(
-                                [g for g in all_groups if g is not custom]
-                            )
+                            new_groups = []
+                            removed = False
+                            for g in all_groups:
+                                if not removed and g == custom:
+                                    removed = True
+                                else:
+                                    new_groups.append(g)
+                            state["custom_groups"] = json.dumps(new_groups)
                         return RDSHelper.get_group_bits(g_type, g_ver, b2_tail, b3_val, b4_val)
                 except Exception as e:
                     print(f"[Custom Groups] Error creating group: {e}")
@@ -4639,7 +4647,13 @@ def uecp_settings_route():
     if state["uecp_enabled"]:
         try:
             from uecp_server import UECPStateHandler, UECPTCPServer
-            handler = UECPStateHandler(state, save_config)
+            def _uecp_save():
+                save_config()
+                socketio.emit('state_update', {
+                    'custom_oda_list': state.get('custom_oda_list', '[]'),
+                    'custom_groups':   state.get('custom_groups',   '[]'),
+                })
+            handler = UECPStateHandler(state, _uecp_save)
             srv = UECPTCPServer(state["uecp_host"], state["uecp_port"], handler)
             srv.start()
             _uecp_tcp_server = srv
@@ -7101,7 +7115,9 @@ UI_HTML = r"""
                                 <div>0x0A RT &mdash; RadioText (Group 2A)</div>
                                 <div>0x13 AF &mdash; Alternative Frequencies</div>
                                 <div>0x1A SLC &mdash; Slow Labelling Codes (ECC/LIC)</div>
-                                <div>0x24 FF &mdash; Free Format Group (any group, cyclic or one-shot)</div>
+                                <div>0x24 FFG &mdash; Free Format Group (any group, cyclic or one-shot)</div>
+                                <div>0x40 ODA_SET &mdash; ODA Application Assignment (Group 3A)</div>
+                                <div>0x46 ODA_DATA &mdash; ODA Data (group data for registered AID)</div>
                             </div>
                             <div class="mt-2 text-gray-500">Note: receiving an RT update (0x0A) automatically clears the RT Messages list so that UECP has full control of RadioText.</div>
                         </div>
@@ -10324,6 +10340,16 @@ UI_HTML = r"""
             const pty_list = data.rbds ? pty_list_rbds : pty_list_rds;
             setText('live_pty', pty_list[data.pty_idx] || "None");
             if (typeof data.pilot_generated !== 'undefined') setText('pilot_status', data.pilot_generated ? 'Generated' : 'Disabled (Pass-through/Genlock)');
+        });
+
+        socket.on('state_update', function(data) {
+            if (data.custom_oda_list !== undefined) {
+                var hiddenInput = document.getElementById('custom_oda_list');
+                if (hiddenInput) {
+                    hiddenInput.value = data.custom_oda_list;
+                    loadCustomODAList();
+                }
+            }
         });
 
         // Legacy functions - kept for backward compatibility but now no-ops
