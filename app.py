@@ -1689,9 +1689,12 @@ class RDSScheduler:
         self.ert_rt_plus_toggle = 0    # Toggle bit for eRT RT+ group
         self._ert_rt_plus_tags_sig = ""  # Change-detection key for toggle
         self._ert_content_new = False  # True while new content hasn't completed one full TX cycle
-        self._ert_content_cache = {}   # TTL cache for file/URL sources: {msg_id: (content, ts)}
+        self._ert_content_cache = {}   # Async-updated cache: {msg_id: content_str}
+        self._ert_fetch_last = {}      # {msg_id: timestamp} of last successful fetch
+        self._ert_fetch_pending = set() # msg_ids currently being fetched in background
         self._ert_rtplus_needs_clear = 0  # Injected 6A clear-group counter on content change
-        self._urgent_group_bits = None  # Set by generate_ert_group; picked up by RDSDSP fill loop
+        # Start background thread that keeps file/URL eRT content up to date
+        threading.Thread(target=self._ert_content_fetch_loop, daemon=True).start()
 
         # AF Method B transmission cache
         self.af_b_transmissions = []
@@ -2431,14 +2434,7 @@ class RDSScheduler:
             self.ert_ptr = 0  # Reset pointer on text change
             self._ert_content_new = True  # Suppress RT+ tags until first full cycle sent
             if state.get("en_ert_rtplus"):
-                self._ert_rtplus_needs_clear = 6  # Inject 6 immediate 6A clears
-                # Build a single clear group and stash it for the RDSDSP fill loop
-                # to prepend directly to the front of the bit queue — bypassing all
-                # the pre-buffered groups so it arrives at the decoder immediately.
-                ertrtplus_type = state.get("ert_rtplus_group_type", 6)
-                toggle = self.ert_rt_plus_toggle & 1
-                b2_tail = (toggle << 4) | 0  # running_bit=0
-                self._urgent_group_bits = list(RDSHelper.get_group_bits(ertrtplus_type, 0, b2_tail, 0, 0))
+                self._ert_rtplus_needs_clear = 6  # Inject 6 immediate 6A clears via next()
         
         # Calculate how many segments we actually need (like RT termination)
         message_length = len(self.ert_bytes)
@@ -2531,65 +2527,62 @@ class RDSScheduler:
         self.ert_msg_index = (self.ert_msg_index + 1) % len(messages)
         self.ert_msg_cycle_count = 0  # Reset cycle count for new message
 
+    def _ert_content_fetch_loop(self):
+        """Background daemon: refreshes file/URL eRT content every 5 s.
+        The hot path (resolve_ert_msg_content) only reads from the cache
+        and never blocks on I/O."""
+        import urllib.request as _ur
+        while state.get("running", True):
+            try:
+                messages = json.loads(state.get("ert_messages", "[]"))
+            except Exception:
+                messages = []
+            for msg in messages:
+                if not msg.get("enabled", True):
+                    continue
+                source_type = msg.get("source_type", "manual")
+                if source_type not in ("file", "url"):
+                    continue
+                msg_id = msg.get("id", "")
+                content = msg.get("content", "")
+                now = time.time()
+                # Only re-fetch if 5 s have elapsed since last successful fetch
+                if now - self._ert_fetch_last.get(msg_id, 0) < 5.0:
+                    continue
+                if msg_id in self._ert_fetch_pending:
+                    continue
+                self._ert_fetch_pending.add(msg_id)
+                try:
+                    if source_type == "file":
+                        with open(content, "r", encoding="utf-8") as f:
+                            result = f.read().strip()
+                    else:  # url
+                        req = _ur.Request(content, headers={"User-Agent": "RDS-Encoder/1.0"})
+                        with _ur.urlopen(req, timeout=5) as resp:
+                            result = resp.read().decode("utf-8", errors="replace").strip()
+                    self._ert_content_cache[msg_id] = result
+                    self.ert_msg_last_good[msg_id] = result
+                    self._ert_fetch_last[msg_id] = now
+                except Exception as e:
+                    print(f"[eRT] background fetch error ({source_type}): {e}")
+                    self._ert_fetch_last[msg_id] = now  # back off for 5 s before retrying
+                finally:
+                    self._ert_fetch_pending.discard(msg_id)
+            time.sleep(1.0)  # Check each message once per second (fetches only when TTL expired)
+
     def resolve_ert_msg_content(self, msg):
-        """Resolve eRT message content (supports file, URL, or manual sources).
-        URL and file sources are TTL-cached (5 s) so the fill thread is never
-        blocked on I/O on every group generation call.
-        On network/file error the last successfully resolved content is returned
-        so a transient dropout does not corrupt on-air output."""
+        """Return eRT message content from the in-memory cache.
+        Always non-blocking. The _ert_content_fetch_loop daemon keeps the
+        cache fresh in the background."""
         if not msg:
             return ""
-
         msg_id = msg.get("id", "")
         source_type = msg.get("source_type", "manual")
         content = msg.get("content", "")
-
         if source_type == "manual":
-            # Manual content is always authoritative — no fallback needed
-            if msg_id:
-                self.ert_msg_last_good[msg_id] = content
             return content
-
-        elif source_type == "file":
-            # TTL cache: only hit the filesystem every 5 seconds
-            now = time.time()
-            cached = self._ert_content_cache.get(msg_id)
-            if cached and (now - cached[1]) < 5.0:
-                return cached[0]
-            try:
-                with open(content, "r", encoding="utf-8") as f:
-                    result = f.read().strip()
-                self._ert_content_cache[msg_id] = (result, now)
-                self.ert_msg_last_good[msg_id] = result
-                return result
-            except Exception as e:
-                print(f"eRT file read error: {e} - using cached content")
-                if msg_id in self.ert_msg_last_good:
-                    self._ert_content_cache[msg_id] = (self.ert_msg_last_good[msg_id], now)
-                return self.ert_msg_last_good.get(msg_id, "")
-
-        elif source_type == "url":
-            # TTL cache: only hit the network every 5 seconds to avoid blocking
-            # the fill thread (which calls sched.next() ~11×/s)
-            now = time.time()
-            cached = self._ert_content_cache.get(msg_id)
-            if cached and (now - cached[1]) < 5.0:
-                return cached[0]
-            try:
-                import urllib.request as _ur
-                req = _ur.Request(content, headers={"User-Agent": "RDS-Encoder/1.0"})
-                with _ur.urlopen(req, timeout=5) as resp:
-                    result = resp.read().decode("utf-8", errors="replace").strip()
-                self._ert_content_cache[msg_id] = (result, now)
-                self.ert_msg_last_good[msg_id] = result
-                return result
-            except Exception as e:
-                print(f"eRT URL fetch error: {e} - using cached content")
-                if msg_id in self.ert_msg_last_good:
-                    self._ert_content_cache[msg_id] = (self.ert_msg_last_good[msg_id], now)
-                return self.ert_msg_last_good.get(msg_id, "")
-
-        return content
+        # file / url: return last-good cached value (never block)
+        return self._ert_content_cache.get(msg_id) or self.ert_msg_last_good.get(msg_id, "")
 
     def get_effective_ert_text(self):
         """Get the effective eRT text based on message management."""
@@ -4349,14 +4342,6 @@ class RDSDSP:
             # update would otherwise monopolise the GIL for ~3–5 ms.
             t0 = time.perf_counter()
             while len(self.bit_queue) < self._QUEUE_TARGET and state["running"]:
-                # Drain urgent groups first — inserted at front of queue
-                urgent = getattr(self.sched, '_urgent_group_bits', None)
-                if urgent:
-                    self.sched._urgent_group_bits = None
-                    # Prepend: insert bits at the leftmost position so they play next
-                    for b in reversed(urgent):
-                        self.bit_queue.appendleft(b)
-                    continue  # Re-check queue length after injection
                 try:
                     bits = self.sched.next()
                     self._last_good_bits = list(bits)
