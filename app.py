@@ -404,6 +404,8 @@ default_state = {
     "uecp_enabled": False,
     "uecp_port": 4001,
     "uecp_host": "0.0.0.0",
+    "uecp_psn": 0,   # Programme Service Number filter (0 = accept all)
+    "uecp_dsn": 0,   # Dataset Number filter (0 = accept all)
     
     # Enhanced RadioText (eRT) - ODA Application
     "en_ert": False,  # Enable eRT transmission
@@ -4624,6 +4626,8 @@ def uecp_settings_route():
             "uecp_enabled": state.get("uecp_enabled", False),
             "uecp_port":    state.get("uecp_port", 4001),
             "uecp_host":    state.get("uecp_host", "0.0.0.0"),
+            "uecp_psn":     state.get("uecp_psn", 0),
+            "uecp_dsn":     state.get("uecp_dsn", 0),
             "running":      _uecp_tcp_server is not None,
         })
 
@@ -4634,6 +4638,14 @@ def uecp_settings_route():
     except (ValueError, TypeError):
         state["uecp_port"] = 4001
     state["uecp_host"] = str(data.get("uecp_host", "0.0.0.0")).strip() or "0.0.0.0"
+    try:
+        state["uecp_psn"] = max(0, min(255, int(data.get("uecp_psn", 0))))
+    except (ValueError, TypeError):
+        state["uecp_psn"] = 0
+    try:
+        state["uecp_dsn"] = max(0, min(255, int(data.get("uecp_dsn", 0))))
+    except (ValueError, TypeError):
+        state["uecp_dsn"] = 0
     save_config()
 
     # Stop any existing server
@@ -4648,12 +4660,21 @@ def uecp_settings_route():
         try:
             from uecp_server import UECPStateHandler, UECPTCPServer
             def _uecp_save():
+                # Do NOT call save_config() here — the pre-UECP config must
+                # remain on disk so it is the one loaded on next startup.
+                socketio.emit('state_update', {
+                    'custom_oda_list': state.get('custom_oda_list', '[]'),
+                    'custom_groups':   state.get('custom_groups',   '[]'),
+                })
+            def _uecp_restore():
+                # Called after the last UECP client disconnects and the
+                # pre-UECP snapshot has been restored into state.
                 save_config()
                 socketio.emit('state_update', {
                     'custom_oda_list': state.get('custom_oda_list', '[]'),
                     'custom_groups':   state.get('custom_groups',   '[]'),
                 })
-            handler = UECPStateHandler(state, _uecp_save)
+            handler = UECPStateHandler(state, _uecp_save, _uecp_restore)
             srv = UECPTCPServer(state["uecp_host"], state["uecp_port"], handler)
             srv.start()
             _uecp_tcp_server = srv
@@ -7102,6 +7123,18 @@ UI_HTML = r"""
                                 <div class="text-[9px] text-gray-500 mt-1">Default UECP port is 4001.</div>
                             </div>
                         </div>
+                        <div class="grid grid-cols-2 gap-3 mb-3">
+                            <div>
+                                <label>PSN Filter</label>
+                                <input type="number" id="uecp_psn" value="{{ state.get('uecp_psn', 0) }}" min="0" max="255">
+                                <div class="text-[9px] text-gray-500 mt-1">Programme Service Number to accept (0 = accept all). Messages with PSN 0 always pass.</div>
+                            </div>
+                            <div>
+                                <label>DSN Filter</label>
+                                <input type="number" id="uecp_dsn" value="{{ state.get('uecp_dsn', 0) }}" min="0" max="255">
+                                <div class="text-[9px] text-gray-500 mt-1">Dataset Number to accept (0 = accept all). Messages with DSN 0 always pass.</div>
+                            </div>
+                        </div>
                         <div class="p-3 bg-black/30 rounded border border-gray-700 mb-3 text-[10px] text-gray-400">
                             <div class="font-bold text-gray-300 mb-1">Supported UECP Message Elements</div>
                             <div class="grid grid-cols-2 gap-x-4">
@@ -7420,6 +7453,12 @@ UI_HTML = r"""
                             <label class="text-xs text-gray-400">TP (ON)</label>
                             <input type="checkbox" class="toggle-checkbox" id="eon_tp">
                         </div>
+                    </div>
+
+                    <div>
+                        <label class="text-xs text-gray-400 mb-1 block">UECP PSN</label>
+                        <input type="number" id="eon_uecp_psn" min="0" max="255" value="0" class="w-full bg-black border border-gray-600 rounded px-2 py-1">
+                        <div class="text-[10px] text-gray-500 mt-1">Programme Service Number used to route UECP messages to this EON service (0 = not used).</div>
                     </div>
                 </div>
 
@@ -10395,6 +10434,8 @@ UI_HTML = r"""
                 uecp_enabled: document.getElementById('uecp_enabled').checked,
                 uecp_port:    parseInt(document.getElementById('uecp_port').value, 10) || 4001,
                 uecp_host:    document.getElementById('uecp_host').value.trim() || '0.0.0.0',
+                uecp_psn:     parseInt(document.getElementById('uecp_psn').value, 10) || 0,
+                uecp_dsn:     parseInt(document.getElementById('uecp_dsn').value, 10) || 0,
             };
             try {
                 const res = await fetch('/uecp_settings', {
@@ -10855,6 +10896,7 @@ UI_HTML = r"""
             document.getElementById('eon_af').value = '';
             document.getElementById('eon_mapped').value = '';
             document.getElementById('eon_tp').checked = false;
+            document.getElementById('eon_uecp_psn').value = '0';
             document.getElementById('eon_modal_title').textContent = 'Add EON Service';
             document.getElementById('eon_edit_form').style.display = 'block';
         }
@@ -10877,6 +10919,7 @@ UI_HTML = r"""
             document.getElementById('eon_mapped').value = mappedText;
             
             document.getElementById('eon_tp').checked = svc.tp || false;
+            document.getElementById('eon_uecp_psn').value = svc.uecp_psn || 0;
             document.getElementById('eon_modal_title').textContent = 'Edit EON Service';
             document.getElementById('eon_edit_form').style.display = 'block';
         }
@@ -10919,7 +10962,8 @@ UI_HTML = r"""
                 pty: parseInt(document.getElementById('eon_pty').value) || 0,
                 af_list: document.getElementById('eon_af').value || '',
                 mapped_freqs: mappedFreqs,
-                tp: document.getElementById('eon_tp').checked ? 1 : 0
+                tp: document.getElementById('eon_tp').checked ? 1 : 0,
+                uecp_psn: parseInt(document.getElementById('eon_uecp_psn').value) || 0
             };
 
             if (idx === '') {

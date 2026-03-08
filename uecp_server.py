@@ -43,6 +43,22 @@ FFG_BUF_ONCE  = 0b00  # transmit once then discard
 FFG_BUF_ADD   = 0b10  # add to cyclic buffer for this group
 FFG_BUF_CLEAR = 0b11  # remove all buffered entries for this group
 
+# State fields that UECP handlers are permitted to modify.
+# These are snapshotted when the first client connects and restored when the
+# last client disconnects, so the encoder always reverts to its pre-UECP
+# ("default") content automatically.
+_UECP_MANAGED_FIELDS: frozenset[str] = frozenset({
+    'pi', 'ps_dynamic',
+    'tp', 'ta', 'ms', 'pty',
+    'rt_text', 'rt_messages',
+    'af_list', 'en_af',
+    'ecc', 'lic', 'en_id',
+    'en_pin', 'pin_day', 'pin_hour', 'pin_minute',
+    'di_stereo', 'di_head', 'di_comp', 'di_dyn',
+    'custom_groups', 'custom_oda_list',
+    'eon_services',
+})
+
 log = logging.getLogger(__name__)
 
 
@@ -59,13 +75,23 @@ class UECPStateHandler:
     state:
         The shared ``state`` dict from app.py.
     save_callback:
-        Called after each frame is processed to persist state to disk.
-        Pass ``None`` to skip persistence (useful for testing).
+        Called after each frame is processed (live GUI notification only —
+        do NOT persist to disk here; the pre-UECP config must stay on disk).
+        Pass ``None`` to skip (useful for testing).
+    restore_callback:
+        Called after the last UECP client disconnects and the pre-UECP
+        snapshot has been restored into ``state``.  Use this to persist
+        the restored state to disk and notify the GUI.
     """
 
-    def __init__(self, state: dict, save_callback=None) -> None:
-        self._state = state
-        self._save  = save_callback or (lambda: None)
+    def __init__(self, state: dict, save_callback=None,
+                 restore_callback=None) -> None:
+        self._state   = state
+        self._save    = save_callback    or (lambda: None)
+        self._restore = restore_callback or (lambda: None)
+        self._snapshot: dict | None = None
+        self._client_count = 0
+        self._client_lock  = threading.Lock()
         self._dispatch: dict[int, object] = {
             MEC_PI:      self._handle_pi,
             MEC_PS:      self._handle_ps,
@@ -84,6 +110,45 @@ class UECPStateHandler:
         self._oda_timers: dict[str, threading.Timer] = {}
 
     # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    def connect(self) -> None:
+        """Called when a UECP client connects.
+
+        On the first connection, a snapshot of all UECP-managed state fields
+        is taken so they can be restored when the last client disconnects.
+        """
+        with self._client_lock:
+            self._client_count += 1
+            if self._client_count == 1 and self._snapshot is None:
+                self._snapshot = {
+                    k: self._state[k]
+                    for k in _UECP_MANAGED_FIELDS
+                    if k in self._state
+                }
+                log.info("UECP: first client connected — snapshot taken (%d fields)",
+                         len(self._snapshot))
+
+    def disconnect(self) -> None:
+        """Called when a UECP client disconnects.
+
+        When the last client disconnects, the pre-UECP snapshot is restored
+        into state and the restore callback is invoked (typically to persist
+        the original config back to disk and notify the GUI).
+        """
+        with self._client_lock:
+            self._client_count = max(0, self._client_count - 1)
+            if self._client_count == 0 and self._snapshot is not None:
+                self._state.update(self._snapshot)
+                self._snapshot = None
+                log.info("UECP: last client disconnected — pre-UECP state restored")
+                try:
+                    self._restore()
+                except Exception:
+                    log.exception("UECP: restore_callback raised")
+
+    # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
@@ -93,8 +158,37 @@ class UECPStateHandler:
             "UECP frame site=%d enc=%d seq=%d (%d element(s))",
             frame.site_addr, frame.enc_addr, frame.seq, len(frame.elements),
         )
+        uecp_psn = int(self._state.get("uecp_psn", 0) or 0)
+        uecp_dsn = int(self._state.get("uecp_dsn", 0) or 0)
+
         changed = False
         for elem in frame.elements:
+            # DSN filtering: if a non-zero DSN filter is configured, skip elements
+            # whose DSN is non-zero and doesn't match.  DSN=0 always passes ("current").
+            if uecp_dsn != 0 and elem.dsn != 0 and elem.dsn != uecp_dsn:
+                log.debug("UECP: skipping MEC 0x%02X DSN=%d (filter DSN=%d)",
+                          elem.mec, elem.dsn, uecp_dsn)
+                continue
+
+            # PSN routing/filtering: only active when uecp_psn is configured and
+            # the element carries a non-zero PSN (psn=0 means "current service").
+            if uecp_psn != 0 and elem.psn != 0:
+                eon_svc = self._find_eon_by_psn(elem.psn)
+                if eon_svc is not None:
+                    # Route to EON handler for the matching service
+                    try:
+                        if self._handle_eon_element(elem, eon_svc):
+                            changed = True
+                    except Exception:
+                        log.exception("UECP: error routing MEC 0x%02X to EON PSN=%d",
+                                      elem.mec, elem.psn)
+                    continue
+                elif elem.psn != uecp_psn:
+                    # PSN doesn't match main service or any EON — skip
+                    log.debug("UECP: skipping MEC 0x%02X PSN=%d (filter PSN=%d, no EON match)",
+                              elem.mec, elem.psn, uecp_psn)
+                    continue
+
             handler = self._dispatch.get(elem.mec)
             if handler is None:
                 log.debug("UECP: ignoring unhandled MEC 0x%02X (%s)",
@@ -335,6 +429,71 @@ class UECPStateHandler:
 
         self._state["en_id"] = 1
 
+
+    # ------------------------------------------------------------------
+    # PSN/EON routing helpers
+    # ------------------------------------------------------------------
+
+    def _find_eon_by_psn(self, psn: int) -> dict | None:
+        """Return the first EON service whose ``uecp_psn`` equals ``psn``, or None."""
+        try:
+            eon_services = json.loads(self._state.get("eon_services", "[]"))
+        except Exception:
+            return None
+        for svc in eon_services:
+            svc_psn = int(svc.get("uecp_psn", 0) or 0)
+            if svc_psn != 0 and svc_psn == psn:
+                return svc
+        return None
+
+    def _handle_eon_element(self, elem: UECPElement, svc: dict) -> bool:
+        """Apply a UECP element to the EON service matched by PSN.
+
+        Handles MEC_PI, MEC_PS, and MEC_TA_TP (TP bit only — TA is local).
+        Returns True if the EON services list was modified.
+        """
+        psn = int(svc.get("uecp_psn", 0) or 0)
+        try:
+            eon_services = json.loads(self._state.get("eon_services", "[]"))
+        except Exception:
+            return False
+
+        # Locate the entry by uecp_psn so we update the live list, not the stale copy
+        target_idx = None
+        for i, s in enumerate(eon_services):
+            if int(s.get("uecp_psn", 0) or 0) == psn:
+                target_idx = i
+                break
+        if target_idx is None:
+            return False
+
+        target = eon_services[target_idx]
+        modified = False
+
+        if elem.mec == MEC_PI:
+            if len(elem.data) >= 2:
+                pi = (elem.data[0] << 8) | elem.data[1]
+                target["pi_on"] = f"{pi:04X}"
+                log.info("UECP EON (PSN=%d): PI(ON) → 0x%04X", psn, pi)
+                modified = True
+        elif elem.mec == MEC_PS:
+            if elem.data:
+                text = _rds_bytes_to_text(elem.data[:8])
+                target["ps"] = text
+                log.info("UECP EON (PSN=%d): PS(ON) → %r", psn, text)
+                modified = True
+        elif elem.mec == MEC_TA_TP:
+            if elem.data:
+                b = elem.data[0]
+                target["tp"] = 1 if (b & 0x02) else 0
+                log.info("UECP EON (PSN=%d): TP(ON) → %d", psn, target["tp"])
+                modified = True
+        else:
+            log.debug("UECP EON (PSN=%d): MEC 0x%02X not routed to EON", psn, elem.mec)
+
+        if modified:
+            self._state["eon_services"] = json.dumps(eon_services)
+        return modified
 
     def _handle_ffg(self, elem: UECPElement) -> None:
         """0x24 – Free Format Group.
@@ -589,6 +748,7 @@ class _UECPRequestHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         peer = self.client_address
         log.info("UECP: client connected from %s:%d", *peer)
+        self.server.uecp_handler.connect()
         parser = UECPParser()
         try:
             while True:
@@ -605,6 +765,7 @@ class _UECPRequestHandler(socketserver.BaseRequestHandler):
         except OSError as exc:
             log.debug("UECP: connection from %s:%d closed: %s", *peer, exc)
         finally:
+            self.server.uecp_handler.disconnect()
             log.info("UECP: client disconnected from %s:%d", *peer)
 
 
