@@ -1116,7 +1116,17 @@ def text_to_rds_bytes(text):
             result.append(0x20)
     return bytes(result)
 
-def parse_text_source(text):
+def parse_text_source(text, cached_value=""):
+    """Parse text with dynamic sources (file/URL patterns).
+
+    Args:
+        text: Text to parse (may contain \\r"file" or \\w"url" patterns)
+        cached_value: Last successfully parsed value to return on error
+
+    Returns:
+        Parsed text, or None if parse failed and should keep current cache,
+        or cached_value if parse failed and we need a safe fallback.
+    """
     if not text: return ""
     try:
         if "\\" in text:
@@ -1124,24 +1134,26 @@ def parse_text_source(text):
             failed = False
             def file_repl(m):
                 nonlocal failed
-                try: 
+                try:
                     # Use utf-8-sig to automatically strip BOM, then convert special chars
-                    with open(m.group(1), 'r', encoding='utf-8-sig') as f: 
+                    with open(m.group(1), 'r', encoding='utf-8-sig') as f:
                         content = f.read().strip()
                         return convert_to_ebu_latin(content)
-                except: 
+                except Exception as e:
+                    print(f"File read error for {m.group(1)}: {e} - using cached content")
                     failed = True
                     return ""  # Return empty on error
             def url_repl(m):
                 nonlocal failed
                 try:
-                    with urllib.request.urlopen(m.group(1), timeout=2) as r: 
+                    with urllib.request.urlopen(m.group(1), timeout=2) as r:
                         content = r.read().decode('utf-8').strip()
                         return convert_to_ebu_latin(content)
-                except: 
+                except Exception as e:
+                    print(f"URL fetch error for {m.group(1)}: {e} - using cached content")
                     failed = True
                     return ""  # Return empty on error
-            
+
             def clean_spaces(s):
                 # Normalize any embedded newlines to spaces so RT doesn't break lines unexpectedly
                 return s.replace('\r', ' ').replace('\n', ' ')
@@ -1149,9 +1161,11 @@ def parse_text_source(text):
             t = re.sub(r'\\R"([^"]+)"', lambda m: clean_spaces(file_repl(m)).upper(), text)
             t = re.sub(r'\\r"([^"]+)"', lambda m: clean_spaces(file_repl(m)), t)
             t = re.sub(r'\\w"([^"]+)"', lambda m: clean_spaces(url_repl(m)), t)
-            
-            # If any source failed, return None to keep cached value
-            if failed: return None
+
+            # If any source failed, return cached value to prevent garbled output
+            # This prevents UTF-8 encoding errors when network drops
+            if failed:
+                return cached_value if cached_value else None
             return t
         return text
     except: return text
@@ -1160,8 +1174,9 @@ def text_updater_loop():
     while True:
         if state["running"]:
             for k in ["ps_dynamic", "ps_long_32", "rt_text", "rt_a", "rt_b", "ptyn"]:
-                if k in state and "\\" in state[k]: 
-                    result = parse_text_source(state[k])
+                if k in state and "\\" in state[k]:
+                    # Pass current cached value so parse_text_source can return it on error
+                    result = parse_text_source(state[k], resolved_cache.get(k, ""))
                     if result is not None:  # Only update if parse succeeded
                         resolved_cache[k] = result
         time.sleep(4.0)
@@ -1688,7 +1703,18 @@ class RDSScheduler:
 
     def get_text(self, key):
         val = get_effective_value(key) if key in ["ptyn"] else state.get(key, "")
-        return resolved_cache.get(key, val) if "\\" in val else val
+        result = resolved_cache.get(key, val) if "\\" in val else val
+
+        # Safety fallback: if result still contains URL/file patterns (shouldn't happen
+        # but protects against UTF-8 errors), strip them to prevent garbled output
+        if "\\" in result and ("\\r\"" in result or "\\w\"" in result or "\\R\"" in result):
+            # Strip any remaining pattern syntax as last resort
+            result = re.sub(r'\\[rRw]"[^"]+"', '', result).strip()
+            if not result:
+                # If stripping left nothing, return cached value or empty
+                result = resolved_cache.get(key, "")
+
+        return result
 
     def _get_custom_groups(self):
         """Return parsed custom groups list, re-parsing only when the JSON string changes."""
@@ -2233,13 +2259,14 @@ class RDSScheduler:
         # Get current eRT text - use effective text from message management
         ert_text = self.get_effective_ert_text()
 
-        # Special handling for RT copy mode: don't switch mid-transmission
-        # eRT takes longer to transmit than RT (UTF-8 encoding = more bytes),
-        # so we need to finish the current message before picking up the new RT content
-        ert_source = state.get("ert_source", "ert")
-        if ert_source == "rt" and self.ert_ptr != 0 and ert_text != self.last_ert_content:
-            # We're in RT copy mode, mid-transmission, and RT content changed
-            # Continue with the current cached content until this transmission completes
+        # CRITICAL: Don't switch content mid-transmission (applies to ALL sources)
+        # If we're mid-transmission (ert_ptr != 0) and content changed, finish current message first
+        # This prevents:
+        # 1. Breaking RDS groups when URL/file changes (Bug #1)
+        # 2. Sending garbled text when network drops mid-transmission (Bug #2)
+        if self.ert_ptr != 0 and ert_text != self.last_ert_content:
+            # Mid-transmission and content changed - continue with cached content
+            # Only switch to new content after current transmission completes (ert_ptr wraps to 0)
             ert_text = self.last_ert_content
 
         monitor_data["ert"] = ert_text
@@ -2458,8 +2485,10 @@ class RDSScheduler:
                     self.ert_msg_last_good[msg_id] = result
                 return result
             except Exception as e:
-                print(f"eRT file read error: {e}")
+                print(f"eRT file read error: {e} - using cached content")
                 # Return last good content if available, else empty string
+                # The generate_ert_group() mid-transmission protection will prevent
+                # corruption if we're currently transmitting a message
                 return self.ert_msg_last_good.get(msg_id, "")
 
         elif source_type == "url":
@@ -2472,7 +2501,10 @@ class RDSScheduler:
                     self.ert_msg_last_good[msg_id] = result
                 return result
             except Exception as e:
-                print(f"eRT URL fetch error: {e}")
+                print(f"eRT URL fetch error: {e} - using cached content")
+                # Return last good content if available, else empty string
+                # The generate_ert_group() mid-transmission protection will prevent
+                # corruption if we're currently transmitting a message
                 return self.ert_msg_last_good.get(msg_id, "")
 
         return content
