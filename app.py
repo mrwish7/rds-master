@@ -1688,6 +1688,10 @@ class RDSScheduler:
         self.ert_rt_plus_tags = []     # [(type, byte_start, byte_len), ...]
         self.ert_rt_plus_toggle = 0    # Toggle bit for eRT RT+ group
         self._ert_rt_plus_tags_sig = ""  # Change-detection key for toggle
+        self._ert_content_new = False  # True while new content hasn't completed one full TX cycle
+        self._ert_content_cache = {}   # TTL cache for file/URL sources: {msg_id: (content, ts)}
+        self._ert_rtplus_needs_clear = 0  # Injected 6A clear-group counter on content change
+        self._urgent_group_bits = None  # Set by generate_ert_group; picked up by RDSDSP fill loop
 
         # AF Method B transmission cache
         self.af_b_transmissions = []
@@ -2043,6 +2047,56 @@ class RDSScheduler:
         
         return tags
 
+    def get_ert_plus_tags_for_message(self, msg, raw_content, formatted_content, encoding='utf-8'):
+        """Calculate eRT+ tags (in byte positions) for a message based on its configuration.
+
+        Args:
+            msg: The message configuration
+            raw_content: Content WITHOUT prefix/suffix (used for tag calculation)
+            formatted_content: Content WITH prefix/suffix (used for byte position conversion)
+            encoding: 'utf-8' or 'ucs2'
+
+        Returns:
+            List of (tag_type, byte_start, byte_len) tuples
+        """
+        if not msg.get("rt_plus_enabled"):
+            return []
+
+        # For eRT+, we don't have centering/padding, so offset is always 0 in character space
+        char_offset = 0
+        # Limit is effectively unlimited for tagging purposes (128 bytes max for eRT)
+        char_limit = 128 if encoding in ('utf-8', 'utf8') else 63  # 128 UTF-8 bytes or 126 UCS-2 bytes = 63 chars
+
+        # First, calculate tags in character positions using RAW content
+        # The apply_tagging_policies_to_tags function expects raw content and applies prefix/suffix internally
+        char_tags = []
+
+        # Apply tagging policies (handles both "default" and "sub" policies)
+        if msg.get("tagging_policies"):
+            try:
+                policies = json.loads(msg.get("tagging_policies", "[]"))
+                char_tags = self.apply_tagging_policies_to_tags(raw_content, char_tags, policies, char_offset, char_limit)
+            except Exception as e:
+                print(f"[eRT RT+] Error applying tagging policies: {e}", flush=True)
+
+        # Convert character positions to byte positions using FORMATTED content
+        # The character positions from apply_tagging_policies_to_tags already account for prefix/suffix
+        byte_tags = []
+        enc_name = 'utf-8' if encoding in ('utf-8', 'utf8') else 'utf-16-be'
+        for tag_type, char_start, char_len in char_tags:
+            # Calculate byte offset for the start position in the formatted content
+            prefix_text = formatted_content[:char_start]
+            byte_start = len(prefix_text.encode(enc_name))
+
+            # Calculate byte length for the tag content
+            tag_text = formatted_content[char_start:char_start + char_len]
+            byte_len = len(tag_text.encode(enc_name))
+
+            if byte_len > 0:
+                byte_tags.append((tag_type, byte_start, byte_len))
+
+        return byte_tags
+
     def get_rt_plus_tags_for_message(self, msg, resolved_content, limit):
         """Calculate RT+ tags for a message based on its configuration."""
         if not msg.get("rt_plus_enabled"):
@@ -2297,22 +2351,42 @@ class RDSScheduler:
                     messages = self.get_ert_messages()
                     current_msg = self.get_current_ert_message() if messages else None
                     if current_msg and current_msg.get("rt_plus_enabled", False):
-                        tag1_type, tag2_type, split_delim, prefix, suffix = _ert_tag_cfg_from_policies(current_msg)
-                        base = ert_text
-                        if prefix and base.startswith(prefix):
-                            base = base[len(prefix):]
-                        if suffix and base.endswith(suffix):
-                            base = base[:-len(suffix)]
-                        parts = base.split(split_delim, 1) if split_delim else [base]
+                        # Get RAW content for tag calculation
+                        raw_content = self.resolve_ert_msg_content(current_msg)
+                        # Get tags using the unified method (returns byte positions)
+                        encoding = state.get("ert_encoding", "utf8")
+                        byte_tags = self.get_ert_plus_tags_for_message(current_msg, raw_content, ert_text, encoding)
+
+                        # Convert byte positions back to character positions for display
+                        enc_name = 'utf-8' if encoding in ('utf-8', 'utf8') else 'utf-16-be'
                         tag_strs = []
-                        for type_code, part in zip([tag1_type, tag2_type], parts):
-                            if type_code >= 0:
-                                type_name = RTPLUS_CONTENT_TYPES.get(type_code, ("Unknown",))[0]
-                                tag_strs.append(f"{type_name}: {part.strip()}")
-                        monitor_data["ert_rtplus_info"] = " | ".join(tag_strs)
+                        for tag_type, byte_start, byte_len in byte_tags:
+                            # Find character position from byte position
+                            char_pos = 0
+                            byte_count = 0
+                            for char_pos, char in enumerate(ert_text):
+                                if byte_count >= byte_start:
+                                    break
+                                byte_count += len(char.encode(enc_name))
+
+                            # Find character length from byte length
+                            char_len = 0
+                            byte_counted = 0
+                            for i in range(char_pos, len(ert_text)):
+                                if byte_counted >= byte_len:
+                                    break
+                                byte_counted += len(ert_text[i].encode(enc_name))
+                                char_len += 1
+
+                            tag_content = ert_text[char_pos:char_pos + char_len]
+                            type_name = RTPLUS_CONTENT_TYPES.get(tag_type, ("Unknown",))[0]
+                            tag_strs.append(f"{type_name}: {tag_content.strip()}")
+
+                        monitor_data["ert_rtplus_info"] = " | ".join(tag_strs) if tag_strs else ""
                     else:
                         monitor_data["ert_rtplus_info"] = ""
-            except Exception:
+            except Exception as e:
+                print(f"[eRT RT+] display info error: {e}")
                 monitor_data["ert_rtplus_info"] = ""
         else:
             monitor_data["ert_rtplus_info"] = ""
@@ -2332,26 +2406,12 @@ class RDSScheduler:
                     messages = self.get_ert_messages()
                     current_msg = self.get_current_ert_message() if messages else None
                     if current_msg and current_msg.get("rt_plus_enabled", False):
-                        tag1_type, tag2_type, split_delim, prefix, suffix = _ert_tag_cfg_from_policies(current_msg)
-                        enc = 'utf-8' if state.get("ert_encoding", "utf8") == "utf8" else 'utf-16-be'
-                        base = ert_text
-                        if prefix and base.startswith(prefix):
-                            base = base[len(prefix):]
-                        if suffix and base.endswith(suffix):
-                            base = base[:-len(suffix)]
-                        prefix_byte_len = len(prefix.encode(enc)) if prefix else 0
-                        new_tags = []
-                        if split_delim and tag1_type >= 0 and tag2_type >= 0:
-                            parts = base.split(split_delim, 1)
-                            offset = prefix_byte_len
-                            for i, (part, type_code) in enumerate(zip(parts, [tag1_type, tag2_type])):
-                                if type_code >= 0:
-                                    part_byte_len = len(part.encode(enc))
-                                    new_tags.append((type_code, offset, part_byte_len))
-                                if i == 0:
-                                    offset += len(parts[0].encode(enc)) + len(split_delim.encode(enc))
-                        elif tag1_type >= 0:
-                            new_tags.append((tag1_type, prefix_byte_len, len(base.encode(enc))))
+                        # Get RAW content (before prefix/suffix) for tag calculation
+                        raw_content = self.resolve_ert_msg_content(current_msg)
+                        # Use the new unified tag calculation that handles all policy types
+                        # Pass both raw content (for tag calculation) and formatted text (for byte conversion)
+                        encoding = state.get("ert_encoding", "utf8")
+                        new_tags = self.get_ert_plus_tags_for_message(current_msg, raw_content, ert_text, encoding)
                         tags_sig = f"{ert_text}|ert|{new_tags}"
                         if tags_sig != self._ert_rt_plus_tags_sig:
                             self._ert_rt_plus_tags_sig = tags_sig
@@ -2369,6 +2429,16 @@ class RDSScheduler:
             self.last_ert_content = ert_text
             self.ert_bytes = self.encode_ert_text(ert_text)
             self.ert_ptr = 0  # Reset pointer on text change
+            self._ert_content_new = True  # Suppress RT+ tags until first full cycle sent
+            if state.get("en_ert_rtplus"):
+                self._ert_rtplus_needs_clear = 6  # Inject 6 immediate 6A clears
+                # Build a single clear group and stash it for the RDSDSP fill loop
+                # to prepend directly to the front of the bit queue — bypassing all
+                # the pre-buffered groups so it arrives at the decoder immediately.
+                ertrtplus_type = state.get("ert_rtplus_group_type", 6)
+                toggle = self.ert_rt_plus_toggle & 1
+                b2_tail = (toggle << 4) | 0  # running_bit=0
+                self._urgent_group_bits = list(RDSHelper.get_group_bits(ertrtplus_type, 0, b2_tail, 0, 0))
         
         # Calculate how many segments we actually need (like RT termination)
         message_length = len(self.ert_bytes)
@@ -2409,6 +2479,7 @@ class RDSScheduler:
 
         # A full pass just completed — count it as one cycle
         if self.ert_ptr == 0:
+            self._ert_content_new = False  # First full cycle done; decoder now has the complete text
             self.ert_msg_cycle_count += 1
             current_msg_for_cycle = self.get_current_ert_message()
             if current_msg_for_cycle:
@@ -2462,6 +2533,8 @@ class RDSScheduler:
 
     def resolve_ert_msg_content(self, msg):
         """Resolve eRT message content (supports file, URL, or manual sources).
+        URL and file sources are TTL-cached (5 s) so the fill thread is never
+        blocked on I/O on every group generation call.
         On network/file error the last successfully resolved content is returned
         so a transient dropout does not corrupt on-air output."""
         if not msg:
@@ -2478,33 +2551,42 @@ class RDSScheduler:
             return content
 
         elif source_type == "file":
+            # TTL cache: only hit the filesystem every 5 seconds
+            now = time.time()
+            cached = self._ert_content_cache.get(msg_id)
+            if cached and (now - cached[1]) < 5.0:
+                return cached[0]
             try:
                 with open(content, "r", encoding="utf-8") as f:
                     result = f.read().strip()
-                if msg_id:
-                    self.ert_msg_last_good[msg_id] = result
+                self._ert_content_cache[msg_id] = (result, now)
+                self.ert_msg_last_good[msg_id] = result
                 return result
             except Exception as e:
                 print(f"eRT file read error: {e} - using cached content")
-                # Return last good content if available, else empty string
-                # The generate_ert_group() mid-transmission protection will prevent
-                # corruption if we're currently transmitting a message
+                if msg_id in self.ert_msg_last_good:
+                    self._ert_content_cache[msg_id] = (self.ert_msg_last_good[msg_id], now)
                 return self.ert_msg_last_good.get(msg_id, "")
 
         elif source_type == "url":
+            # TTL cache: only hit the network every 5 seconds to avoid blocking
+            # the fill thread (which calls sched.next() ~11×/s)
+            now = time.time()
+            cached = self._ert_content_cache.get(msg_id)
+            if cached and (now - cached[1]) < 5.0:
+                return cached[0]
             try:
                 import urllib.request as _ur
                 req = _ur.Request(content, headers={"User-Agent": "RDS-Encoder/1.0"})
                 with _ur.urlopen(req, timeout=5) as resp:
                     result = resp.read().decode("utf-8", errors="replace").strip()
-                if msg_id:
-                    self.ert_msg_last_good[msg_id] = result
+                self._ert_content_cache[msg_id] = (result, now)
+                self.ert_msg_last_good[msg_id] = result
                 return result
             except Exception as e:
                 print(f"eRT URL fetch error: {e} - using cached content")
-                # Return last good content if available, else empty string
-                # The generate_ert_group() mid-transmission protection will prevent
-                # corruption if we're currently transmitting a message
+                if msg_id in self.ert_msg_last_good:
+                    self._ert_content_cache[msg_id] = (self.ert_msg_last_good[msg_id], now)
                 return self.ert_msg_last_good.get(msg_id, "")
 
         return content
@@ -2705,12 +2787,17 @@ class RDSScheduler:
             seq.append((11,0))
         
         # Add eRT application groups if enabled
+        # Send 2x per cycle (like RT) to halve the time to complete a full message transmission
         if state.get("en_ert"):
             ert_group_type = state.get("ert_group_type", 11)
             seq.append((ert_group_type, 0))  # eRT groups
+            seq.append((ert_group_type, 0))  # eRT groups x2
         if state.get("en_ert") and state.get("en_ert_rtplus"):
             ert_rtplus_group_type = state.get("ert_rtplus_group_type", 6)
-            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group
+            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x1
+            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x2
+            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x3
+            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x4
 
         # Add enabled custom groups to auto schedule
         # Only add each unique group type once (or multiple times based on schedule_freq)
@@ -2781,6 +2868,15 @@ class RDSScheduler:
         if self.burst_counter > 0:
             g_type, g_ver = 0, 0
             self.burst_counter -= 1
+        elif getattr(self, '_ert_rtplus_needs_clear', 0) > 0 and state.get("en_ert") and state.get("en_ert_rtplus"):
+            # Inject an immediate 6A clear group ahead of the normal schedule.
+            # This closes the window where the decoder holds stale tags from the previous
+            # eRT message while the new 13A content is already being transmitted.
+            self._ert_rtplus_needs_clear -= 1
+            ertrtplus_type = state.get("ert_rtplus_group_type", 6)
+            toggle = self.ert_rt_plus_toggle & 1
+            b2_tail = (toggle << 4) | 0  # running_bit=0, no active tags
+            return RDSHelper.get_group_bits(ertrtplus_type, 0, b2_tail, 0, 0)
         else:
             # Check if we should send DAB Group 12A (every 45 seconds)
             if state.get("en_dab") and (time.time() - self.dab_last_sent) >= 45.0:
@@ -3307,7 +3403,9 @@ class RDSScheduler:
                 if t2_len > 0: t2_len -= 1
 
             toggle = self.ert_rt_plus_toggle & 1
-            b2_tail = (toggle << 4) | 0x08 | ((t1_typ >> 3) & 0x07)
+            # Suppress tags (running=0) until the decoder has a full copy of the current eRT text
+            running_bit = 1 if (tags_to_send and not self._ert_content_new) else 0
+            b2_tail = (toggle << 4) | (running_bit << 3) | ((t1_typ >> 3) & 0x07)
             b3_val  = ((t1_typ & 0x07) << 13) | ((t1_start & 0x3F) << 7) | ((t1_len & 0x3F) << 1) | ((t2_typ >> 5) & 0x01)
             b4_val  = ((t2_typ & 0x1F) << 11) | ((t2_start & 0x3F) << 5) | (t2_len & 0x1F)
 
@@ -4178,9 +4276,10 @@ class RDS2Generator:
 
 # --- DSP ENGINE ---
 class RDSDSP:
-    # Number of bits to keep pre-generated in the queue (~170 ms of RDS data).
+    # Number of bits to keep pre-generated in the queue (~100 ms of RDS data).
+    # Kept short so urgent groups (eRT RT+ clears) reach the wire within ~100 ms.
     # The fill thread maintains this level; the audio callback never calls the scheduler.
-    _QUEUE_TARGET = 2000
+    _QUEUE_TARGET = 1200
 
     def __init__(self):
         self.sched = RDSScheduler()
@@ -4212,6 +4311,8 @@ class RDSDSP:
         self.taps = dsp_signal.firwin(2049, BITRATE * 2.0, fs=SAMPLE_RATE, window=('kaiser', 8.0))
         self.zi = np.zeros(2048)
         # Pre-fill the queue synchronously so audio starts immediately with data ready.
+        self._last_good_bits = None  # Cache of last successfully generated group bits
+        self._urgent_bits = collections.deque()  # Front-of-queue injections (e.g. eRT RT+ clears)
         self._prefill()
         # Background thread keeps the queue topped up without touching the audio hot-path.
         threading.Thread(target=self._bit_fill_loop, daemon=True).start()
@@ -4219,10 +4320,13 @@ class RDSDSP:
     def _prefill(self):
         while len(self.bit_queue) < self._QUEUE_TARGET:
             try:
-                self.bit_queue.extend(self.sched.next())
+                bits = self.sched.next()
+                self._last_good_bits = list(bits)
+                self.bit_queue.extend(bits)
             except Exception as e:
                 print(f"[RDS] prefill exception: {e}", flush=True)
-                self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
+                fallback = self._last_good_bits or list(RDSHelper.get_group_bits(1, 0, 0, 0, 0))
+                self.bit_queue.extend(fallback)
 
     def _bit_fill_loop(self):
         """Non-real-time thread: keeps bit_queue near _QUEUE_TARGET so the
@@ -4245,18 +4349,29 @@ class RDSDSP:
             # update would otherwise monopolise the GIL for ~3–5 ms.
             t0 = time.perf_counter()
             while len(self.bit_queue) < self._QUEUE_TARGET and state["running"]:
+                # Drain urgent groups first — inserted at front of queue
+                urgent = getattr(self.sched, '_urgent_group_bits', None)
+                if urgent:
+                    self.sched._urgent_group_bits = None
+                    # Prepend: insert bits at the leftmost position so they play next
+                    for b in reversed(urgent):
+                        self.bit_queue.appendleft(b)
+                    continue  # Re-check queue length after injection
                 try:
-                    self.bit_queue.extend(self.sched.next())
+                    bits = self.sched.next()
+                    self._last_good_bits = list(bits)
+                    self.bit_queue.extend(bits)
                 except Exception as e:
                     print(f"[RDS] fill-thread exception: {e}", flush=True)
-                    self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
+                    fallback = self._last_good_bits or list(RDSHelper.get_group_bits(1, 0, 0, 0, 0))
+                    self.bit_queue.extend(fallback)
                 # Explicit GIL yield after every group.  When burst_counter fires
                 # (16 groups in rapid succession on PS content change), this lets
                 # PortAudio's callback thread acquire the GIL between each group
                 # rather than waiting up to 3 ms for the time-bound to fire.
                 time.sleep(0)
-                if time.perf_counter() - t0 > 0.003:
-                    break   # hard cap: exit inner loop after 3 ms regardless
+                if time.perf_counter() - t0 > 0.020:
+                    break   # hard cap: exit inner loop after 20 ms regardless
             time.sleep(0.005)   # yield GIL for 5 ms between top-up bursts
 
     def process_frame(self, outdata, frames, indata=None):
@@ -4285,10 +4400,13 @@ class RDSDSP:
         n_bits_total = int(n_bits_at[-1])
 
         # Queue is maintained by _bit_fill_loop; emergency fallback only.
+        # IMPORTANT: never use Group 0A as padding — it would overwrite the PS display
+        # on the decoder with garbage characters. Repeat the last good group instead.
         if len(self.bit_queue) < n_bits_total:
             print(f"[DSP] queue underrun ({len(self.bit_queue)}/{n_bits_total})", flush=True)
+            fallback = self._last_good_bits or list(RDSHelper.get_group_bits(1, 0, 0, 0, 0))
             while len(self.bit_queue) < n_bits_total:
-                self.bit_queue.extend(RDSHelper.get_group_bits(0, 0, 0, 0xE0E0, 0xE0E0))
+                self.bit_queue.extend(fallback)
 
         # Build prefix-XOR array: xor_prefix[k] = XOR of the first k bits from queue.
         # xor_prefix[0] = 0 (no bits consumed yet).
