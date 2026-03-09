@@ -25,7 +25,7 @@ Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper DX and
 
 - RT+ formatting with visual builder and support for up to 2 tags per RT message.
 
-- Long PS (32 chars), PTYN, CT, AF Method A & B controls; DAB cross-reference (12A).
+- Long PS (32 chars), Enhanced Radiotext (128 bytes UTF-8) and eRT+, PTYN, CT, AF Method A & B controls; DAB cross-reference (12A).
 
 - Datasets for preset data
 
@@ -34,14 +34,14 @@ Many thanks to **Bkram, Hans van Eijsden, RZCH, Wötkylä, notluca, Hyper DX and
 - UECP input
 
 - Enhanced Other Networks (EON) Group 14A support with PS/AF/Mapped AF/PTY transmission.
+
 - FM-DAB linking via ODA
-- Manual RDS group input from RDS Spy recording / Airomate-standard txt file 
+
+- Custom RDS group input from RDS Spy recording / Airomate-standard txt file 
 
 - Live monitor panel that reflects PS/RT/PI/PTY and pilot status via WebSocket.
 
 - Basic RDS2 logos (experimental)
-
-- Custom Groups
 
 ## Installation
 
