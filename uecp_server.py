@@ -36,6 +36,7 @@ from uecp_parser import (
     MEC_AF, MEC_SLC, MEC_FFG, MEC_ODA_SET, MEC_ODA_DATA, MEC_NAMES,
     RT_BUF_CFG_MASK, RT_BUF_CFG_SHIFT,
     RT_BUF_CLEAR,
+    rds_bytes_to_str,
 )
 
 # MEC 0x24 Free Format Group — buffer config values (bits 6-5 of byte 2)
@@ -63,8 +64,8 @@ log = logging.getLogger(__name__)
 
 
 def _rds_bytes_to_text(data: bytes) -> str:
-    """Decode RDS character-set bytes to a Unicode string via Latin-1."""
-    return data.decode("latin-1").rstrip("\x00 ")
+    """Decode RDS character-set bytes (IEC 62106-4:2018) to a Unicode string."""
+    return rds_bytes_to_str(data)
 
 
 class UECPStateHandler:
