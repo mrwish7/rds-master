@@ -380,6 +380,14 @@ default_state = {
     "rds2_logo_path": "",  # Path to station logo for RDS2 file transfer
     "rds2_logo_filename": "",  # Just the filename for display/serving
 
+    # ARI (Autofahrer-Rundfunk-Information) - Traffic Radio System
+    "en_ari": False,  # Enable ARI transmission
+    "ari_region": "B",  # Region identifier (A-F) - determines BK frequency
+    "ari_announcement": False,  # Announcement identifier (DK) manual state
+    "ari_announcement_mode": "manual",  # "manual" or "rds_ta" (tied to TA+TP)
+    "ari_bk_level": 60,  # BK modulation depth (% of carrier)
+    "ari_dk_level": 30,  # DK modulation depth (% of carrier)
+
     # Settings
     "rds_freq": 57000,
 
@@ -1279,7 +1287,30 @@ def monitor_pusher_loop():
                 if not logo_filename and state.get("rds2_logo_path"):
                     logo_filename = os.path.basename(state.get("rds2_logo_path"))
                 monitor_data["rds2_logo_filename"] = logo_filename
-            
+
+            # ARI status
+            ari_enabled = state.get("en_ari", False)
+            monitor_data["en_ari"] = ari_enabled
+            if ari_enabled:
+                ari_region = state.get("ari_region", "B")
+                ari_region_freqs = {"A": 23.75, "B": 28.274, "C": 34.926, "D": 39.583, "E": 45.673, "F": 53.977}
+                monitor_data["ari_region"] = ari_region
+                monitor_data["ari_bk_freq"] = ari_region_freqs.get(ari_region, 28.274)
+
+                # Determine effective announcement state (manual or auto)
+                ari_announcement_effective = get_effective_value("ari_announcement")
+                if state.get("ari_announcement_mode", "manual") == "rds_ta":
+                    tp_eff = get_effective_value("tp")
+                    ta_eff = get_effective_value("ta")
+                    ari_announcement_effective = (tp_eff == 1) and (ta_eff == 1)
+                monitor_data["ari_announcement"] = ari_announcement_effective
+                monitor_data["ari_announcement_mode"] = state.get("ari_announcement_mode", "manual")
+            else:
+                monitor_data["ari_region"] = ""
+                monitor_data["ari_bk_freq"] = 0
+                monitor_data["ari_announcement"] = False
+                monitor_data["ari_announcement_mode"] = "manual"
+
             # Pilot generation: disabled if pass-through is enabled and an input device is selected, or when genlock is active
             monitor_data["pilot_generated"] = not ((state.get("passthrough") and state.get("device_in_idx") != -1) or state.get("genlock"))
             monitor_data["en_ert"] = bool(state.get("en_ert", False))
@@ -1298,7 +1329,8 @@ def monitor_pusher_loop():
                  "tp": 0, "ta": 0, "ms": 0,
                  "di_stereo": 0, "di_head": 0, "di_comp": 0, "di_dyn": 0,
                  "rbds": False, "eon_networks": [],
-                 "rds2_enabled": False, "rds2_carrier_count": 0, "rds2_logo_filename": "", "rds2_carrier_levels": [0, 0, 0]
+                 "rds2_enabled": False, "rds2_carrier_count": 0, "rds2_logo_filename": "", "rds2_carrier_levels": [0, 0, 0],
+                 "en_ari": False, "ari_region": "", "ari_bk_freq": 0, "ari_announcement": False, "ari_announcement_mode": "manual"
              })
         time.sleep(0.2)
 
@@ -4439,7 +4471,12 @@ class RDSDSP:
         self.rds2_last_bit = [0, 0, 0]
         self.rds2_bit_queue = [collections.deque(), collections.deque(), collections.deque()]
         self.rds2_zi = [np.zeros(2048), np.zeros(2048), np.zeros(2048)]
-        
+
+        # ARI (Autofahrer-Rundfunk-Information) phase accumulators
+        self.p_ari = 0.0     # Phase for 57 kHz ARI carrier (SK - Sender Kennung)
+        self.p_ari_bk = 0.0  # Phase for BK modulation (region identifier, varies 23.75-53.977 Hz)
+        self.p_ari_dk = 0.0  # Phase for DK modulation (announcement identifier, 125 Hz)
+
         # Load RDS2 logo if available in state
         if state.get("rds2_logo_path"):
             try:
@@ -4586,8 +4623,61 @@ class RDSDSP:
                  
              self.p_pilot = (self.p_pilot + 2 * np.pi * PILOT_FREQ * frames / SAMPLE_RATE) % (2 * np.pi)
 
+        # ARI (Autofahrer-Rundfunk-Information) - Separate 57 kHz pilot tone with AM
+        ari_sig = 0.0
+        if state.get("en_ari", False):
+            # ARI region frequencies (BK - Bereichs Kennung)
+            ari_region_freqs = {
+                "A": 23.75,   # Mecklenburg-WP, Bremen, Sachsen, BW (US zone)
+                "B": 28.274,  # Schleswig-Holstein, Sachsen-Anhalt, Saarland
+                "C": 34.926,  # Hamburg, Berlin, NRW, Bayern Nord
+                "D": 39.583,  # Niedersachsen SE, Rheinland-Pfalz, Bayern Süd
+                "E": 45.673,  # Niedersachsen West, Thüringen, BW Süd (FR zone)
+                "F": 53.977   # Brandenburg, Hessen
+            }
+
+            ari_region = state.get("ari_region", "B")
+            bk_freq = ari_region_freqs.get(ari_region, 28.274)
+
+            # ARI carrier level (uses same level as RDS)
+            ari_level = state.get("rds_level", 4.5) / 100.0
+
+            # Modulation depths (as fractions, e.g., 60% = 0.6)
+            bk_depth = state.get("ari_bk_level", 60) / 100.0
+            dk_depth = state.get("ari_dk_level", 30) / 100.0
+
+            # Determine if announcement (DK) is active
+            ari_announcement_effective = dynamic_overrides.get("ari_announcement", state.get("ari_announcement", False))
+
+            # Auto mode: tie to RDS TA+TP flags
+            if state.get("ari_announcement_mode", "manual") == "rds_ta":
+                tp_effective = get_effective_value("tp")
+                ta_effective = get_effective_value("ta")
+                ari_announcement_effective = (tp_effective == 1) and (ta_effective == 1)
+
+            # Build ARI amplitude modulation envelope
+            # AM formula: carrier * (1 + m_bk * sin(ωt) + m_dk * sin(ωt))
+            # Start with carrier baseline (1.0) plus BK modulation
+            ari_envelope = 1.0 + (bk_depth * np.sin(2 * np.pi * bk_freq * t + self.p_ari_bk))
+
+            # Add DK (125 Hz announcement) if active
+            if ari_announcement_effective:
+                ari_envelope += dk_depth * np.sin(2 * np.pi * 125.0 * t + self.p_ari_dk)
+
+            # Generate 57 kHz pure carrier with amplitude modulation (SK with BK and DK)
+            # Phase-lock to pilot if pilot is active (57 kHz = 3 × 19 kHz)
+            if lvl_pilot > 0 and not use_genlock:
+                self.p_ari = (self.p_pilot * 3.0) % (2 * np.pi)
+
+            ari_sig = np.sin(2 * np.pi * 57000 * t + self.p_ari) * ari_envelope * ari_level
+
+            # Update ARI phase accumulators
+            self.p_ari = (self.p_ari + 2 * np.pi * 57000 * frames / SAMPLE_RATE) % (2 * np.pi)
+            self.p_ari_bk = (self.p_ari_bk + 2 * np.pi * bk_freq * frames / SAMPLE_RATE) % (2 * np.pi)
+            self.p_ari_dk = (self.p_ari_dk + 2 * np.pi * 125.0 * frames / SAMPLE_RATE) % (2 * np.pi)
+
         self.p_rds = (self.p_rds + 2 * np.pi * rds_freq * frames / SAMPLE_RATE) % (2 * np.pi)
-        mixed = rds_sig + pilot_sig
+        mixed = rds_sig + pilot_sig + ari_sig
         
         # Add RDS2 carriers if enabled (pure Python implementation)
         if state.get("en_rds2", False):
@@ -5733,6 +5823,34 @@ UI_HTML = r"""
                                         <img id="rds2_logo_preview" src="" alt="RDS2 Logo" class="max-w-full h-auto border border-gray-600 rounded" style="max-height: 150px;">
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="section col-span-2" id="ari_status_section" style="display:none">
+                        <div class="section-header">ARI Traffic Radio Status</div>
+                        <div class="section-body">
+                            <div class="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label>Region (BK)</label>
+                                    <div class="live-display sub text-xs" id="ari_region_display">-</div>
+                                    <div class="text-[9px] text-gray-500 mt-1">
+                                        <span id="ari_bk_freq_display">0 Hz</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label>Announcement (DK)</label>
+                                    <div class="live-display sub text-xs" id="ari_announcement_display">Inactive</div>
+                                    <div class="text-[9px] text-gray-500 mt-1">125 Hz modulation</div>
+                                </div>
+                                <div>
+                                    <label>Mode</label>
+                                    <div class="live-display sub text-xs" id="ari_mode_display">Manual</div>
+                                    <div class="text-[9px] text-gray-500 mt-1">Control mode</div>
+                                </div>
+                            </div>
+                            <div class="mt-3 text-[10px] text-cyan-400 bg-[#0a1a1a] border border-cyan-900/50 rounded p-2">
+                                ℹ️ ARI is a separate 57 kHz pilot tone with AM (SK=57kHz tone, BK=region freq AM, DK=125Hz announcement AM)
                             </div>
                         </div>
                     </div>
@@ -7019,6 +7137,88 @@ UI_HTML = r"""
                          </div>
                     </div>
                  </div>
+
+                 <div class="section">
+                    <div class="section-header">ARI (Autofahrer-Rundfunk-Information)</div>
+                    <div class="section-body">
+                         <div class="flex justify-between items-center mb-3">
+                             <div>
+                                 <label>Enable ARI Traffic Radio</label>
+                                 <div class="text-[9px] text-gray-500">German/European traffic information system - separate 57 kHz pilot tone with AM</div>
+                                 <div class="text-[9px] text-cyan-400">Separate from RDS carrier; phase-locked to 19 kHz pilot (57 kHz = 3 × 19 kHz)</div>
+                             </div>
+                             <input type="checkbox" class="toggle-checkbox" id="en_ari" {% if state.en_ari %}checked{% endif %} onchange="sync()">
+                         </div>
+
+                         <div class="grid-cols-2">
+                             <div>
+                                 <label>Region Identifier (BK)</label>
+                                 <select id="ari_region" onchange="sync()">
+                                     <option value="A" {% if state.ari_region == "A" %}selected{% endif %}>Region A (23.75 Hz) - Mecklenburg-WP, Bremen, Sachsen, BW (US zone)</option>
+                                     <option value="B" {% if state.ari_region == "B" %}selected{% endif %}>Region B (28.274 Hz) - Schleswig-Holstein, Sachsen-Anhalt, Saarland</option>
+                                     <option value="C" {% if state.ari_region == "C" %}selected{% endif %}>Region C (34.926 Hz) - Hamburg, Berlin, NRW, Bayern Nord</option>
+                                     <option value="D" {% if state.ari_region == "D" %}selected{% endif %}>Region D (39.583 Hz) - Niedersachsen SE, Rheinland-Pfalz, Bayern Süd</option>
+                                     <option value="E" {% if state.ari_region == "E" %}selected{% endif %}>Region E (45.673 Hz) - Niedersachsen West, Thüringen, BW Süd (FR zone)</option>
+                                     <option value="F" {% if state.ari_region == "F" %}selected{% endif %}>Region F (53.977 Hz) - Brandenburg, Hessen</option>
+                                 </select>
+                                 <div class="text-[9px] text-gray-500 mt-1">BK frequency determines transmission range identifier</div>
+                             </div>
+
+                             <div>
+                                 <label>Announcement Mode (DK)</label>
+                                 <select id="ari_announcement_mode" onchange="sync(); updateARIAnnouncementUI()">
+                                     <option value="manual" {% if state.ari_announcement_mode == "manual" %}selected{% endif %}>Manual Control</option>
+                                     <option value="rds_ta" {% if state.ari_announcement_mode == "rds_ta" %}selected{% endif %}>Auto (follows RDS TA+TP)</option>
+                                 </select>
+                                 <div class="text-[9px] text-gray-500 mt-1">DK = 125 Hz modulation for traffic announcements</div>
+                             </div>
+                         </div>
+
+                         <div id="ari_manual_announcement" class="mt-3" style="display: {% if state.ari_announcement_mode == 'manual' %}block{% else %}none{% endif %}">
+                             <div class="flex justify-between items-center bg-[#111] p-3 rounded">
+                                 <div>
+                                     <label class="font-semibold text-yellow-400">Traffic Announcement Active (DK)</label>
+                                     <div class="text-[9px] text-gray-500">Manually trigger announcement identifier</div>
+                                 </div>
+                                 <input type="checkbox" class="toggle-checkbox" id="ari_announcement" {% if state.ari_announcement %}checked{% endif %} onchange="sync()">
+                             </div>
+                         </div>
+
+                         <div id="ari_auto_announcement" class="mt-3" style="display: {% if state.ari_announcement_mode == 'rds_ta' %}block{% else %}none{% endif %}">
+                             <div class="bg-[#0a1a0a] border border-green-900/50 rounded p-3">
+                                 <div class="text-xs text-green-400 font-semibold mb-1">🔗 Announcement Auto Mode Active</div>
+                                 <div class="text-[10px] text-gray-400">DK announcement will activate when both TP=1 and TA=1 in RDS flags</div>
+                             </div>
+                         </div>
+
+                         <div class="mt-3 grid-cols-2">
+                             <div>
+                                 <label>BK Modulation Depth (%)</label>
+                                 <input type="range" id="ari_bk_level" min="0" max="100" step="5" value="{{state.ari_bk_level}}" oninput="sync()">
+                                 <span class="slider-val" id="val_ari_bk">{{state.ari_bk_level}}</span>
+                                 <div class="text-[9px] text-gray-500">Standard: 60%</div>
+                             </div>
+                             <div>
+                                 <label>DK Modulation Depth (%)</label>
+                                 <input type="range" id="ari_dk_level" min="0" max="100" step="5" value="{{state.ari_dk_level}}" oninput="sync()">
+                                 <span class="slider-val" id="val_ari_dk">{{state.ari_dk_level}}</span>
+                                 <div class="text-[9px] text-gray-500">Standard: 30%</div>
+                             </div>
+                         </div>
+
+                         <div class="mt-3 bg-[#1a1a0a] border border-amber-900/30 rounded p-3">
+                             <div class="text-[10px] text-amber-300 font-semibold mb-2">ℹ️ ARI Technical Info</div>
+                             <ul class="text-[9px] text-gray-400 space-y-1">
+                                 <li>• <strong>SK</strong> (Sender Kennung): 57 kHz pure pilot tone indicates traffic radio transmitter</li>
+                                 <li>• <strong>BK</strong> (Bereichs Kennung): Region identifier via AM at specific frequency (23.75-53.977 Hz)</li>
+                                 <li>• <strong>DK</strong> (Durchsage Kennung): Additional 125 Hz AM indicates active traffic announcement</li>
+                                 <li>• ARI is a separate 57 kHz carrier (pure tone with AM), distinct from RDS (biphase data carrier)</li>
+                                 <li>• Both carriers phase-locked to 19 kHz stereo pilot (57 kHz = 3 × 19 kHz)</li>
+                                 <li>• SK and BK should be disabled when no traffic messages can be transmitted</li>
+                             </ul>
+                         </div>
+                    </div>
+                 </div>
             </div>
 
             <div id="audio" class="content">
@@ -7737,6 +7937,7 @@ UI_HTML = r"""
                             <option value="ptyn">PTYN (Programme Type Name)</option>
                             <option value="tp">TP (Traffic Programme)</option>
                             <option value="ta">TA (Traffic Announcement)</option>
+                            <option value="ari_announcement">ARI Announcement (DK)</option>
                             <option value="pi">PI (Programme Identification)</option>
                             <option value="en_pin">PIN Enable</option>
                             <option value="pin_day">PIN Day (1-31)</option>
@@ -10574,7 +10775,40 @@ UI_HTML = r"""
                 // Hide section when disabled or no carriers
                 if (rds2Section) rds2Section.style.display = 'none';
             }
-            
+
+            // ARI Status
+            const ariSection = document.getElementById('ari_status_section');
+            if (data.en_ari) {
+                if (ariSection) ariSection.style.display = 'block';
+
+                // Region display
+                const regionNames = {
+                    "A": "A - Mecklenburg-WP, Bremen, Sachsen",
+                    "B": "B - Schleswig-Holstein, Saarland",
+                    "C": "C - Hamburg, Berlin, NRW",
+                    "D": "D - Niedersachsen, Rheinland-Pfalz",
+                    "E": "E - Thüringen, BW Süd",
+                    "F": "F - Brandenburg, Hessen"
+                };
+                setText('ari_region_display', regionNames[data.ari_region] || data.ari_region);
+                setText('ari_bk_freq_display', data.ari_bk_freq.toFixed(2) + ' Hz');
+
+                // Announcement display
+                if (data.ari_announcement) {
+                    setText('ari_announcement_display', '🔴 ACTIVE');
+                    document.getElementById('ari_announcement_display').style.color = '#ff4444';
+                } else {
+                    setText('ari_announcement_display', 'Inactive');
+                    document.getElementById('ari_announcement_display').style.color = '';
+                }
+
+                // Mode display
+                const modeText = data.ari_announcement_mode === 'rds_ta' ? 'Auto (RDS TA+TP)' : 'Manual';
+                setText('ari_mode_display', modeText);
+            } else {
+                if (ariSection) ariSection.style.display = 'none';
+            }
+
             // Use RBDS or RDS list based on mode
             const pty_list = data.rbds ? pty_list_rbds : pty_list_rds;
             setText('live_pty', pty_list[data.pty_idx] || "None");
@@ -10689,6 +10923,8 @@ UI_HTML = r"""
             setValText('val_rds2_c1', 'rds2_carrier1_level');
             setValText('val_rds2_c2', 'rds2_carrier2_level');
             setValText('val_rds2_c3', 'rds2_carrier3_level');
+            setValText('val_ari_bk', 'ari_bk_level');
+            setValText('val_ari_dk', 'ari_dk_level');
             const genEl = document.getElementById('genlock_offset');
             const valOffset = document.getElementById('val_offset');
             if (genEl && valOffset) valOffset.innerText = genEl.value;
@@ -10744,6 +10980,14 @@ UI_HTML = r"""
                 rds2_carrier2_level: getVal('rds2_carrier2_level'),
                 rds2_carrier3_level: getVal('rds2_carrier3_level'),
 
+                // ARI (Autofahrer-Rundfunk-Information)
+                en_ari: getVal('en_ari'),
+                ari_region: getVal('ari_region'),
+                ari_announcement: getVal('ari_announcement'),
+                ari_announcement_mode: getVal('ari_announcement_mode'),
+                ari_bk_level: getVal('ari_bk_level'),
+                ari_dk_level: getVal('ari_dk_level'),
+
                 // Transparent Data Channels (TDC)
                 en_tdc_5a: getVal('en_tdc_5a'),
                 en_tdc_5b: getVal('en_tdc_5b'),
@@ -10768,10 +11012,19 @@ UI_HTML = r"""
             const c1 = document.getElementById('rds2_carrier1_div');
             const c2 = document.getElementById('rds2_carrier2_div');
             const c3 = document.getElementById('rds2_carrier3_div');
-            
+
             if (c1) c1.style.display = numCarriers >= 1 ? 'block' : 'none';
             if (c2) c2.style.display = numCarriers >= 2 ? 'block' : 'none';
             if (c3) c3.style.display = numCarriers >= 3 ? 'block' : 'none';
+        }
+
+        function updateARIAnnouncementUI() {
+            const mode = document.getElementById('ari_announcement_mode')?.value || 'manual';
+            const manualDiv = document.getElementById('ari_manual_announcement');
+            const autoDiv = document.getElementById('ari_auto_announcement');
+
+            if (manualDiv) manualDiv.style.display = mode === 'manual' ? 'block' : 'none';
+            if (autoDiv) autoDiv.style.display = mode === 'rds_ta' ? 'block' : 'none';
         }
 
         function uploadRDS2Logo() {
