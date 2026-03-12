@@ -20,7 +20,7 @@ from scipy import signal as dsp_signal
 from scipy.fft import fft
 
 # --- VERSION ---
-VERSION = "v1.2"
+VERSION = "v1.2b"
 
 # --- SETTINGS ---
 # Host API filtering: auto-detect based on OS, can be overridden via RDS_HOSTAPI env var
@@ -395,6 +395,8 @@ default_state = {
     "tdc_pc_show_cpu": True,  # Show CPU usage in PC status
     "tdc_pc_show_temp": True,  # Show temperature in PC status
     "tdc_pc_show_ip": True,  # Show local IP in PC status
+    "tdc_pc_show_ram": False,  # Show RAM usage in PC status
+    "tdc_pc_show_uptime": False,  # Show system uptime in PC status
 
     # Scheduler
     "group_sequence": "0A 0A 2A 0A",
@@ -444,7 +446,9 @@ monitor_data = {
     "pty_idx": 10,
     "rt_plus_info": "",
     "heartbeat": 0,
-    "pilot_generated": True
+    "pilot_generated": True,
+    "en_pin": 0,
+    "pin_str": ""
 }
 
 # --- RT+ PARSER ---
@@ -1098,6 +1102,35 @@ def convert_to_ebu_latin(text):
             result.append(' ')
     return ''.join(result)
 
+def apply_text_trim(text, trim_parens=False, trim_brackets=False, trim_at_semicolon=False, max_len=0):
+    """Apply optional text processing rules to clean up RT/eRT content.
+
+    trim_at_semicolon example: 'Artist; Feat. Someone - Title' -> 'Artist - Title'
+    It trims content after ';' within each field segment (split by ' - ').
+    """
+    if not text:
+        return text
+    if trim_parens:
+        text = re.sub(r'\([^)]*\)', '', text)
+    if trim_brackets:
+        text = re.sub(r'\[[^\]]*\]', '', text)
+    if trim_at_semicolon:
+        # Split on ' - ' delimiters (keep delimiter at start of each following part),
+        # trim each segment at its first ';', then rejoin.
+        parts = re.split(r'(?= - )', text)
+        cleaned = []
+        for part in parts:
+            if ';' in part:
+                part = part[:part.index(';')].rstrip()
+            cleaned.append(part)
+        text = ''.join(cleaned)
+    # Collapse multiple spaces
+    text = re.sub(r'  +', ' ', text).strip()
+    if max_len > 0 and len(text) > max_len:
+        text = text[:max_len].rstrip()
+    return text
+
+
 def text_to_rds_bytes(text):
     """Convert Unicode text to RDS byte codes (IEC 62106-4:2018).
 
@@ -1207,6 +1240,17 @@ def monitor_pusher_loop():
                 monitor_data["eon_networks"] = [{"pi": svc.get("pi_on", ""), "ps": svc.get("ps", "")} for svc in eon_services] if eon_services else []
             except:
                 monitor_data["eon_networks"] = []
+
+            # PIN status
+            en_pin = state.get("en_pin", 0)
+            monitor_data["en_pin"] = en_pin
+            if en_pin:
+                pin_day = state.get("pin_day", 0)
+                pin_hour = state.get("pin_hour", 0)
+                pin_minute = state.get("pin_minute", 0)
+                monitor_data["pin_str"] = f"Day {pin_day}, {pin_hour:02d}:{pin_minute:02d}"
+            else:
+                monitor_data["pin_str"] = ""
             
             # RDS2 status - only count as active if RDS2 is actually enabled
             rds2_enabled = state.get("en_rds2", False)
@@ -1433,6 +1477,20 @@ def dynamic_control_loop():
                             if rds_param in dynamic_overrides:
                                 del dynamic_overrides[rds_param]
                             continue  # Skip setting new_value so it doesn't get applied
+
+                    elif mapping_type == "list_match":
+                        # List of values that all produce the same output.
+                        # Useful for mapping many show/program names to one PTY/MS value.
+                        match_list = rule.get("match_list", [])
+                        list_output = rule.get("list_output", "")
+                        if match_list and list_output is not None and list_output != "":
+                            str_value = str(value).strip().lower()
+                            if str_value in [str(item).strip().lower() for item in match_list]:
+                                new_value = list_output
+                            else:
+                                if rds_param in dynamic_overrides:
+                                    del dynamic_overrides[rds_param]
+                                continue
                     
                     # Apply the new value to state
                     if new_value is not None and rds_param in state:
@@ -1558,7 +1616,26 @@ class PCStatusMonitor:
         if 'cpu' not in PCStatusMonitor._cache_time or (now - PCStatusMonitor._cache_time['cpu']) > 2.0:
             try:
                 import psutil
-                PCStatusMonitor._cache['cpu'] = f"{psutil.cpu_percent(interval=0.1):.0f}%"
+                # Use interval=None (non-blocking) to avoid stalling the scheduler thread.
+                # psutil internally tracks the last reading, so calling this every 2s gives
+                # accurate results without blocking.
+                pct = psutil.cpu_percent(interval=None)
+                # On the very first call psutil returns 0.0 as it has no previous sample.
+                # Trigger a background sample so the next cached read is accurate.
+                if pct == 0.0 and 'cpu' not in PCStatusMonitor._cache:
+                    # Schedule a one-shot delayed re-read after 1 s
+                    def _refresh():
+                        try:
+                            import psutil as _p, time as _t
+                            _t.sleep(1.0)
+                            v = _p.cpu_percent(interval=None)
+                            PCStatusMonitor._cache['cpu'] = f"{v:.0f}%"
+                            PCStatusMonitor._cache_time['cpu'] = _t.time()
+                        except:
+                            pass
+                    import threading
+                    threading.Thread(target=_refresh, daemon=True).start()
+                PCStatusMonitor._cache['cpu'] = f"{pct:.0f}%"
                 PCStatusMonitor._cache_time['cpu'] = now
             except:
                 PCStatusMonitor._cache['cpu'] = "N/A"
@@ -1623,6 +1700,44 @@ class PCStatusMonitor:
         return PCStatusMonitor._cache['hostname']
 
     @staticmethod
+    def get_ram_usage():
+        """Get RAM usage percentage (cached for 5 seconds)"""
+        now = time.time()
+        if 'ram' not in PCStatusMonitor._cache_time or (now - PCStatusMonitor._cache_time['ram']) > 5.0:
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                PCStatusMonitor._cache['ram'] = f"{vm.percent:.0f}%"
+                PCStatusMonitor._cache_time['ram'] = now
+            except:
+                PCStatusMonitor._cache['ram'] = "N/A"
+                PCStatusMonitor._cache_time['ram'] = now
+        return PCStatusMonitor._cache.get('ram', 'N/A')
+
+    @staticmethod
+    def get_uptime():
+        """Get system uptime as a formatted string (cached for 30 seconds)"""
+        now = time.time()
+        if 'uptime' not in PCStatusMonitor._cache_time or (now - PCStatusMonitor._cache_time['uptime']) > 30.0:
+            try:
+                import psutil
+                boot_ts = psutil.boot_time()
+                secs = int(time.time() - boot_ts)
+                days, rem = divmod(secs, 86400)
+                hours, rem = divmod(rem, 3600)
+                mins = rem // 60
+                if days > 0:
+                    uptime_str = f"{days}d {hours}h {mins}m"
+                else:
+                    uptime_str = f"{hours}h {mins}m"
+                PCStatusMonitor._cache['uptime'] = uptime_str
+                PCStatusMonitor._cache_time['uptime'] = now
+            except:
+                PCStatusMonitor._cache['uptime'] = "N/A"
+                PCStatusMonitor._cache_time['uptime'] = now
+        return PCStatusMonitor._cache.get('uptime', 'N/A')
+
+    @staticmethod
     def format_pc_status():
         """Format PC status string based on enabled options"""
         parts = []
@@ -1637,10 +1752,14 @@ class PCStatusMonitor:
             temp = PCStatusMonitor.get_cpu_temp()
             if temp != "N/A":
                 parts.append(f"Temp: {temp}")
+        if state.get("tdc_pc_show_ram", False):
+            parts.append(f"RAM: {PCStatusMonitor.get_ram_usage()}")
+        if state.get("tdc_pc_show_uptime", False):
+            parts.append(f"Up: {PCStatusMonitor.get_uptime()}")
         if state.get("tdc_pc_show_ip", True):
             parts.append(f"IP: {PCStatusMonitor.get_local_ip()}")
 
-        return " | ".join(parts) if parts else "RDS-MASTER {VERSION}"
+        return " | ".join(parts) if parts else f"RDS-MASTER {VERSION}"
 
 class RDSScheduler:
     def __init__(self):
@@ -1830,6 +1949,17 @@ class RDSScheduler:
         # Apply prefix/suffix for file/URL sources
         if source_type in ("file", "url") and resolved:
             resolved = prefix + resolved + suffix
+
+        # Apply optional text trim
+        if resolved and any([msg.get('trim_parens'), msg.get('trim_brackets'),
+                              msg.get('trim_at_semicolon'), msg.get('trim_max_len')]):
+            resolved = apply_text_trim(
+                resolved,
+                trim_parens=msg.get('trim_parens', False),
+                trim_brackets=msg.get('trim_brackets', False),
+                trim_at_semicolon=msg.get('trim_at_semicolon', False),
+                max_len=64 if msg.get('trim_max_len') else 0
+            )
 
         return resolved
 
@@ -2582,9 +2712,22 @@ class RDSScheduler:
         source_type = msg.get("source_type", "manual")
         content = msg.get("content", "")
         if source_type == "manual":
-            return content
-        # file / url: return last-good cached value (never block)
-        return self._ert_content_cache.get(msg_id) or self.ert_msg_last_good.get(msg_id, "")
+            result = content
+        else:
+            # file / url: return last-good cached value (never block)
+            result = self._ert_content_cache.get(msg_id) or self.ert_msg_last_good.get(msg_id, "")
+
+        # Apply optional text trim
+        if result and any([msg.get('trim_parens'), msg.get('trim_brackets'),
+                           msg.get('trim_at_semicolon'), msg.get('trim_max_len')]):
+            result = apply_text_trim(
+                result,
+                trim_parens=msg.get('trim_parens', False),
+                trim_brackets=msg.get('trim_brackets', False),
+                trim_at_semicolon=msg.get('trim_at_semicolon', False),
+                max_len=128 if msg.get('trim_max_len') else 0
+            )
+        return result
 
     def get_effective_ert_text(self):
         """Get the effective eRT text based on message management."""
@@ -5498,6 +5641,10 @@ UI_HTML = r"""
                                      <div class="live-display sub" id="live_ptyn"></div>
                                  </div>
                              </div>
+                             <div id="live_pin_row" style="display:none">
+                                 <label>Programme PIN</label>
+                                 <div class="live-display sub text-center text-green-300" id="live_pin"></div>
+                             </div>
                              
                              <div class="grid grid-cols-2 gap-2">
                                  <div>
@@ -5994,6 +6141,30 @@ UI_HTML = r"""
                                 </div>
                             </div>
 
+                            <!-- Text Processing / Trim Options -->
+                            <div class="bg-[#1a1a1a] border border-[#333] rounded p-3 space-y-2">
+                                <label class="text-xs text-teal-400 font-bold block">✂️ Text Processing</label>
+                                <div class="grid grid-cols-2 gap-2 text-xs">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" id="rt_msg_trim_parens" class="accent-teal-600">
+                                        <span class="text-gray-300">Remove (...) parentheses</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" id="rt_msg_trim_brackets" class="accent-teal-600">
+                                        <span class="text-gray-300">Remove [...] brackets</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" id="rt_msg_trim_semicolon" class="accent-teal-600">
+                                        <span class="text-gray-300">Trim at ; per segment</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" id="rt_msg_trim_maxlen" class="accent-teal-600">
+                                        <span class="text-gray-300">Truncate to 64 chars</span>
+                                    </label>
+                                </div>
+                                <div class="text-[10px] text-gray-500">e.g. "Artist; Artist 2 - Title" → "Artist - Title" with trim at ;</div>
+                            </div>
+
                             <!-- Preview -->
                             <div class="bg-[#000] border border-[#333] rounded p-3">
                                 <div class="flex justify-between items-center mb-2">
@@ -6462,6 +6633,30 @@ UI_HTML = r"""
 
                                  </div>
                              </div>
+
+                             <!-- Text Processing / Trim Options -->
+                             <div class="bg-[#1a1a1a] border border-[#333] rounded p-3 space-y-2">
+                                 <label class="text-xs text-teal-400 font-bold block">✂️ Text Processing</label>
+                                 <div class="grid grid-cols-2 gap-2 text-xs">
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="checkbox" id="ert_msg_trim_parens" class="accent-teal-600">
+                                         <span class="text-gray-300">Remove (...) parentheses</span>
+                                     </label>
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="checkbox" id="ert_msg_trim_brackets" class="accent-teal-600">
+                                         <span class="text-gray-300">Remove [...] brackets</span>
+                                     </label>
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="checkbox" id="ert_msg_trim_semicolon" class="accent-teal-600">
+                                         <span class="text-gray-300">Trim at ; per segment</span>
+                                     </label>
+                                     <label class="flex items-center gap-2 cursor-pointer">
+                                         <input type="checkbox" id="ert_msg_trim_maxlen" class="accent-teal-600">
+                                         <span class="text-gray-300">Truncate to 128 bytes</span>
+                                     </label>
+                                 </div>
+                                 <div class="text-[10px] text-gray-500">e.g. "Artist; Artist 2 - Title" → "Artist - Title" with trim at ;</div>
+                             </div>
                          </div>
 
                          <div class="rtplus-modal-footer">
@@ -6602,7 +6797,7 @@ UI_HTML = r"""
                          <!-- PC Status Options (shown when either mode is pc_status) -->
                          <div id="tdc_pc_options" {% if state.tdc_5a_mode != 'pc_status' and state.tdc_5b_mode != 'pc_status' %}style="display:none"{% endif %} class="p-2 border border-blue-700 rounded bg-blue-950 bg-opacity-20">
                              <label class="font-semibold text-blue-300 mb-2 block">PC Status Display Options</label>
-                             <div class="text-[9px] text-gray-400 mb-2">Format: RDS-MASTER v1.2 | CPU: XX% | Temp: XXC | IP: XXX.XXX.XXX.XXX</div>
+                             <div class="text-[9px] text-gray-400 mb-2">Format: RDS-MASTER v1.2 | CPU: XX% | Temp: XXC | RAM: XX% | IP: XXX.XXX | Uptime: Xd Xh Xm</div>
                              <div class="grid grid-cols-3 gap-2 text-sm">
                                  <label class="flex items-center gap-2">
                                      <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_cpu" {% if state.tdc_pc_show_cpu %}checked{% endif %} onchange="sync()">
@@ -6615,6 +6810,14 @@ UI_HTML = r"""
                                  <label class="flex items-center gap-2">
                                      <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_ip" {% if state.tdc_pc_show_ip %}checked{% endif %} onchange="sync()">
                                      <span>Show IP</span>
+                                 </label>
+                                 <label class="flex items-center gap-2">
+                                     <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_ram" {% if state.tdc_pc_show_ram %}checked{% endif %} onchange="sync()">
+                                     <span>Show RAM</span>
+                                 </label>
+                                 <label class="flex items-center gap-2">
+                                     <input type="checkbox" class="toggle-checkbox" id="tdc_pc_show_uptime" {% if state.tdc_pc_show_uptime %}checked{% endif %} onchange="sync()">
+                                     <span>Show Uptime</span>
                                  </label>
                              </div>
                          </div>
@@ -7559,6 +7762,7 @@ UI_HTML = r"""
                                 <option value="boolean">Boolean (true/false → 1/0)</option>
                                 <option value="text_match">Text Match (custom mapping)</option>
                                 <option value="conditional">Conditional (If X then Y, else default)</option>
+                                <option value="list_match">List Match (any of a list → one output)</option>
                                 <option value="passthrough">Pass Through (JSON value → RDS value)</option>
                             </select>
                         </div>
@@ -7578,55 +7782,34 @@ UI_HTML = r"""
                         </div>
 
                         <div id="dc_conditional_section" style="display: none;">
-                            <label class="text-xs text-gray-400 mb-1 block">Conditional Mapping</label>
-                            <div class="grid grid-cols-2 gap-2 mb-2">
+                            <div class="flex justify-between items-center mb-2">
+                                <label class="text-xs text-gray-400">Conditional Mapping</label>
+                                <button type="button" onclick="addDynamicConditionRow()" class="px-2 py-1 bg-green-800 hover:bg-green-700 rounded text-xs text-white font-bold">+ Add Condition</button>
+                            </div>
+                            <div id="dc_conditions_list" class="space-y-2 mb-2"></div>
+                            <!-- Hidden inputs retained for backward compat with updateDynamicControlParamUI -->
+                            <input type="hidden" id="dc_condition_value">
+                            <input type="hidden" id="dc_output_value">
+                            <select id="dc_output_pty" style="display:none"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option></select>
+                            <div class="text-[10px] text-gray-500 bg-blue-900/20 border border-blue-700/50 rounded p-2">
+                                <strong>How it works:</strong> Conditions are checked in order; the first match applies its output value. If none match, no override is applied (falls back to your RDS settings). Add as many rows as you need — great for mapping many programme names.
+                            </div>
+                        </div>
+
+                        <div id="dc_list_match_section" style="display: none;">
+                            <label class="text-xs text-gray-400 mb-1 block">List Match Mapping</label>
+                            <div class="space-y-2 mb-2">
                                 <div>
-                                    <label class="text-[10px] text-gray-500">If JSON value equals:</label>
-                                    <input type="text" id="dc_condition_value" placeholder="e.g. News" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs">
+                                    <label class="text-[10px] text-gray-500">Match values (one per line, case-insensitive):</label>
+                                    <textarea id="dc_match_list" rows="4" placeholder="e.g.&#10;News&#10;News+&#10;Breaking News" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono"></textarea>
                                 </div>
                                 <div>
-                                    <label class="text-[10px] text-gray-500">Then set to:</label>
-                                    <!-- Text input for non-PTY parameters -->
-                                    <input type="text" id="dc_output_value" placeholder="e.g. 1" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs">
-                                    <!-- PTY dropdown for PTY parameter -->
-                                    <select id="dc_output_pty" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs" style="display: none;">
-                                        <option value="0">0</option>
-                                        <option value="1">1</option>
-                                        <option value="2">2</option>
-                                        <option value="3">3</option>
-                                        <option value="4">4</option>
-                                        <option value="5">5</option>
-                                        <option value="6">6</option>
-                                        <option value="7">7</option>
-                                        <option value="8">8</option>
-                                        <option value="9">9</option>
-                                        <option value="10">10</option>
-                                        <option value="11">11</option>
-                                        <option value="12">12</option>
-                                        <option value="13">13</option>
-                                        <option value="14">14</option>
-                                        <option value="15">15</option>
-                                        <option value="16">16</option>
-                                        <option value="17">17</option>
-                                        <option value="18">18</option>
-                                        <option value="19">19</option>
-                                        <option value="20">20</option>
-                                        <option value="21">21</option>
-                                        <option value="22">22</option>
-                                        <option value="23">23</option>
-                                        <option value="24">24</option>
-                                        <option value="25">25</option>
-                                        <option value="26">26</option>
-                                        <option value="27">27</option>
-                                        <option value="28">28</option>
-                                        <option value="29">29</option>
-                                        <option value="30">30</option>
-                                        <option value="31">31</option>
-                                    </select>
+                                    <label class="text-[10px] text-gray-500">When any value matches, set RDS param to:</label>
+                                    <input type="text" id="dc_list_output" placeholder="e.g. 1" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs">
                                 </div>
                             </div>
-                            <div class="text-[10px] text-gray-500 bg-blue-900/20 border border-blue-700/50 rounded p-2">
-                                <strong>How it works:</strong> If the JSON field equals the condition value, apply the output value. Otherwise, use the default from your settings (no override).
+                            <div class="text-[10px] text-gray-500 bg-purple-900/20 border border-purple-700/50 rounded p-2">
+                                <strong>How it works:</strong> If the JSON field value matches any entry in the list, apply the output value. Otherwise, the override is cleared (falls back to your RDS settings). Useful when many programme names should trigger the same RDS value.
                             </div>
                         </div>
                     </div>
@@ -8270,6 +8453,12 @@ UI_HTML = r"""
             document.getElementById('rt_msg_edit_id').value = msg.id;
             document.getElementById('rt_msg_modal_title').textContent = isNew ? 'Add Message' : 'Edit Message';
             document.getElementById('rt_msg_cycles').value = msg.cycles || 2;
+
+            // Load text trim flags
+            var el = document.getElementById('rt_msg_trim_parens'); if (el) el.checked = msg.trim_parens || false;
+            el = document.getElementById('rt_msg_trim_brackets'); if (el) el.checked = msg.trim_brackets || false;
+            el = document.getElementById('rt_msg_trim_semicolon'); if (el) el.checked = msg.trim_at_semicolon || false;
+            el = document.getElementById('rt_msg_trim_maxlen'); if (el) el.checked = msg.trim_max_len || false;
 
             // Set source type radio first
             var sourceRadios = document.querySelectorAll('input[name="rt_msg_source"]');
@@ -9434,6 +9623,12 @@ UI_HTML = r"""
                 msg.smart_rules = '[]'; // Clear old field
             }
 
+            // Save text trim flags
+            var tpEl = document.getElementById('rt_msg_trim_parens'); msg.trim_parens = tpEl ? tpEl.checked : false;
+            tpEl = document.getElementById('rt_msg_trim_brackets'); msg.trim_brackets = tpEl ? tpEl.checked : false;
+            tpEl = document.getElementById('rt_msg_trim_semicolon'); msg.trim_at_semicolon = tpEl ? tpEl.checked : false;
+            tpEl = document.getElementById('rt_msg_trim_maxlen'); msg.trim_max_len = tpEl ? tpEl.checked : false;
+
             closeRTMsgModal();
             renderRTMessages();
             syncRTMessages();
@@ -10245,6 +10440,11 @@ UI_HTML = r"""
             setText('live_ptyn', data.ptyn);
             setText('live_pi', data.pi);
 
+            // PIN row - show/hide and update
+            var pinRow = document.getElementById('live_pin_row');
+            if (pinRow) pinRow.style.display = (data.en_pin && data.pin_str) ? '' : 'none';
+            setText('live_pin', data.pin_str || '');
+
             // eRT row - show/hide based on en_ert
             const ertRow = document.getElementById('live_ert_row');
             if (ertRow) ertRow.style.display = data.en_ert ? '' : 'none';
@@ -10555,7 +10755,9 @@ UI_HTML = r"""
                 tdc_5b_mode: getVal('tdc_5b_mode'),
                 tdc_pc_show_cpu: getVal('tdc_pc_show_cpu'),
                 tdc_pc_show_temp: getVal('tdc_pc_show_temp'),
-                tdc_pc_show_ip: getVal('tdc_pc_show_ip')
+                tdc_pc_show_ip: getVal('tdc_pc_show_ip'),
+                tdc_pc_show_ram: getVal('tdc_pc_show_ram'),
+                tdc_pc_show_uptime: getVal('tdc_pc_show_uptime')
             };
             socket.emit('update', data);
         }
@@ -10842,10 +11044,33 @@ UI_HTML = r"""
                 return;
             }
 
+            var dragSrcIdx = null;
+
             for (var i = 0; i < eonServices.length; i++) {
                 var svc = eonServices[i];
                 var card = document.createElement('div');
                 card.className = 'bg-black border border-gray-700 rounded p-3 flex justify-between items-center';
+                card.draggable = true;
+                card.dataset.index = i;
+
+                // Drag events
+                card.addEventListener('dragstart', (function(idx) { return function(e) {
+                    dragSrcIdx = idx;
+                    e.dataTransfer.effectAllowed = 'move';
+                    this.style.opacity = '0.4';
+                }; })(i));
+                card.addEventListener('dragend', function() { this.style.opacity = ''; });
+                card.addEventListener('dragover', function(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+                card.addEventListener('drop', (function(idx) { return function(e) {
+                    e.preventDefault();
+                    if (dragSrcIdx === null || dragSrcIdx === idx) return;
+                    var moved = eonServices.splice(dragSrcIdx, 1)[0];
+                    eonServices.splice(idx, 0, moved);
+                    syncEONServices();
+                    renderEONServiceList();
+                    updateEONDisplay();
+                    dragSrcIdx = null;
+                }; })(i));
 
                 var info = document.createElement('div');
                 info.className = 'flex-1';
@@ -10868,7 +11093,37 @@ UI_HTML = r"""
                                 '<div class="text-xs text-gray-400 break-words">' + afDisplay + '</div>';
 
                 var actions = document.createElement('div');
-                actions.className = 'flex gap-2';
+                actions.className = 'flex gap-2 items-center';
+
+                // Up button
+                var upBtn = document.createElement('button');
+                upBtn.textContent = '↑';
+                upBtn.title = 'Move Up';
+                upBtn.className = 'px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs' + (i === 0 ? ' opacity-30 cursor-default' : '');
+                if (i > 0) {
+                    upBtn.onclick = (function(idx) { return function() {
+                        var moved = eonServices.splice(idx, 1)[0];
+                        eonServices.splice(idx - 1, 0, moved);
+                        syncEONServices();
+                        renderEONServiceList();
+                        updateEONDisplay();
+                    }; })(i);
+                }
+
+                // Down button
+                var downBtn = document.createElement('button');
+                downBtn.textContent = '↓';
+                downBtn.title = 'Move Down';
+                downBtn.className = 'px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs' + (i === eonServices.length - 1 ? ' opacity-30 cursor-default' : '');
+                if (i < eonServices.length - 1) {
+                    downBtn.onclick = (function(idx) { return function() {
+                        var moved = eonServices.splice(idx, 1)[0];
+                        eonServices.splice(idx + 1, 0, moved);
+                        syncEONServices();
+                        renderEONServiceList();
+                        updateEONDisplay();
+                    }; })(i);
+                }
 
                 var editBtn = document.createElement('button');
                 editBtn.textContent = 'Edit';
@@ -10880,6 +11135,8 @@ UI_HTML = r"""
                 delBtn.className = 'px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs';
                 delBtn.onclick = (function(idx) { return function() { deleteEONService(idx); }; })(i);
 
+                actions.appendChild(upBtn);
+                actions.appendChild(downBtn);
                 actions.appendChild(editBtn);
                 actions.appendChild(delBtn);
                 card.appendChild(info);
@@ -11053,8 +11310,16 @@ UI_HTML = r"""
                 }[rule.rds_param] || rule.rds_param;
                 
                 var mappingInfo = rule.mapping_type;
-                if (rule.mapping_type === 'conditional' && rule.condition_value && rule.output_value) {
-                    mappingInfo += ' (If "' + rule.condition_value + '" → ' + rule.output_value + ')';
+                if (rule.mapping_type === 'conditional') {
+                    var conds = rule.conditions || [];
+                    if (!conds.length && rule.condition_value) conds = [{match: rule.condition_value, output: rule.output_value || ''}];
+                    if (conds.length === 1) {
+                        mappingInfo += ' (If "' + conds[0].match + '" → ' + conds[0].output + ')';
+                    } else if (conds.length > 1) {
+                        mappingInfo += ' (' + conds.length + ' conditions)';
+                    }
+                } else if (rule.mapping_type === 'list_match' && rule.match_list && rule.match_list.length > 0) {
+                    mappingInfo += ' (' + rule.match_list.length + ' values → ' + (rule.list_output || '?') + ')';
                 } else if (rule.custom_mapping && Object.keys(rule.custom_mapping).length > 0) {
                     mappingInfo += ' (' + Object.keys(rule.custom_mapping).length + ' mappings)';
                 }
@@ -11085,6 +11350,73 @@ UI_HTML = r"""
             }
         }
 
+        var conditionRows = [];
+
+        function renderConditionalRows() {
+            var container = document.getElementById('dc_conditions_list');
+            if (!container) return;
+            var isPTY = document.getElementById('dc_rds_param').value === 'pty';
+            container.innerHTML = '';
+            if (conditionRows.length === 0) {
+                container.innerHTML = '<div class="text-xs text-gray-500 italic py-1">No conditions yet — click + Add Condition.</div>';
+                return;
+            }
+            var ptyNames = ['None','News','Current Affairs','Info','Sport','Education','Drama','Culture','Science','Varied','Pop','Rock','Easy Listening','Light Classical','Serious Classical','Other Music','Weather','Finance',"Children's",'Social','Religion','Phone-In','Travel','Leisure','Jazz','Country','National','Oldies','Folk','Documentary','Alarm Test','Alarm'];
+            conditionRows.forEach(function(row, idx) {
+                var div = document.createElement('div');
+                div.className = 'flex gap-2 items-center';
+
+                var condInput = document.createElement('input');
+                condInput.type = 'text';
+                condInput.value = row.match || '';
+                condInput.placeholder = 'If equals...';
+                condInput.className = 'flex-1 min-w-0 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                condInput.oninput = (function(i) { return function() { conditionRows[i].match = this.value; }; })(idx);
+
+                var arrow = document.createElement('span');
+                arrow.textContent = '→';
+                arrow.className = 'text-gray-400 text-xs flex-shrink-0';
+
+                var outInput;
+                if (isPTY) {
+                    outInput = document.createElement('select');
+                    outInput.className = 'w-28 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                    for (var p = 0; p <= 31; p++) {
+                        var opt = document.createElement('option');
+                        opt.value = String(p);
+                        opt.textContent = p + ': ' + (ptyNames[p] || p);
+                        if (String(p) === String(row.output)) opt.selected = true;
+                        outInput.appendChild(opt);
+                    }
+                    outInput.onchange = (function(i) { return function() { conditionRows[i].output = this.value; }; })(idx);
+                } else {
+                    outInput = document.createElement('input');
+                    outInput.type = 'text';
+                    outInput.value = row.output || '';
+                    outInput.placeholder = 'Set to...';
+                    outInput.className = 'w-20 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                    outInput.oninput = (function(i) { return function() { conditionRows[i].output = this.value; }; })(idx);
+                }
+
+                var delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.textContent = '✕';
+                delBtn.className = 'px-2 py-1 bg-red-900 hover:bg-red-700 rounded text-xs flex-shrink-0';
+                delBtn.onclick = (function(i) { return function() { conditionRows.splice(i, 1); renderConditionalRows(); }; })(idx);
+
+                div.appendChild(condInput);
+                div.appendChild(arrow);
+                div.appendChild(outInput);
+                div.appendChild(delBtn);
+                container.appendChild(div);
+            });
+        }
+
+        function addDynamicConditionRow() {
+            conditionRows.push({ match: '', output: '' });
+            renderConditionalRows();
+        }
+
         function addDynamicControlRule() {
             document.getElementById('dc_edit_idx').value = '';
             document.getElementById('dc_name').value = '';
@@ -11095,9 +11427,9 @@ UI_HTML = r"""
             document.getElementById('dc_poll_interval').value = '5';
             document.getElementById('dc_enabled').checked = true;
             document.getElementById('dc_value_mappings').innerHTML = '';
-            document.getElementById('dc_condition_value').value = '';
-            document.getElementById('dc_output_value').value = '';
-            document.getElementById('dc_output_pty').value = '0';
+            conditionRows = [];
+            var dcMatchList = document.getElementById('dc_match_list'); if (dcMatchList) dcMatchList.value = '';
+            var dcListOutput = document.getElementById('dc_list_output'); if (dcListOutput) dcListOutput.value = '';
             ptyMappings = {};
             currentDynamicControlFieldValue = null;
             currentDynamicControlFieldType = null;
@@ -11121,9 +11453,9 @@ UI_HTML = r"""
             
             // Clear existing mappings
             document.getElementById('dc_value_mappings').innerHTML = '';
-            document.getElementById('dc_condition_value').value = '';
-            document.getElementById('dc_output_value').value = '';
-            document.getElementById('dc_output_pty').value = '0';
+            conditionRows = [];
+            var lmEl = document.getElementById('dc_match_list'); if (lmEl) lmEl.value = '';
+            var loEl = document.getElementById('dc_list_output'); if (loEl) loEl.value = '';
             ptyMappings = {};
             currentDynamicControlFieldValue = null;
             currentDynamicControlFieldType = null;
@@ -11145,34 +11477,26 @@ UI_HTML = r"""
                     lastRow.children[1].value = rule.custom_mapping[key];
                 });
             }
-            
-            // Load conditional mapping fields
+
+            // Load conditional rows
             if (rule.mapping_type === 'conditional') {
-                document.getElementById('dc_condition_value').value = rule.condition_value || '';
-                
-                // Populate appropriate output field based on parameter type
-                if (rule.rds_param === 'pty') {
-                    document.getElementById('dc_output_pty').value = rule.output_value || '0';
-                    document.getElementById('dc_output_value').value = '';
-                } else {
-                    document.getElementById('dc_output_value').value = rule.output_value || '';
-                    document.getElementById('dc_output_pty').value = '0';
+                if (rule.conditions && rule.conditions.length > 0) {
+                    conditionRows = rule.conditions.map(function(c) { return { match: c.match || '', output: String(c.output || '') }; });
+                } else if (rule.condition_value) {
+                    // Backward compat: single condition
+                    conditionRows = [{ match: rule.condition_value, output: String(rule.output_value || '') }];
                 }
+            }
+
+            // Load list_match fields
+            if (rule.mapping_type === 'list_match') {
+                var matchListEl = document.getElementById('dc_match_list');
+                var listOutputEl = document.getElementById('dc_list_output');
+                if (matchListEl) matchListEl.value = (rule.match_list || []).join('\n');
+                if (listOutputEl) listOutputEl.value = rule.list_output || '';
             }
             
             updateDynamicControlParamUI();
-            
-            // Re-populate conditional fields after UI update (in case UI update cleared them)
-            if (rule.mapping_type === 'conditional') {
-                setTimeout(function() {
-                    document.getElementById('dc_condition_value').value = rule.condition_value || '';
-                    if (rule.rds_param === 'pty') {
-                        document.getElementById('dc_output_pty').value = rule.output_value || '0';
-                    } else {
-                        document.getElementById('dc_output_value').value = rule.output_value || '';
-                    }
-                }, 100);
-            }
             
             document.getElementById('dynamic_control_modal_title').textContent = 'Edit Control Rule';
             document.getElementById('dynamic_control_edit_form').style.display = 'block';
@@ -11219,6 +11543,9 @@ UI_HTML = r"""
             } else if (mappingType === 'conditional') {
                 // Conditional mapping - no custom_mapping needed, use separate fields
                 customMapping = null;
+            } else if (mappingType === 'list_match') {
+                // List match - no custom_mapping needed, use separate fields
+                customMapping = null;
             }
             
             var rule = {
@@ -11232,26 +11559,33 @@ UI_HTML = r"""
                 enabled: document.getElementById('dc_enabled').checked
             };
             
-
-            
             // Add conditional mapping fields if applicable
             if (mappingType === 'conditional') {
-                rule.condition_value = document.getElementById('dc_condition_value').value || '';
-                
-                // Get output value from appropriate input (PTY dropdown or text input)
-                if (rdsParam === 'pty') {
-                    rule.output_value = document.getElementById('dc_output_pty').value || '';
-                } else {
-                    rule.output_value = document.getElementById('dc_output_value').value || '';
-                }
-                
-                // Validation for conditional mapping
-                if (!rule.condition_value) {
-                    alert('Condition value is required for conditional mapping');
+                var validConds = conditionRows.filter(function(r) { return r.match && r.match.trim(); });
+                if (!validConds.length) {
+                    alert('At least one condition is required for conditional mapping');
                     return;
                 }
-                if (!rule.output_value) {
-                    alert('Output value is required for conditional mapping');
+                rule.conditions = validConds.map(function(r) { return { match: r.match.trim(), output: String(r.output || '') }; });
+                // Backward compat single fields (first condition)
+                rule.condition_value = rule.conditions[0].match;
+                rule.output_value = rule.conditions[0].output;
+            }
+
+            // Add list_match fields if applicable
+            if (mappingType === 'list_match') {
+                var matchListEl = document.getElementById('dc_match_list');
+                var listOutputEl = document.getElementById('dc_list_output');
+                var listText = matchListEl ? matchListEl.value.trim() : '';
+                rule.match_list = listText ? listText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; }) : [];
+                rule.list_output = listOutputEl ? listOutputEl.value.trim() : '';
+                
+                if (!rule.match_list.length) {
+                    alert('At least one match value is required for list match');
+                    return;
+                }
+                if (!rule.list_output) {
+                    alert('Output value is required for list match');
                     return;
                 }
             }
@@ -11537,6 +11871,7 @@ UI_HTML = r"""
             var ptyMapping = document.getElementById('dc_pty_mapping');
             var customMapping = document.getElementById('dc_custom_mapping_section');
             var conditionalMapping = document.getElementById('dc_conditional_section');
+            var listMatchSection = document.getElementById('dc_list_match_section');
             var mappingTypeElement = document.getElementById('dc_mapping_type');
             
             if (!mappingTypeElement) {
@@ -11551,6 +11886,7 @@ UI_HTML = r"""
             ptyMapping.style.display = 'none';
             customMapping.style.display = 'none';
             conditionalMapping.style.display = 'none';
+            if (listMatchSection) listMatchSection.style.display = 'none';
             
             // Reset conditional inputs visibility
             document.getElementById('dc_output_value').style.display = 'block';
@@ -11572,6 +11908,8 @@ UI_HTML = r"""
                     // Show PTY dropdown for conditional PTY mapping
                     document.getElementById('dc_output_value').style.display = 'none';
                     document.getElementById('dc_output_pty').style.display = 'block';
+                } else if (mappingType === 'list_match') {
+                    if (listMatchSection) listMatchSection.style.display = 'block';
                 }
             } else if (param === 'ms' || param === 'tp' || param === 'ta') {
                 // Show simple mapping options
@@ -11584,6 +11922,8 @@ UI_HTML = r"""
                     // Show text input for non-PTY conditional mapping
                     document.getElementById('dc_output_value').style.display = 'block';
                     document.getElementById('dc_output_pty').style.display = 'none';
+                } else if (mappingType === 'list_match') {
+                    if (listMatchSection) listMatchSection.style.display = 'block';
                 }
                 // Show quick setup if field is selected
                 if (currentDynamicControlFieldValue !== null) {
@@ -11600,6 +11940,8 @@ UI_HTML = r"""
                     // Show text input for non-PTY conditional mapping
                     document.getElementById('dc_output_value').style.display = 'block';
                     document.getElementById('dc_output_pty').style.display = 'none';
+                } else if (mappingType === 'list_match') {
+                    if (listMatchSection) listMatchSection.style.display = 'block';
                 }
                 // Show quick setup
                 if (currentDynamicControlFieldValue !== null) {
@@ -11615,8 +11957,12 @@ UI_HTML = r"""
                     // Show text input for non-PTY conditional mapping
                     document.getElementById('dc_output_value').style.display = 'block';
                     document.getElementById('dc_output_pty').style.display = 'none';
+                } else if (mappingType === 'list_match') {
+                    if (listMatchSection) listMatchSection.style.display = 'block';
                 }
             }
+            // Re-render condition rows whenever param/mapping type changes
+            if (mappingType === 'conditional') renderConditionalRows();
         }
 
         function updateCurrentMappingsDisplay() {
@@ -13176,7 +13522,13 @@ UI_HTML = r"""
             document.getElementById('ert_msg_edit_id').value = id;
             document.getElementById('ert_msg_cycles').value = msg.cycles || 2;
             document.getElementById('ert_msg_enabled').checked = msg.enabled !== false;
-            
+
+            // Load text trim flags
+            var etEl = document.getElementById('ert_msg_trim_parens'); if (etEl) etEl.checked = msg.trim_parens || false;
+            etEl = document.getElementById('ert_msg_trim_brackets'); if (etEl) etEl.checked = msg.trim_brackets || false;
+            etEl = document.getElementById('ert_msg_trim_semicolon'); if (etEl) etEl.checked = msg.trim_at_semicolon || false;
+            etEl = document.getElementById('ert_msg_trim_maxlen'); if (etEl) etEl.checked = msg.trim_max_len || false;
+
             // Set source type
             var sourceRadios = document.querySelectorAll('input[name="ert_msg_source"]');
             sourceRadios.forEach(function(radio) {
@@ -13689,6 +14041,12 @@ UI_HTML = r"""
             // Store sample text for reload
             var sampleEl = document.getElementById('ert_msg_sample_text');
             msg.sample_text = sampleEl ? (sampleEl.value || '') : '';
+
+            // Save text trim flags
+            var etpEl = document.getElementById('ert_msg_trim_parens'); msg.trim_parens = etpEl ? etpEl.checked : false;
+            etpEl = document.getElementById('ert_msg_trim_brackets'); msg.trim_brackets = etpEl ? etpEl.checked : false;
+            etpEl = document.getElementById('ert_msg_trim_semicolon'); msg.trim_at_semicolon = etpEl ? etpEl.checked : false;
+            etpEl = document.getElementById('ert_msg_trim_maxlen'); msg.trim_max_len = etpEl ? etpEl.checked : false;
             
             closeERTMsgModal();
             renderERTMessages();
