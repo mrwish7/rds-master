@@ -382,7 +382,7 @@ default_state = {
 
     # ARI (Autofahrer-Rundfunk-Information) - Traffic Radio System
     "en_ari": False,  # Enable ARI transmission
-    "ari_region": "B",  # Region identifier (A-F) - determines BK frequency
+    "ari_region": "A",  # Region identifier (A-F) - determines BK frequency
     "ari_announcement": False,  # Announcement identifier (DK) manual state
     "ari_announcement_mode": "manual",  # "manual" or "rds_ta" (tied to TA+TP)
     "ari_bk_level": 60,  # BK modulation depth (% of carrier)
@@ -4473,6 +4473,7 @@ class RDSDSP:
         self.rds2_zi = [np.zeros(2048), np.zeros(2048), np.zeros(2048)]
 
         # ARI (Autofahrer-Rundfunk-Information) phase accumulators
+        # ARI is a SEPARATE 57 kHz carrier (sits in RDS biphase spectral notch)
         self.p_ari = 0.0     # Phase for 57 kHz ARI carrier (SK - Sender Kennung)
         self.p_ari_bk = 0.0  # Phase for BK modulation (region identifier, varies 23.75-53.977 Hz)
         self.p_ari_dk = 0.0  # Phase for DK modulation (announcement identifier, 125 Hz)
@@ -4616,14 +4617,16 @@ class RDSDSP:
         pilot_sig = 0.0
         if not use_genlock and not (state.get("passthrough") and indata is not None):
              pilot_sig = np.sin(2 * np.pi * PILOT_FREQ * t + self.p_pilot) * lvl_pilot
-             
+
              # Phase Lock: If pilot is active, lock RDS phase to pilot (RDS = 3 * Pilot)
+             # Add π phase shift so sum of 19kHz and 57kHz has minimum amplitude
              if lvl_pilot > 0:
-                 self.p_rds = (self.p_pilot * 3.0) % (2 * np.pi)
-                 
+                 self.p_rds = (self.p_pilot * 3.0 + np.pi) % (2 * np.pi)
+
              self.p_pilot = (self.p_pilot + 2 * np.pi * PILOT_FREQ * frames / SAMPLE_RATE) % (2 * np.pi)
 
-        # ARI (Autofahrer-Rundfunk-Information) - Separate 57 kHz pilot tone with AM
+        # ARI (Autofahrer-Rundfunk-Information) - SEPARATE 57 kHz carrier with AM
+        # RDS biphase encoding has spectral NULL at 57 kHz center, allowing ARI carrier to coexist there
         ari_sig = 0.0
         if state.get("en_ari", False):
             # ARI region frequencies (BK - Bereichs Kennung)
@@ -4657,22 +4660,22 @@ class RDSDSP:
 
             # Build ARI amplitude modulation envelope
             # AM formula: carrier * (1 + m_bk * sin(ωt) + m_dk * sin(ωt))
-            # Start with carrier baseline (1.0) plus BK modulation
             ari_envelope = 1.0 + (bk_depth * np.sin(2 * np.pi * bk_freq * t + self.p_ari_bk))
 
             # Add DK (125 Hz announcement) if active
             if ari_announcement_effective:
                 ari_envelope += dk_depth * np.sin(2 * np.pi * 125.0 * t + self.p_ari_dk)
 
-            # Generate 57 kHz pure carrier with amplitude modulation (SK with BK and DK)
-            # Phase-lock to pilot if pilot is active (57 kHz = 3 × 19 kHz)
+            # Generate SEPARATE 57 kHz pure carrier with AM (sits in RDS spectral notch)
+            # Phase-lock to pilot if pilot is active (57 kHz = 3 × 19 kHz + π)
             if lvl_pilot > 0 and not use_genlock:
-                self.p_ari = (self.p_pilot * 3.0) % (2 * np.pi)
+                self.p_ari = (self.p_pilot * 3.0 + np.pi) % (2 * np.pi)
+            else:
+                self.p_ari = (self.p_ari + 2 * np.pi * 57000 * frames / SAMPLE_RATE) % (2 * np.pi)
 
             ari_sig = np.sin(2 * np.pi * 57000 * t + self.p_ari) * ari_envelope * ari_level
 
-            # Update ARI phase accumulators
-            self.p_ari = (self.p_ari + 2 * np.pi * 57000 * frames / SAMPLE_RATE) % (2 * np.pi)
+            # Update ARI modulation phase accumulators
             self.p_ari_bk = (self.p_ari_bk + 2 * np.pi * bk_freq * frames / SAMPLE_RATE) % (2 * np.pi)
             self.p_ari_dk = (self.p_ari_dk + 2 * np.pi * 125.0 * frames / SAMPLE_RATE) % (2 * np.pi)
 
@@ -5850,7 +5853,7 @@ UI_HTML = r"""
                                 </div>
                             </div>
                             <div class="mt-3 text-[10px] text-cyan-400 bg-[#0a1a1a] border border-cyan-900/50 rounded p-2">
-                                ℹ️ ARI is a separate 57 kHz pilot tone with AM (SK=57kHz tone, BK=region freq AM, DK=125Hz announcement AM)
+                                ℹ️ ARI is a separate 57 kHz carrier with AM (SK=carrier, BK=region freq, DK=125Hz announcement)
                             </div>
                         </div>
                     </div>
@@ -7144,8 +7147,8 @@ UI_HTML = r"""
                          <div class="flex justify-between items-center mb-3">
                              <div>
                                  <label>Enable ARI Traffic Radio</label>
-                                 <div class="text-[9px] text-gray-500">German/European traffic information system - separate 57 kHz pilot tone with AM</div>
-                                 <div class="text-[9px] text-cyan-400">Separate from RDS carrier; phase-locked to 19 kHz pilot (57 kHz = 3 × 19 kHz)</div>
+                                 <div class="text-[9px] text-gray-500">German/European traffic information system - separate 57 kHz carrier with AM</div>
+                                 <div class="text-[9px] text-cyan-400">RDS biphase has spectral notch at 57 kHz center, allowing ARI carrier to coexist</div>
                              </div>
                              <input type="checkbox" class="toggle-checkbox" id="en_ari" {% if state.en_ari %}checked{% endif %} onchange="sync()">
                          </div>
@@ -7209,12 +7212,12 @@ UI_HTML = r"""
                          <div class="mt-3 bg-[#1a1a0a] border border-amber-900/30 rounded p-3">
                              <div class="text-[10px] text-amber-300 font-semibold mb-2">ℹ️ ARI Technical Info</div>
                              <ul class="text-[9px] text-gray-400 space-y-1">
-                                 <li>• <strong>SK</strong> (Sender Kennung): 57 kHz pure pilot tone indicates traffic radio transmitter</li>
-                                 <li>• <strong>BK</strong> (Bereichs Kennung): Region identifier via AM at specific frequency (23.75-53.977 Hz)</li>
-                                 <li>• <strong>DK</strong> (Durchsage Kennung): Additional 125 Hz AM indicates active traffic announcement</li>
-                                 <li>• ARI is a separate 57 kHz carrier (pure tone with AM), distinct from RDS (biphase data carrier)</li>
-                                 <li>• Both carriers phase-locked to 19 kHz stereo pilot (57 kHz = 3 × 19 kHz)</li>
-                                 <li>• SK and BK should be disabled when no traffic messages can be transmitted</li>
+                                 <li>• <strong>SK</strong> (Sender Kennung): Separate 57 kHz pure carrier indicates traffic radio transmitter</li>
+                                 <li>• <strong>BK</strong> (Bereichs Kennung): AM of 57 kHz carrier at region frequency (23.75-53.977 Hz, 60% depth)</li>
+                                 <li>• <strong>DK</strong> (Durchsage Kennung): Additional 125 Hz AM (30% depth) for traffic announcements</li>
+                                 <li>• <strong>Backwards compatible with RDS:</strong> RDS biphase has spectral null at 57 kHz, allowing ARI carrier</li>
+                                 <li>• RDS (phase modulation) and ARI (AM) are separate 57 kHz signals, added together in MPX</li>
+                                 <li>• Both carriers phase-locked to 19 kHz pilot with π shift to minimize peak (57 kHz = 3 × 19 kHz + π)</li>
                              </ul>
                          </div>
                     </div>
