@@ -905,8 +905,42 @@ def _atomic_write_json(filepath, data):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
-        os.replace(tmp_path, filepath)  # atomic on same filesystem
-    except Exception:
+
+        # Windows-friendly atomic replace with retry logic
+        import platform
+        if platform.system() == 'Windows':
+            import time
+            import stat
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    # On Windows, remove read-only attribute if it exists
+                    if os.path.exists(filepath):
+                        try:
+                            # Remove read-only flag if set
+                            os.chmod(filepath, stat.S_IWRITE | stat.S_IREAD)
+                        except Exception:
+                            pass
+
+                        # Remove existing file
+                        os.remove(filepath)
+
+                    # Rename temp file to final location
+                    os.rename(tmp_path, filepath)
+                    break
+                except PermissionError as e:
+                    if attempt < max_retries - 1:
+                        # Wait progressively longer on each retry
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    else:
+                        print(f"Failed to save after {max_retries} attempts: {e}")
+                        raise
+        else:
+            # On Unix/Linux, os.replace is truly atomic
+            os.replace(tmp_path, filepath)
+    except Exception as e:
+        print(f"Error in _atomic_write_json: {e}")
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -920,20 +954,27 @@ def save_config():
         data = {}
         if os.path.exists(DATASETS_FILE):
             try:
-                with open(DATASETS_FILE, 'r') as f:
+                # Explicitly open, read, and close the file to avoid handle leaks
+                f = open(DATASETS_FILE, 'r', encoding='utf-8')
+                try:
                     content = f.read().strip()
                     if content:  # Only parse if file has content
                         data = json.loads(content)
                     else:
                         print("Warning: datasets.json is empty, using default structure")
                         data = {}
+                finally:
+                    f.close()  # Explicitly close the file handle
             except json.JSONDecodeError as je:
                 print(f"Warning: datasets.json is corrupted ({je}), creating new structure")
                 # Backup corrupted file
                 import shutil
                 backup_path = DATASETS_FILE + '.corrupted'
-                shutil.copy2(DATASETS_FILE, backup_path)
-                print(f"Corrupted file backed up to {backup_path}")
+                try:
+                    shutil.copy2(DATASETS_FILE, backup_path)
+                    print(f"Corrupted file backed up to {backup_path}")
+                except Exception as backup_err:
+                    print(f"Could not create backup: {backup_err}")
                 data = {}
         
         # Ensure structure exists
@@ -2208,9 +2249,11 @@ class RDSScheduler:
                     
                     tag_len = min(len(tag_content), limit - tag_start)
                     if tag_start < limit and tag_len > 0:
-                        # Replace first tag or add new one
-                        tags = [(tag_type, tag_start, tag_len)]
-                        break  # Sub-tagging stops processing
+                        # Add tag to the list (allow multiple sub-tagging policies to apply)
+                        tags.append((tag_type, tag_start, tag_len))
+                        # RT+ supports up to 2 tags, so stop after 2
+                        if len(tags) >= 2:
+                            break
         
         return tags
 
@@ -5669,6 +5712,7 @@ UI_HTML = r"""
                     {{site_name}} • <span id="heartbeat" class="text-xs">♥</span> 192kHz Ready
                 </div>
                 <button id="pwrBtn" onclick="togglePower()" class="pwr-btn">OFF AIR</button>
+                <button onclick="manualSave()" class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white font-bold" title="Manually save configuration">💾 Save Config</button>
                 <a href="/logout" class="text-[11px] text-gray-300 hover:text-white underline">Logout</a>
             </div>
         </div>
@@ -6437,8 +6481,8 @@ UI_HTML = r"""
                          <div><label>ECC</label><input type="text" id="ecc" value="{{state.ecc}}" onchange="sync()"></div>
                          <div><label>LIC</label><input type="text" id="lic" value="{{state.lic}}" onchange="sync()"></div>
                          <div><label>Clock Offset</label><input type="number" id="tz_offset" value="{{state.tz_offset}}" onchange="sync()"></div>
-                         <div><label>Enable CT</label><input type="checkbox" class="toggle-checkbox" id="en_ct" {% if state.en_ct %}checked{% endif %} onchange="sync()"></div>
-                         <div><label>Enable ID (1A)</label><input type="checkbox" class="toggle-checkbox" id="en_id" {% if state.en_id %}checked{% endif %} onchange="sync()"></div>
+                         <div class="flex items-center gap-2"><label class="flex-1">Enable CT</label><input type="checkbox" class="toggle-checkbox" id="en_ct" {% if state.en_ct %}checked{% endif %} onchange="sync()"></div>
+                         <div class="flex items-center gap-2"><label class="flex-1">Enable ID (1A)</label><input type="checkbox" class="toggle-checkbox" id="en_id" {% if state.en_id %}checked{% endif %} onchange="sync()"></div>
                      </div>
                  </div>
                  
@@ -6449,8 +6493,8 @@ UI_HTML = r"""
                     </div>
                     <div class="section-body">
                         <div class="mb-3">
-                            <div class="flex justify-between items-center mb-2">
-                                <div>
+                            <div class="flex items-start gap-2 mb-2">
+                                <div class="flex-1">
                                     <label>Enable eRT</label>
                                     <div class="text-[9px] text-gray-500">UTF-8/UCS-2 RadioText with 128-byte capacity (AID: 0x6552)</div>
                                 </div>
@@ -6790,8 +6834,8 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">Programme Item Number (PIN) - Group 1A</div>
                     <div class="section-body">
-                         <div class="flex justify-between items-center mb-2">
-                             <div>
+                         <div class="flex items-start gap-2 mb-2">
+                             <div class="flex-1">
                                  <label>Enable PIN</label>
                                  <div class="text-[9px] text-gray-500">Broadcast programme start time (day, hour, minute)</div>
                              </div>
@@ -6830,10 +6874,9 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">Dynamic PTYN</div>
                     <div class="section-body">
-                         <div class="flex justify-between">
-                            <label>Enable</label>
+                         <div class="flex gap-3 items-center">
+                            <div class="flex gap-2 items-center"><label>Enable</label><input type="checkbox" class="toggle-checkbox" id="en_ptyn" {% if state.en_ptyn %}checked{% endif %} onchange="sync()"></div>
                             <div class="flex gap-2 items-center"><label>Centre Text</label><input type="checkbox" class="toggle-checkbox" id="ptyn_centered" {% if state.ptyn_centered %}checked{% endif %} onchange="sync()"></div>
-                             <input type="checkbox" class="toggle-checkbox" id="en_ptyn" {% if state.en_ptyn %}checked{% endif %} onchange="sync()">
                          </div>
                          <input type="text" id="ptyn" value="{{state.ptyn}}" onchange="sync()">
                     </div>
@@ -6842,11 +6885,10 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">Long PS (Group 15)</div>
                     <div class="section-body">
-                         <div class="flex justify-between">
-                             <label>Enable</label>
+                         <div class="flex gap-3 items-center">
+                             <div class="flex gap-2 items-center"><label>Enable</label><input type="checkbox" class="toggle-checkbox" id="en_lps" {% if state.en_lps %}checked{% endif %} onchange="sync()"></div>
                              <div class="flex gap-2 items-center"><label>Centre Text</label><input type="checkbox" class="toggle-checkbox" id="lps_centered" {% if state.lps_centered %}checked{% endif %} onchange="sync()"></div>
                              <div class="flex gap-2 items-center"><label>Append CR</label><input type="checkbox" class="toggle-checkbox" id="lps_cr" {% if state.lps_cr %}checked{% endif %} onchange="sync()"></div>
-                             <input type="checkbox" class="toggle-checkbox" id="en_lps" {% if state.en_lps %}checked{% endif %} onchange="sync()">
                          </div>
                          <input type="text" id="ps_long_32" value="{{state.ps_long_32}}" onchange="sync()">
                     </div>
@@ -6861,8 +6903,8 @@ UI_HTML = r"""
 
                          <!-- Type 5A Configuration -->
                          <div class="mb-4 p-2 border border-gray-700 rounded">
-                             <div class="flex justify-between items-center mb-2">
-                                 <div>
+                             <div class="flex items-start gap-2 mb-2">
+                                 <div class="flex-1">
                                      <label class="font-semibold text-blue-300">Type 5A (Full Data)</label>
                                      <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (16 segments × 4 bytes)</div>
                                  </div>
@@ -6889,8 +6931,8 @@ UI_HTML = r"""
 
                          <!-- Type 5B Configuration -->
                          <div class="mb-4 p-2 border border-gray-700 rounded">
-                             <div class="flex justify-between items-center mb-2">
-                                 <div>
+                             <div class="flex items-start gap-2 mb-2">
+                                 <div class="flex-1">
                                      <label class="font-semibold text-blue-300">Type 5B (Full Data)</label>
                                      <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (16 segments × 4 bytes)</div>
                                  </div>
@@ -6948,8 +6990,8 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">DAB Cross-Reference (Group 12A)</div>
                     <div class="section-body">
-                         <div class="flex justify-between items-center mb-2">
-                             <div>
+                         <div class="flex items-start gap-2 mb-2">
+                             <div class="flex-1">
                                  <label>Enable DAB Linkage</label>
                                  <div class="text-[9px] text-gray-500">Broadcast associated DAB ensemble frequency</div>
                                  <div class="text-[9px] text-amber-600 font-semibold">⚠️ EXPERIMENTAL: Not fully tested</div>
@@ -7074,8 +7116,8 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">EON - Enhanced Other Networks (Group 14A)</div>
                     <div class="section-body">
-                         <div class="flex justify-between items-center mb-3">
-                             <div>
+                         <div class="flex items-start gap-2 mb-3">
+                             <div class="flex-1">
                                  <label>Enable EON</label>
                                  <div class="text-[9px] text-gray-500">Broadcast information about other radio stations</div>
                              </div>
@@ -7120,8 +7162,8 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">Basic Dynamic Control</div>
                     <div class="section-body">
-                         <div class="flex justify-between items-center mb-3">
-                             <div>
+                         <div class="flex items-start gap-2 mb-3">
+                             <div class="flex-1">
                                  <label>Dynamic RDS Parameter Control</label>
                                  <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN, PIN, TDC) from JSON data</div>
                                  <div class="text-[9px] text-amber-600 font-semibold">⚠️ Changes take effect immediately</div>
@@ -7144,8 +7186,8 @@ UI_HTML = r"""
                  <div class="section">
                     <div class="section-header">ARI (Autofahrer-Rundfunk-Information)</div>
                     <div class="section-body">
-                         <div class="flex justify-between items-center mb-3">
-                             <div>
+                         <div class="flex items-start gap-2 mb-3">
+                             <div class="flex-1">
                                  <label>Enable ARI Traffic Radio</label>
                                  <div class="text-[9px] text-gray-500">German/European traffic information system - separate 57 kHz carrier with AM</div>
                                  <div class="text-[9px] text-cyan-400">RDS biphase has spectral notch at 57 kHz center, allowing ARI carrier to coexist</div>
@@ -7315,8 +7357,8 @@ UI_HTML = r"""
                         </div>
 
                         <div class="grid grid-cols-2 gap-4 mb-4">
-                            <div class="bg-[#111] p-3 rounded flex justify-between items-center">
-                                <div>
+                            <div class="bg-[#111] p-3 rounded flex items-center gap-2">
+                                <div class="flex-1">
                                     <label class="text-purple-400">Enable RDS2</label>
                                     <div class="text-[9px] text-gray-500">Activate additional RDS carriers</div>
                                 </div>
@@ -7510,8 +7552,8 @@ UI_HTML = r"""
                 <div class="section">
                     <div class="section-header">&#9112; UECP Server (Universal Encoder Communications Protocol)</div>
                     <div class="section-body">
-                        <div class="flex items-center justify-between mb-3">
-                            <div>
+                        <div class="flex items-start gap-2 mb-3">
+                            <div class="flex-1">
                                 <label>Enable UECP TCP Server</label>
                                 <div class="text-[9px] text-gray-500">Accept UECP 6.02 connections to remotely update RDS parameters (PI, PS, PTY, TA/TP, DI, M/S, PIN, RadioText).</div>
                             </div>
@@ -8893,10 +8935,10 @@ UI_HTML = r"""
             // Show/hide RT+ options based on enabled state (for all modes)
             if (opts) opts.style.display = enabled ? 'block' : 'none';
 
-            // For manual mode: show simple text input or sample text based on toggle
+            // For manual mode: ALWAYS show simple text input (don't switch to sample text)
             if (sourceType === 'manual') {
-                if (manualSimple) manualSimple.style.display = enabled ? 'none' : 'block';
-                if (manualBuilder) manualBuilder.style.display = enabled ? 'block' : 'none';
+                if (manualSimple) manualSimple.style.display = 'block';
+                if (manualBuilder) manualBuilder.style.display = 'none';
             } else {
                 // Hide manual builders for non-manual modes
                 if (manualSimple) manualSimple.style.display = 'none';
@@ -9189,7 +9231,9 @@ UI_HTML = r"""
                 appliedPolicy: ''
             };
 
-            // Apply policies in order (first match wins for sub-tagging)
+            var subTaggingMatches = 0; // Track how many sub-tagging policies have matched
+
+            // Apply policies in order (allow multiple sub-tagging policies to apply)
             for (var i = 0; i < taggingPolicies.length; i++) {
                 var policy = taggingPolicies[i];
                 if (!policy.enabled) continue;
@@ -9283,14 +9327,12 @@ UI_HTML = r"""
                     }
                     
                     if (matches) {
-                        // Apply sub-tagging
+                        // Apply sub-tagging - support multiple sub-tagging policies
                         result.appliedPolicy = policy.name;
-                        result.tag1Type = parseInt(policy.settings.tag_type) || 0;
-                        result.tag2Type = 0; // Sub-tagging uses only one tag
-                        
+
                         var tagContent = content;
                         var tagStart = 0;
-                        
+
                         // Apply tag action
                         switch (policy.settings.action) {
                             case 'tag_all':
@@ -9318,16 +9360,28 @@ UI_HTML = r"""
                                 }
                                 break;
                         }
-                        
+
                         // Strip pattern if requested
                         if (policy.settings.strip_pattern && policy.settings.action !== 'tag_match') {
                             tagContent = tagContent.replace(new RegExp(escapeRegex(pattern), 'gi'), '');
                         }
-                        
-                        result.tag1Start = tagStart;
-                        result.tag1Len = tagContent.length;
-                        
-                        return result; // Sub-tagging stops processing
+
+                        // Apply to tag1 or tag2 depending on match count
+                        if (subTaggingMatches === 0) {
+                            // First sub-tagging match → tag1
+                            result.tag1Type = parseInt(policy.settings.tag_type) || 0;
+                            result.tag1Start = tagStart;
+                            result.tag1Len = tagContent.length;
+                            subTaggingMatches++;
+                        } else if (subTaggingMatches === 1) {
+                            // Second sub-tagging match → tag2
+                            result.tag2Type = parseInt(policy.settings.tag_type) || 0;
+                            result.tag2Start = tagStart;
+                            result.tag2Len = tagContent.length;
+                            subTaggingMatches++;
+                            // RT+ supports up to 2 tags, so stop after 2
+                            return result;
+                        }
                     }
                 }
             }
@@ -13413,16 +13467,32 @@ UI_HTML = r"""
             running = !running;
             updatePwr();
             if(running) {
-                socket.emit('control', { 
-                    action: 'start', 
-                    dev_in: document.getElementById('dev_in').value, 
-                    dev_out: document.getElementById('dev_out').value 
+                socket.emit('control', {
+                    action: 'start',
+                    dev_in: document.getElementById('dev_in').value,
+                    dev_out: document.getElementById('dev_out').value
                 });
             } else {
                 socket.emit('control', { action: 'stop' });
             }
         }
-        
+
+        function manualSave() {
+            // Force a sync to ensure current state is saved
+            sync();
+
+            // Show confirmation message
+            const btn = event.target;
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '✓ Saved!';
+            btn.style.background = '#059669';
+
+            setTimeout(() => {
+                btn.innerHTML = originalText;
+                btn.style.background = '';
+            }, 1500);
+        }
+
         // Initialize cycle controls on load
         updateCycleControls();
 
@@ -14051,6 +14121,7 @@ UI_HTML = r"""
             // Same logic as applyTaggingPolicies but uses ertTaggingPolicies
             var result = { text: content, tag1Start: -1, tag1Len: 0, tag1Type: 0,
                            tag2Start: -1, tag2Len: 0, tag2Type: 0, appliedPolicy: '' };
+            var subTaggingMatches = 0; // Track how many sub-tagging policies have matched
             for (var i = 0; i < ertTaggingPolicies.length; i++) {
                 var policy = ertTaggingPolicies[i];
                 if (!policy.enabled) continue;
@@ -14102,8 +14173,6 @@ UI_HTML = r"""
                     } catch(e) {}
                     if (matches) {
                         result.appliedPolicy = policy.name;
-                        result.tag1Type = parseInt(policy.settings.tag_type) || 0;
-                        result.tag2Type = 0;
                         var tagStart = 0, tagContent = content;
                         switch (policy.settings.action) {
                             case 'tag_after':  var ai = content.indexOf(pat); if (ai !== -1) { tagStart = ai + pat.length; tagContent = content.substring(tagStart); } break;
@@ -14112,9 +14181,20 @@ UI_HTML = r"""
                         }
                         if (policy.settings.strip_pattern && policy.settings.action !== 'tag_match')
                             tagContent = tagContent.replace(new RegExp(escapeRegex(pat), 'gi'), '');
-                        result.tag1Start = tagStart;
-                        result.tag1Len = tagContent.length;
-                        return result;
+
+                        // Apply to tag1 or tag2 depending on match count
+                        if (subTaggingMatches === 0) {
+                            result.tag1Type = parseInt(policy.settings.tag_type) || 0;
+                            result.tag1Start = tagStart;
+                            result.tag1Len = tagContent.length;
+                            subTaggingMatches++;
+                        } else if (subTaggingMatches === 1) {
+                            result.tag2Type = parseInt(policy.settings.tag_type) || 0;
+                            result.tag2Start = tagStart;
+                            result.tag2Len = tagContent.length;
+                            subTaggingMatches++;
+                            return result; // Stop after 2 tags
+                        }
                     }
                 }
             }
