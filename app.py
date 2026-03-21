@@ -20,7 +20,7 @@ from scipy import signal as dsp_signal
 from scipy.fft import fft
 
 # --- VERSION ---
-VERSION = "v1.2b"
+VERSION = "v1.2c"
 
 # --- SETTINGS ---
 # Host API filtering: auto-detect based on OS, can be overridden via RDS_HOSTAPI env var
@@ -407,7 +407,7 @@ default_state = {
     "tdc_pc_show_uptime": False,  # Show system uptime in PC status
 
     # Scheduler
-    "group_sequence": "0A 0A 2A 0A",
+    "group_sequence": "0A 0A 2A 0A 0A 2A 0A",
     "scheduler_auto": True,
 
     # UECP server
@@ -986,12 +986,17 @@ def save_config():
         # Get current dataset — use in-memory variable, NOT what's in the file
         # The file's 'current' may be stale (race with save_datasets, or deleted dataset)
         current = str(current_dataset)
-        
+
         # Update current dataset state
         if current not in data['datasets']:
             data['datasets'][current] = {'name': f'Dataset {current}', 'state': {}}
-        
+
         data['datasets'][current]['state'] = dict(state)
+
+        # CRITICAL: Also update the in-memory datasets dictionary to prevent data bleeding
+        # when switching between datasets
+        if current in datasets:
+            datasets[current]['state'] = dict(state)
         
         # Always save current auth credentials
         data['auth'] = {
@@ -2957,9 +2962,17 @@ class RDSScheduler:
         return out if out else [(0,0)]
 
     def generate_auto_schedule(self):
+        # Build base sequence with core groups (0A for PS, 2A for RT)
         # 57% 0A, 43% 2A (rebalanced for better RT coverage)
-        seq = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (2,0), (2,0), (2,0), (0,0), (0,0), (2,0)]
-        if state["en_lps"]: seq.append((15,0)); seq.append((15,0))  # +7% increase
+        base_core = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (2,0), (2,0), (2,0), (0,0), (0,0), (2,0)]
+
+        # Collect all optional groups
+        optional_groups = []
+
+        if state["en_lps"]:
+            optional_groups.append((15,0))
+            optional_groups.append((15,0))  # +7% increase
+
         # EON at 15% - 4 consecutive groups for PS assembly (only if services configured)
         if state.get("en_eon"):
             try:
@@ -2967,14 +2980,17 @@ class RDSScheduler:
                 eon_services = json.loads(eon_services_str) if isinstance(eon_services_str, str) else eon_services_str
                 if eon_services:  # Only add if services exist
                     for _ in range(4):  # Send 4 Group 14A (~15% overall)
-                        seq.append((14,0))
+                        optional_groups.append((14,0))
             except:
                 pass  # Skip EON if parsing fails
-        if state["en_ptyn"]: seq.append((10,0))  # +4% (single group)
-        if state["en_id"]: seq.append((1,0))
+
+        if state["en_ptyn"]: optional_groups.append((10,0))  # +4% (single group)
+        if state["en_id"]: optional_groups.append((1,0))
+
         # Transparent Data Channels
-        if state.get("en_tdc_5a"): seq.append((5,0))  # Group 5A
-        if state.get("en_tdc_5b"): seq.append((5,1))  # Group 5B
+        if state.get("en_tdc_5a"): optional_groups.append((5,0))  # Group 5A
+        if state.get("en_tdc_5b"): optional_groups.append((5,1))  # Group 5B
+
         # Half 3A frequency: only add on even counter cycles
         # Group 3A is ODA announcement - add if any ODA is active
         needs_3a = False
@@ -2994,23 +3010,22 @@ class RDSScheduler:
                             break
             except:
                 pass
-        if needs_3a and (self.schedule_gen_counter % 2 == 0): 
-            seq.append((3,0))
+        if needs_3a and (self.schedule_gen_counter % 2 == 0):
+            optional_groups.append((3,0))
+
         if state["en_rt_plus"]:
-            seq.append((11,0))
-        
+            optional_groups.append((11,0))
+
         # Add eRT application groups if enabled
         # Send 2x per cycle (like RT) to halve the time to complete a full message transmission
         if state.get("en_ert"):
             ert_group_type = state.get("ert_group_type", 11)
-            seq.append((ert_group_type, 0))  # eRT groups
-            seq.append((ert_group_type, 0))  # eRT groups x2
+            optional_groups.append((ert_group_type, 0))  # eRT groups
+            optional_groups.append((ert_group_type, 0))  # eRT groups x2
+
         if state.get("en_ert") and state.get("en_ert_rtplus"):
             ert_rtplus_group_type = state.get("ert_rtplus_group_type", 6)
-            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x1
-            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x2
-            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x3
-            seq.append((ert_rtplus_group_type, 0))  # eRT RT+ group x4
+            optional_groups.append((ert_rtplus_group_type, 0))  # eRT RT+ group (reduced from 4x to 1x for better balance)
 
         # Add enabled custom groups to auto schedule
         # Only add each unique group type once (or multiple times based on schedule_freq)
@@ -3031,24 +3046,41 @@ class RDSScheduler:
                         unique_groups[key] = schedule_freq
 
             # Build list of all custom groups to add
-            custom_to_add = []
             for (group_type, group_ver), freq in unique_groups.items():
                 for _ in range(freq):
-                    custom_to_add.append((group_type, group_ver))
-
-            # Interleave custom groups evenly throughout the sequence
-            # instead of appending them all at the end
-            if custom_to_add:
-                base_len = len(seq)
-                total_len = base_len + len(custom_to_add)
-
-                # Calculate insertion positions for even distribution
-                for i, custom_group in enumerate(custom_to_add):
-                    # Position = evenly spaced throughout final sequence
-                    position = round((i + 1) * total_len / (len(custom_to_add) + 1))
-                    seq.insert(min(position, len(seq)), custom_group)
+                    optional_groups.append((group_type, group_ver))
         except:
             pass  # Ignore errors loading custom groups
+
+        # Now interleave core groups with optional groups
+        # Strategy: Insert 0A groups at regular intervals to ensure decoders get PS frequently
+        # For every 2-3 optional groups, inject a 0A group
+        seq = []
+        core_idx = 0
+
+        if optional_groups:
+            # Calculate how often to inject core groups
+            # Aim for a 0A every 3-4 groups total
+            inject_interval = 3
+
+            for i, opt_group in enumerate(optional_groups):
+                # Insert core groups before this optional group
+                if i % inject_interval == 0:
+                    # Insert 2 core groups (typically 0A, 0A or 0A, 2A)
+                    for _ in range(2):
+                        seq.append(base_core[core_idx % len(base_core)])
+                        core_idx += 1
+
+                # Add the optional group
+                seq.append(opt_group)
+
+            # Add remaining core groups at the end
+            while core_idx < len(base_core):
+                seq.append(base_core[core_idx])
+                core_idx += 1
+        else:
+            # No optional groups, just use base core sequence
+            seq = base_core
 
         self.schedule_gen_counter += 1
         return seq
@@ -5590,6 +5622,10 @@ UI_HTML = r"""
             background: #1f2937; border: 1px solid #374151; color: #9ca3af; padding: 5px 15px; border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.3s;
         }
         .pwr-btn.on { background: #d946ef; color: white; border-color: #c026d3; box-shadow: 0 0 10px rgba(217, 70, 239, 0.4); }
+        .save-btn {
+            background: #1f2937; border: 1px solid #374151; color: #9ca3af; padding: 5px 15px; border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.3s; display: none;
+        }
+        .save-btn.has-changes { background: #1e40af; color: white; border-color: #1e3a8a; display: inline-block; }
         .slider-container { display: flex; align-items: center; gap: 10px; }
         .slider-val { width: 30px; text-align: right; }
         input[type=range] { flex: 1; accent-color: #d946ef; }
@@ -5712,7 +5748,7 @@ UI_HTML = r"""
                     {{site_name}} • <span id="heartbeat" class="text-xs">♥</span> 192kHz Ready
                 </div>
                 <button id="pwrBtn" onclick="togglePower()" class="pwr-btn">OFF AIR</button>
-                <button onclick="manualSave()" class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white font-bold" title="Manually save configuration">💾 Save Config</button>
+                <button id="saveBtn" onclick="manualSave()" class="save-btn" title="Save configuration changes">Save Config</button>
                 <a href="/logout" class="text-[11px] text-gray-300 hover:text-white underline">Logout</a>
             </div>
         </div>
@@ -11061,6 +11097,17 @@ UI_HTML = r"""
                 tdc_pc_show_uptime: getVal('tdc_pc_show_uptime')
             };
             socket.emit('update', data);
+
+            // Show save button when changes are made (skip on initial load)
+            if (typeof window.syncCount === 'undefined') {
+                window.syncCount = 0;
+            }
+            window.syncCount++;
+
+            const saveBtn = document.getElementById('saveBtn');
+            if (saveBtn && window.syncCount > 1) {
+                saveBtn.classList.add('has-changes');
+            }
         }
 
         // === RDS2 FUNCTIONS ===
@@ -11217,7 +11264,8 @@ UI_HTML = r"""
         }
 
         function createDataset() {
-            var nextNum = Math.max.apply(Math, Object.keys(datasets).map(function(n) { return parseInt(n); })) + 1;
+            var keys = Object.keys(datasets).map(function(n) { return parseInt(n); });
+            var nextNum = keys.length > 0 ? Math.max.apply(Math, keys) + 1 : 1;
             var name = prompt('Enter dataset name:', 'Dataset ' + nextNum);
             if (!name) return;
 
@@ -13479,18 +13527,24 @@ UI_HTML = r"""
 
         function manualSave() {
             // Force a sync to ensure current state is saved
-            sync();
+            const saveBtn = document.getElementById('saveBtn');
+            const originalText = saveBtn.innerHTML;
 
             // Show confirmation message
-            const btn = event.target;
-            const originalText = btn.innerHTML;
-            btn.innerHTML = '✓ Saved!';
-            btn.style.background = '#059669';
+            saveBtn.innerHTML = '✓ Saved!';
+            saveBtn.style.background = '#059669';
+            saveBtn.style.borderColor = '#047857';
 
             setTimeout(() => {
-                btn.innerHTML = originalText;
-                btn.style.background = '';
+                saveBtn.innerHTML = originalText;
+                saveBtn.style.background = '';
+                saveBtn.style.borderColor = '';
+                saveBtn.classList.remove('has-changes');
+                // Reset sync counter to prevent button from showing immediately
+                window.syncCount = 1;
             }, 1500);
+
+            sync();
         }
 
         // Initialize cycle controls on load
