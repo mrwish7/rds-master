@@ -338,7 +338,7 @@ default_state = {
     "en_eon": 0, "eon_services": "[]",
     
     # Text
-    "ps_dynamic": "RDSMASTR", "ps_centered": False,
+    "ps_dynamic": "RDSMASTR", "ps_centered": False, "ps_group_version": "0A",
     "rt_text": "RDS MASTER", "rt_manual_buffers": False, "rt_cycle_ab": False,
     "rt_a": "RDS MASTER", "rt_b": "Simple & Open Source RDS Encoder",
     "rt_cr": True, "rt_centered": False,
@@ -2181,7 +2181,8 @@ class RDSScheduler:
                 # Sub-tagging policy: check trigger and condition, then apply tag
                 trigger_type = settings.get("trigger_type", "none")
                 trigger_pattern = settings.get("trigger_pattern", "")
-                
+                clear_on_match = settings.get("clear_on_match", True)  # Clear existing tags when this policy matches
+
                 # Check trigger condition first
                 if trigger_type and trigger_type != "none" and trigger_pattern:
                     trigger_matches = False
@@ -2198,9 +2199,13 @@ class RDSScheduler:
                             trigger_matches = bool(re.search(trigger_pattern, content, re.IGNORECASE))
                     except:
                         pass
-                    
+
                     if not trigger_matches:
                         continue  # Skip this policy if trigger doesn't match
+
+                    # If trigger matched and clear_on_match is True, clear existing tags
+                    if trigger_matches and clear_on_match:
+                        tags = []
                 
                 # Check main condition
                 condition = settings.get("condition", "starts_with")
@@ -2208,10 +2213,16 @@ class RDSScheduler:
                 action = settings.get("action", "tag_all")
                 tag_type = int(settings.get("tag_type", -1))
                 strip_pattern = settings.get("strip_pattern", False)
-                
-                if not pattern or tag_type < 0:
+                skip_tagging = settings.get("skip_tagging", False)  # If True, don't add any tags when matched
+
+                # If no pattern, skip this policy
+                if not pattern:
                     continue
-                
+
+                # If skip_tagging is enabled and tag_type is -1, that's valid (means "clear tags and don't add any")
+                if not skip_tagging and tag_type < 0:
+                    continue
+
                 matches = False
                 try:
                     if condition == "contains":
@@ -2226,8 +2237,12 @@ class RDSScheduler:
                         matches = bool(re.search(pattern, content, re.IGNORECASE))
                 except:
                     pass
-                
+
                 if matches:
+                    # If skip_tagging is True, clear tags and don't add any new ones
+                    if skip_tagging:
+                        tags = []
+                        break  # No more processing needed
                     # Calculate tag position based on action
                     tag_start = offset
                     tag_content = content
@@ -2962,9 +2977,12 @@ class RDSScheduler:
         return out if out else [(0,0)]
 
     def generate_auto_schedule(self):
-        # Build base sequence with core groups (0A for PS, 2A for RT)
-        # 57% 0A, 43% 2A (rebalanced for better RT coverage)
-        base_core = [(0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (0,0), (2,0), (0,0), (2,0), (0,0), (2,0), (0,0), (0,0), (2,0), (0,0), (2,0), (2,0), (2,0), (0,0), (0,0), (2,0)]
+        # Determine PS group version (0A or 0B)
+        ps_ver = 1 if state.get("ps_group_version", "0A") == "0B" else 0
+
+        # Build base sequence with core groups (0A/0B for PS, 2A for RT)
+        # 57% Group 0, 43% 2A (rebalanced for better RT coverage)
+        base_core = [(0,ps_ver), (0,ps_ver), (2,0), (0,ps_ver), (2,0), (0,ps_ver), (0,ps_ver), (0,ps_ver), (2,0), (0,ps_ver), (2,0), (0,ps_ver), (2,0), (0,ps_ver), (0,ps_ver), (2,0), (0,ps_ver), (2,0), (2,0), (2,0), (0,ps_ver), (0,ps_ver), (2,0)]
 
         # Collect all optional groups
         optional_groups = []
@@ -2991,7 +3009,6 @@ class RDSScheduler:
         if state.get("en_tdc_5a"): optional_groups.append((5,0))  # Group 5A
         if state.get("en_tdc_5b"): optional_groups.append((5,1))  # Group 5B
 
-        # Half 3A frequency: only add on even counter cycles
         # Group 3A is ODA announcement - add if any ODA is active
         needs_3a = False
         if state.get("en_dab"): needs_3a = True
@@ -3010,10 +3027,14 @@ class RDSScheduler:
                             break
             except:
                 pass
-        if needs_3a and (self.schedule_gen_counter % 2 == 0):
+        if needs_3a:
             optional_groups.append((3,0))
 
         if state["en_rt_plus"]:
+            # Send Group 11A (RT+) 3 times per cycle to ensure tags update quickly
+            # RT+ tags need to be sent frequently so decoders can display current info
+            optional_groups.append((11,0))
+            optional_groups.append((11,0))
             optional_groups.append((11,0))
 
         # Add eRT application groups if enabled
@@ -3243,8 +3264,12 @@ class RDSScheduler:
             self.ps_ptr += 1
             tail = (get_effective_value("ta")<<4)|(get_effective_value("ms")<<3)|([state['di_dyn'],state['di_comp'],state['di_head'],state['di_stereo']][seg]<<2)|seg
             b3 = 0xE0E0
-            
-            if state["en_af"] and g_ver == 0:
+
+            # Group 0B: Block 3 contains PI code instead of AF
+            if g_ver == 1:
+                # For Group 0B, Block 3 is the PI code
+                b3 = int(state.get("pi", "0000"), 16)
+            elif state["en_af"] and g_ver == 0:
                  # Split by comma or space, accept both separators and validate frequencies
                  af_list_raw = state.get("af_list", "").strip()
                  if not af_list_raw:
@@ -5949,6 +5974,16 @@ UI_HTML = r"""
                              <div class="flex gap-2 items-center"><label>Centre</label><input type="checkbox" class="toggle-checkbox" id="ps_centered" {% if state.ps_centered %}checked{% endif %} onchange="sync()"></div>
                          </div>
                          <input type="text" id="ps_dynamic" value="{{state.ps_dynamic}}" onchange="sync()">
+                         <div class="mt-2">
+                             <label>PS Group Version</label>
+                             <select id="ps_group_version" onchange="updatePSGroupWarning(); sync()">
+                                 <option value="0A" {% if state.ps_group_version == "0A" %}selected{% endif %}>Group 0A (with AF support)</option>
+                                 <option value="0B" {% if state.ps_group_version == "0B" %}selected{% endif %}>Group 0B (PI in Block 3)</option>
+                             </select>
+                             <div id="ps_0b_warning" class="text-[10px] text-yellow-400 mt-1" style="display: {% if state.ps_group_version == '0B' %}block{% else %}none{% endif %};">
+                                 ⚠️ Warning: Alternative Frequencies (AF) cannot be sent when using Group 0B
+                             </div>
+                         </div>
                     </div>
                 </div>
                 
@@ -10977,6 +11012,14 @@ UI_HTML = r"""
             }
         }
 
+        function updatePSGroupWarning() {
+            var psGroupVersion = document.getElementById('ps_group_version').value;
+            var warningDiv = document.getElementById('ps_0b_warning');
+            if (warningDiv) {
+                warningDiv.style.display = psGroupVersion === '0B' ? 'block' : 'none';
+            }
+        }
+
         function updatePTYList() {
             var isRBDS = document.getElementById('rbds').checked;
             var ptySelect = document.getElementById('pty');
@@ -11033,7 +11076,7 @@ UI_HTML = r"""
                 pi: getVal('pi'), pty: getVal('pty'), rbds: getVal('rbds'), tp: getVal('tp'), ta: getVal('ta'), ms: getVal('ms'),
                 di_stereo: getVal('di_stereo'), di_head: getVal('di_head'), di_comp: getVal('di_comp'), di_dyn: getVal('di_dyn'),
                 en_af: getVal('en_af'), af_list: getVal('af_list'), af_method: getVal('af_method'),
-                ps_dynamic: getVal('ps_dynamic'), ps_centered: getVal('ps_centered'),
+                ps_dynamic: getVal('ps_dynamic'), ps_centered: getVal('ps_centered'), ps_group_version: getVal('ps_group_version'),
                 rt_text: getVal('rt_text'),
                 rt_manual_buffers: (function(){ var el = document.getElementById('rt_buffer_mode'); return el ? el.value === 'manual' : getVal('rt_manual_buffers'); })(),
                 rt_auto_ab:        (function(){ var el = document.getElementById('rt_buffer_mode'); return el ? el.value === 'auto'   : false; })(),
