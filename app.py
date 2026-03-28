@@ -923,12 +923,16 @@ def _atomic_write_json(filepath, data):
                             pass
 
                         # Remove existing file
-                        os.remove(filepath)
+                        try:
+                            os.remove(filepath)
+                        except FileNotFoundError:
+                            # File was already removed, that's fine
+                            pass
 
                     # Rename temp file to final location
                     os.rename(tmp_path, filepath)
                     break
-                except PermissionError as e:
+                except (PermissionError, FileExistsError, FileNotFoundError) as e:
                     if attempt < max_retries - 1:
                         # Wait progressively longer on each retry
                         time.sleep(0.05 * (attempt + 1))
@@ -4653,9 +4657,6 @@ class RDSDSP:
     def process_frame(self, outdata, frames, indata=None):
         lvl_pilot, lvl_rds = (state["pilot_level"]/100.0), (state["rds_level"]/100.0)
         rds_freq = float(state.get("rds_freq", 57000))
-        # Clamp to sensible range
-        if rds_freq < 56000: rds_freq = 57000
-        if rds_freq > 58000: rds_freq = 57000
 
         # Genlock only valid when RDS is 3x pilot (57kHz)
         use_genlock = state["genlock"] and indata is not None and len(indata) == frames and abs(rds_freq - 3*PILOT_FREQ) < 1e-3
