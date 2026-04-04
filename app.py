@@ -416,6 +416,8 @@ default_state = {
     "uecp_host": "0.0.0.0",
     "uecp_psn": 0,   # Programme Service Number filter (0 = accept all)
     "uecp_dsn": 0,   # Dataset Number filter (0 = accept all)
+    "uecp_ws_enabled": False,
+    "uecp_ws_url": "ws://127.0.0.1/pacific",
     
     # Enhanced RadioText (eRT) - ODA Application
     "en_ert": False,  # Enable eRT transmission
@@ -1623,7 +1625,7 @@ class Sanitize:
         global state
         changed = False
         # Fields that should NOT be converted to EBU Latin (JSON data, mode flags, etc.)
-        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'custom_oda_list', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'ert_text', 'ert_messages', 'ert_source'}
+        skip_ebu_fields = {'rt_plus_builder_a', 'rt_plus_builder_b', 'rt_plus_mode', 'rt_messages', 'eon_services', 'af_pairs', 'custom_groups', 'custom_oda_list', 'rt_plus_regex_rules_a', 'rt_plus_regex_rules_b', 'dynamic_control_rules', 'ps_long_32', 'tdc_5a_text', 'tdc_5b_text', 'uecp_host', 'uecp_ws_url', 'ert_text', 'ert_messages', 'ert_source'}
         for k, v in data.items():
             if k in state:
                 try:
@@ -4955,17 +4957,20 @@ def update_settings():
 
 @app.route('/uecp_settings', methods=['GET', 'POST'])
 def uecp_settings_route():
-    global _uecp_tcp_server
+    global _uecp_tcp_server, _uecp_ws_client
     if not session.get('auth'): return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     if request.method == 'GET':
         return jsonify({
-            "uecp_enabled": state.get("uecp_enabled", False),
-            "uecp_port":    state.get("uecp_port", 4001),
-            "uecp_host":    state.get("uecp_host", "0.0.0.0"),
-            "uecp_psn":     state.get("uecp_psn", 0),
-            "uecp_dsn":     state.get("uecp_dsn", 0),
-            "running":      _uecp_tcp_server is not None,
+            "uecp_enabled":    state.get("uecp_enabled", False),
+            "uecp_port":       state.get("uecp_port", 4001),
+            "uecp_host":       state.get("uecp_host", "0.0.0.0"),
+            "uecp_psn":        state.get("uecp_psn", 0),
+            "uecp_dsn":        state.get("uecp_dsn", 0),
+            "uecp_ws_enabled": state.get("uecp_ws_enabled", False),
+            "uecp_ws_url":     state.get("uecp_ws_url", "ws://127.0.0.1/pacific"),
+            "tcp_running":     _uecp_tcp_server is not None,
+            "ws_running":      _uecp_ws_client is not None,
         })
 
     data = request.get_json(silent=True) or {}
@@ -4983,44 +4988,65 @@ def uecp_settings_route():
         state["uecp_dsn"] = max(0, min(255, int(data.get("uecp_dsn", 0))))
     except (ValueError, TypeError):
         state["uecp_dsn"] = 0
+    state["uecp_ws_enabled"] = bool(data.get("uecp_ws_enabled", False))
+    state["uecp_ws_url"] = str(data.get("uecp_ws_url", "")).strip() or "ws://127.0.0.1/pacific"
     save_config()
 
-    # Stop any existing server
+    # Stop any existing TCP server and WS client
     if _uecp_tcp_server is not None:
         try:
             _uecp_tcp_server.stop()
         except Exception:
             pass
         _uecp_tcp_server = None
-
-    if state["uecp_enabled"]:
+    if _uecp_ws_client is not None:
         try:
-            from uecp_server import UECPStateHandler, UECPTCPServer
-            def _uecp_save():
-                # Do NOT call save_config() here — the pre-UECP config must
-                # remain on disk so it is the one loaded on next startup.
-                socketio.emit('state_update', {
-                    'custom_oda_list': state.get('custom_oda_list', '[]'),
-                    'custom_groups':   state.get('custom_groups',   '[]'),
-                })
-            def _uecp_restore():
-                # Called after the last UECP client disconnects and the
-                # pre-UECP snapshot has been restored into state.
-                save_config()
-                socketio.emit('state_update', {
-                    'custom_oda_list': state.get('custom_oda_list', '[]'),
-                    'custom_groups':   state.get('custom_groups',   '[]'),
-                })
-            handler = UECPStateHandler(state, _uecp_save, _uecp_restore)
+            _uecp_ws_client.stop()
+        except Exception:
+            pass
+        _uecp_ws_client = None
+
+    tcp_enabled = state["uecp_enabled"]
+    ws_enabled  = state["uecp_ws_enabled"]
+
+    if not tcp_enabled and not ws_enabled:
+        return jsonify({"ok": True, "status": "UECP disabled"})
+
+    try:
+        from uecp_server import UECPStateHandler, UECPTCPServer, UECPWebSocketClient
+
+        def _uecp_save():
+            socketio.emit('state_update', {
+                'custom_oda_list': state.get('custom_oda_list', '[]'),
+                'custom_groups':   state.get('custom_groups',   '[]'),
+            })
+        def _uecp_restore():
+            save_config()
+            socketio.emit('state_update', {
+                'custom_oda_list': state.get('custom_oda_list', '[]'),
+                'custom_groups':   state.get('custom_groups',   '[]'),
+            })
+
+        # Shared handler — both TCP and WS connections pool into the same
+        # client count so that snapshot/restore triggers correctly.
+        handler = UECPStateHandler(state, _uecp_save, _uecp_restore)
+        status_parts = []
+
+        if tcp_enabled:
             srv = UECPTCPServer(state["uecp_host"], state["uecp_port"], handler)
             srv.start()
             _uecp_tcp_server = srv
-            return jsonify({"ok": True,
-                            "status": f"UECP server listening on {srv.host}:{srv.port}"})
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)})
+            status_parts.append(f"TCP listening on {srv.host}:{srv.port}")
 
-    return jsonify({"ok": True, "status": "UECP server disabled"})
+        if ws_enabled:
+            wsc = UECPWebSocketClient(state["uecp_ws_url"], handler)
+            wsc.start()
+            _uecp_ws_client = wsc
+            status_parts.append(f"WS client → {wsc.url}")
+
+        return jsonify({"ok": True, "status": "; ".join(status_parts)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route('/fetch-json-structure', methods=['POST'])
 def fetch_json_structure():
@@ -5519,24 +5545,52 @@ load_config()    # Then load config which applies the current dataset's state
 
 # --- UECP SERVER ---
 _uecp_tcp_server = None
+_uecp_ws_client  = None
 
 def _start_uecp_server():
-    global _uecp_tcp_server
-    if not state.get("uecp_enabled"):
+    global _uecp_tcp_server, _uecp_ws_client
+    tcp_enabled = state.get("uecp_enabled", False)
+    ws_enabled  = state.get("uecp_ws_enabled", False)
+    if not tcp_enabled and not ws_enabled:
         return
     try:
-        from uecp_server import UECPStateHandler, UECPTCPServer
-        handler = UECPStateHandler(state, save_config)
-        srv = UECPTCPServer(
-            str(state.get("uecp_host", "0.0.0.0")),
-            int(state.get("uecp_port", 4001)),
-            handler,
-        )
-        srv.start()
-        _uecp_tcp_server = srv
-        print(f"[UECP] Server listening on {srv.host}:{srv.port}")
+        from uecp_server import UECPStateHandler, UECPTCPServer, UECPWebSocketClient
+
+        def _uecp_save():
+            socketio.emit('state_update', {
+                'custom_oda_list': state.get('custom_oda_list', '[]'),
+                'custom_groups':   state.get('custom_groups',   '[]'),
+            })
+        def _uecp_restore():
+            save_config()
+            socketio.emit('state_update', {
+                'custom_oda_list': state.get('custom_oda_list', '[]'),
+                'custom_groups':   state.get('custom_groups',   '[]'),
+            })
+
+        handler = UECPStateHandler(state, _uecp_save, _uecp_restore)
+
+        if tcp_enabled:
+            srv = UECPTCPServer(
+                str(state.get("uecp_host", "0.0.0.0")),
+                int(state.get("uecp_port", 4001)),
+                handler,
+            )
+            srv.start()
+            _uecp_tcp_server = srv
+            print(f"[UECP] TCP server listening on {srv.host}:{srv.port}")
+
+        if ws_enabled:
+            wsc = UECPWebSocketClient(
+                str(state.get("uecp_ws_url", "ws://127.0.0.1/pacific")),
+                handler,
+            )
+            wsc.start()
+            _uecp_ws_client = wsc
+            print(f"[UECP] WS client connecting to {wsc.url}")
+
     except Exception as e:
-        print(f"[UECP] Failed to start server: {e}")
+        print(f"[UECP] Failed to start: {e}")
 
 _start_uecp_server()
 
@@ -7653,6 +7707,20 @@ UI_HTML = r"""
                                 <label>DSN Filter</label>
                                 <input type="number" id="uecp_dsn" value="{{ state.get('uecp_dsn', 0) }}" min="0" max="255">
                                 <div class="text-[9px] text-gray-500 mt-1">Dataset Number to accept (0 = accept all). Messages with DSN 0 always pass.</div>
+                            </div>
+                        </div>
+                        <div class="border-t border-gray-700 pt-3 mb-3">
+                            <div class="flex items-center justify-between mb-2">
+                                <div>
+                                    <label>Enable UECP WebSocket Client</label>
+                                    <div class="text-[9px] text-gray-500">Connect to a WebSocket that publishes base64-encoded UECP frames (alternative to TCP server).</div>
+                                </div>
+                                <input type="checkbox" class="toggle-checkbox" id="uecp_ws_enabled" {% if state.get('uecp_ws_enabled') %}checked{% endif %}>
+                            </div>
+                            <div>
+                                <label>WebSocket URL</label>
+                                <input type="text" id="uecp_ws_url" value="{{ state.get('uecp_ws_url', 'ws://127.0.0.1/pacific') }}" placeholder="ws://192.168.1.10/pacific">
+                                <div class="text-[9px] text-gray-500 mt-1">UECP frames must be published as base64-encoded text messages. Reconnects automatically on drop.</div>
                             </div>
                         </div>
                         <div class="p-3 bg-black/30 rounded border border-gray-700 mb-3 text-[10px] text-gray-400">
@@ -10994,11 +11062,13 @@ UI_HTML = r"""
             const statusEl = document.getElementById('uecp_status');
             if (statusEl) statusEl.innerText = 'Applying...';
             const payload = {
-                uecp_enabled: document.getElementById('uecp_enabled').checked,
-                uecp_port:    parseInt(document.getElementById('uecp_port').value, 10) || 4001,
-                uecp_host:    document.getElementById('uecp_host').value.trim() || '0.0.0.0',
-                uecp_psn:     parseInt(document.getElementById('uecp_psn').value, 10) || 0,
-                uecp_dsn:     parseInt(document.getElementById('uecp_dsn').value, 10) || 0,
+                uecp_enabled:    document.getElementById('uecp_enabled').checked,
+                uecp_port:       parseInt(document.getElementById('uecp_port').value, 10) || 4001,
+                uecp_host:       document.getElementById('uecp_host').value.trim() || '0.0.0.0',
+                uecp_psn:        parseInt(document.getElementById('uecp_psn').value, 10) || 0,
+                uecp_dsn:        parseInt(document.getElementById('uecp_dsn').value, 10) || 0,
+                uecp_ws_enabled: document.getElementById('uecp_ws_enabled').checked,
+                uecp_ws_url:     document.getElementById('uecp_ws_url').value.trim() || 'ws://127.0.0.1/pacific',
             };
             try {
                 const res = await fetch('/uecp_settings', {
