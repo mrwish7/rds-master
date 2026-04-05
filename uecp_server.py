@@ -738,6 +738,130 @@ class UECPStateHandler:
 
 
 # ---------------------------------------------------------------------------
+# WebSocket client
+# ---------------------------------------------------------------------------
+
+class UECPWebSocketClient:
+    """Subscribes to a WebSocket that publishes base64-encoded UECP frames.
+
+    Each message is expected to be a plain-text base64 string containing
+    raw UECP frame bytes (the format produced by ws2tcpUECP.py and similar
+    tools).  Frames are decoded and dispatched via the shared
+    :class:`UECPStateHandler`.
+
+    Reconnects automatically after *reconnect_delay* seconds if the
+    connection is lost.
+
+    Parameters
+    ----------
+    url:
+        WebSocket URL, e.g. ``"ws://192.168.1.10/pacific"``.
+    handler:
+        Shared :class:`UECPStateHandler` instance (may be shared with a
+        :class:`UECPTCPServer` so that client counts are pooled correctly).
+    reconnect_delay:
+        Seconds to wait before attempting to reconnect after a dropped
+        connection.
+    """
+
+    def __init__(self, url: str, handler: "UECPStateHandler",
+                 reconnect_delay: float = 5.0) -> None:
+        self._url = url
+        self._handler = handler
+        self._reconnect_delay = reconnect_delay
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    def start(self) -> None:
+        """Start the client in a background daemon thread."""
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="uecp-ws-client",
+            daemon=True,
+        )
+        self._thread.start()
+        log.info("UECP WS client starting: %s", self._url)
+
+    def stop(self) -> None:
+        """Signal the client thread to exit; returns immediately."""
+        self._stop_event.set()
+        log.info("UECP WS client stopping")
+
+    def _run(self) -> None:
+        import base64
+        try:
+            import websocket as _ws_mod
+        except ImportError:
+            log.error(
+                "UECP WS: 'websocket-client' package is not installed. "
+                "Install it with:  pip install websocket-client"
+            )
+            return
+
+        parser = UECPParser()
+
+        while not self._stop_event.is_set():
+            ws = None
+            connected = False
+            try:
+                ws = _ws_mod.WebSocket()
+                ws.settimeout(5.0)   # short timeout so stop_event is checked regularly
+                log.info("UECP WS: connecting to %s", self._url)
+                ws.connect(self._url)
+                log.info("UECP WS: connected")
+                self._handler.connect()
+                connected = True
+
+                while not self._stop_event.is_set():
+                    try:
+                        msg = ws.recv()
+                    except _ws_mod.WebSocketTimeoutException:
+                        continue   # timeout — loop back to check stop_event
+                    if not msg:
+                        log.debug("UECP WS: server closed connection")
+                        break
+                    try:
+                        raw = base64.b64decode(
+                            msg.encode("utf-8") if isinstance(msg, str) else msg
+                        )
+                    except Exception:
+                        log.debug("UECP WS: skipping non-base64 message")
+                        continue
+                    for frame in parser.feed(raw):
+                        names = ", ".join(
+                            f"0x{e.mec:02X}({MEC_NAMES.get(e.mec, '?')})"
+                            for e in frame.elements
+                        ) or "(empty)"
+                        log.debug("UECP WS packet: %s", names)
+                        self._handler.handle_frame(frame)
+
+            except Exception as exc:
+                log.info("UECP WS: connection error: %s", exc)
+            finally:
+                if connected:
+                    try:
+                        self._handler.disconnect()
+                    except Exception:
+                        log.exception("UECP WS: disconnect() raised")
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+
+            if not self._stop_event.is_set():
+                log.info("UECP WS: reconnecting in %.0fs", self._reconnect_delay)
+                self._stop_event.wait(self._reconnect_delay)
+
+        log.info("UECP WS: client stopped")
+
+
+# ---------------------------------------------------------------------------
 # TCP server
 # ---------------------------------------------------------------------------
 
