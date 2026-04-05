@@ -1108,22 +1108,35 @@ def save_datasets():
         print(f"Error saving datasets: {e}")
 
 def switch_dataset(dataset_num):
-    global state, current_dataset
+    global state, current_dataset, monitor_data
     dataset_num = str(dataset_num)
     if dataset_num in datasets:
         # Save current state to the CURRENT dataset before switching
         datasets[str(current_dataset)]['state'] = dict(state)
-        
+
         # Switch to new dataset
         current_dataset = int(dataset_num)
-        
+
         # Reset to default state first, then apply new dataset state
         state.clear()
         state.update(default_state.copy())
         new_state = datasets[dataset_num]['state'].copy()
         new_state.pop('auto_start', None)  # Ensure auto_start not in state
         state.update(new_state)
-        
+
+        # Clear monitor_data to prevent showing stale values from previous dataset
+        monitor_data.clear()
+        monitor_data["pi"] = state.get("pi", "0000")
+        monitor_data["pty_idx"] = state.get("pty", 0)
+        monitor_data["ps"] = state.get("ps_dynamic", "")
+        monitor_data["rt"] = state.get("rt_text", "")
+        monitor_data["lps"] = state.get("ps_long_32", "")
+        monitor_data["ptyn"] = state.get("ptyn", "")
+        monitor_data["ert"] = ""
+        monitor_data["rt_plus_info"] = ""
+        monitor_data["ert_rtplus_info"] = ""
+        monitor_data["heartbeat"] = int(time.time() * 1000)
+
         # Save datasets and current dataset info
         save_datasets()
         return True
@@ -1412,8 +1425,18 @@ def dynamic_control_loop():
             active_params = set()
             for rule in rules:
                 if rule.get("enabled", True):
-                    active_params.add(rule.get("rds_param", ""))
-            
+                    # Single-parameter rules
+                    if rule.get("rds_param"):
+                        active_params.add(rule.get("rds_param", ""))
+                    # Multi-action rules
+                    if rule.get("mapping_type") == "multi_action":
+                        for action in rule.get("actions", []):
+                            param = action.get("param", "")
+                            active_params.add(param)
+                            # PIN also controls en_pin, pin_day, pin_hour, pin_minute
+                            if param == "pin":
+                                active_params.update(["en_pin", "pin_day", "pin_hour", "pin_minute"])
+
             # Remove overrides for inactive parameters
             for param in list(dynamic_overrides.keys()):
                 if param not in active_params:
@@ -1537,7 +1560,7 @@ def dynamic_control_loop():
                             if str(value) == str(condition_match):
                                 matched = True
                                 # Condition met - apply output value with proper type conversion
-                                if rds_param in ["ms", "tp", "ta"]:
+                                if rds_param in ["ms", "tp", "ta"] or (rds_param.startswith("eon_") and rds_param.endswith("_ta")):
                                     new_value = int(output_value) if str(output_value).isdigit() else 0
                                 elif rds_param == "pty":
                                     new_value = max(0, min(31, int(output_value))) if str(output_value).isdigit() else 0
@@ -1573,9 +1596,162 @@ def dynamic_control_loop():
                                 if rds_param in dynamic_overrides:
                                     del dynamic_overrides[rds_param]
                                 continue
-                    
-                    # Apply the new value to state
-                    if new_value is not None and rds_param in state:
+
+                    elif mapping_type == "multi_action":
+                        # Multi-action mode: match keywords and set multiple RDS parameters at once
+                        # Supports: keywords (comma-separated), multiple actions with special PIN=NOW
+                        keywords_str = rule.get("keywords", "")
+                        actions = rule.get("actions", [])
+
+                        if not keywords_str or not actions:
+                            continue
+
+                        # Parse keywords (comma-separated)
+                        keywords = [k.strip().lower() for k in keywords_str.split(',') if k.strip()]
+                        if not keywords:
+                            continue
+
+                        # Check if value matches any keyword
+                        str_value = str(value).strip().lower()
+                        matched = any(keyword in str_value for keyword in keywords)
+
+                        if matched:
+                            # Apply all actions
+                            for action in actions:
+                                action_param = action.get("param", "")
+                                action_value = action.get("value", "")
+
+                                if not action_param or action_param not in state:
+                                    continue
+
+                                # Check if action_value is a JSON field path or static value
+                                # JSON paths typically contain dots (e.g., "data.pty") or brackets
+                                # Static values are numbers, text, or special keywords like NOW
+                                if isinstance(action_value, str) and ('.' in action_value or '[' in action_value):
+                                    # Try to extract from JSON
+                                    try:
+                                        extracted_value = data
+                                        for key in action_value.replace('[', '.').replace(']', '').split('.'):
+                                            if key:
+                                                if isinstance(extracted_value, dict):
+                                                    extracted_value = extracted_value.get(key)
+                                                elif isinstance(extracted_value, list) and key.isdigit():
+                                                    extracted_value = extracted_value[int(key)]
+                                                else:
+                                                    break
+                                        if extracted_value is not None:
+                                            action_value = extracted_value
+                                    except:
+                                        pass  # Fall back to using action_value as static value
+
+                                # Special handling for PIN=NOW (set current time)
+                                if action_param == "pin" and str(action_value).upper() == "NOW":
+                                    now = datetime.now()
+                                    # Calculate MJD (Modified Julian Date)
+                                    mjd = (now.date() - date(1858, 11, 17)).days
+                                    # Enable PIN
+                                    dynamic_overrides["en_pin"] = 1
+                                    dynamic_overrides["pin_day"] = mjd & 0x7FFF  # 15-bit MJD
+                                    dynamic_overrides["pin_hour"] = now.hour
+                                    dynamic_overrides["pin_minute"] = now.minute
+                                    continue
+
+                                # Apply value with type conversion
+                                if action_param in ["ms", "tp", "ta", "en_pin"] or action_param.startswith("eon_") and action_param.endswith("_ta"):
+                                    action_value = int(action_value) if isinstance(action_value, (int, float, bool)) or str(action_value).isdigit() else 0
+                                elif action_param == "pty":
+                                    action_value = max(0, min(31, int(action_value))) if isinstance(action_value, (int, float)) or str(action_value).isdigit() else 0
+                                elif action_param == "pi":
+                                    try:
+                                        action_value = format(int(str(action_value), 16), '04X')
+                                    except:
+                                        continue
+                                elif action_param == "ptyn":
+                                    action_value = convert_to_ebu_latin(str(action_value)[:8])
+                                elif action_param in ["rt_text", "rt_a", "rt_b"]:
+                                    # RT text parameters - apply EBU Latin and truncate to 64 chars
+                                    action_value = convert_to_ebu_latin(str(action_value)[:64])
+                                elif action_param in ["pin_day", "pin_hour", "pin_minute"]:
+                                    action_value = int(action_value) if isinstance(action_value, (int, float)) or str(action_value).isdigit() else 0
+
+                                dynamic_overrides[action_param] = action_value
+                        else:
+                            # No match - clear overrides for this rule's parameters
+                            for action in actions:
+                                action_param = action.get("param", "")
+                                if action_param == "pin":
+                                    # Clear all PIN-related overrides
+                                    for p in ["en_pin", "pin_day", "pin_hour", "pin_minute"]:
+                                        if p in dynamic_overrides:
+                                            del dynamic_overrides[p]
+                                elif action_param in dynamic_overrides:
+                                    del dynamic_overrides[action_param]
+                            continue
+
+                    elif mapping_type == "text_conditions":
+                        # New text conditions format - simplified table-based interface
+                        # Format: {text_conditions: [{match: "X", then_actions: [{param: "pty", value: "7"}], else_actions: [...]}, ...]}
+                        text_conditions = rule.get("text_conditions", [])
+
+                        if not text_conditions:
+                            continue
+
+                        # Check each condition in order (first match wins)
+                        matched = False
+                        actions_to_apply = []
+
+                        for condition in text_conditions:
+                            condition_match = str(condition.get("match", "")).strip()
+                            then_actions = condition.get("then_actions", [])
+                            else_actions = condition.get("else_actions", [])
+
+                            # Check if value contains the match text (case-insensitive)
+                            if condition_match and condition_match.lower() in str(value).lower():
+                                matched = True
+                                actions_to_apply = then_actions
+                                break  # First match wins
+
+                        # If no match and we have an else clause, use it
+                        if not matched and text_conditions:
+                            # Use else_actions from first condition as fallback
+                            actions_to_apply = text_conditions[0].get("else_actions", [])
+
+                        # Apply all actions
+                        for action in actions_to_apply:
+                            action_param = action.get("param", "")
+                            action_value = action.get("value", "")
+
+                            if not action_param or action_param not in state:
+                                continue
+
+                            # Handle special JSON_VALUE marker
+                            if action_value == "JSON_VALUE":
+                                action_value = str(value)
+
+                            # Type conversion based on parameter
+                            final_value = None
+
+                            if action_param in ["ms", "tp", "ta", "en_pin"]:
+                                final_value = int(action_value) if str(action_value).isdigit() else 0
+                            elif action_param == "pty":
+                                final_value = max(0, min(31, int(action_value))) if str(action_value).isdigit() else 0
+                            elif action_param == "pi":
+                                try:
+                                    final_value = format(int(str(action_value), 16), '04X')
+                                except:
+                                    continue
+                            elif action_param in ["ptyn", "rt_text", "rt_a", "rt_b"]:
+                                final_value = str(action_value)
+                            else:
+                                final_value = action_value
+
+                            if final_value is not None:
+                                dynamic_overrides[action_param] = final_value
+
+                        continue  # Skip the regular new_value application below
+
+                    # Apply the new value to state (for non-multi_action and non-text_conditions modes)
+                    if mapping_type not in ["multi_action", "text_conditions"] and new_value is not None and rds_param in state:
                         # Special handling for certain parameters
                         if rds_param in ["ms", "tp", "ta"]:
                             new_value = int(new_value) if isinstance(new_value, (int, float, bool)) else 0
@@ -1923,6 +2099,13 @@ class RDSScheduler:
             if not result:
                 # If stripping left nothing, return cached value or empty
                 result = resolved_cache.get(key, "")
+
+        # Time placeholders: \HR\, \MN\, \S\ for dynamic time in PS/text
+        if "\\" in result:
+            now = datetime.now()
+            result = result.replace("\\HR\\", f"{now.hour:02d}")
+            result = result.replace("\\MN\\", f"{now.minute:02d}")
+            result = result.replace("\\S\\", f"{now.second:02d}")
 
         return result
 
@@ -3113,11 +3296,19 @@ class RDSScheduler:
     def next(self):
         global monitor_data
         now = datetime.now(timezone.utc)
-        
+
         if state["en_ct"] and now.second == 0 and now.minute != self.ct_min_lock:
             self.ct_min_lock = now.minute
-            mjd = (date.today() - date(1858, 11, 17)).days
-            b4 = ((now.hour & 0x0F) << 12) | (now.minute << 6) | ((1 if state["tz_offset"]<0 else 0) << 5) | int(abs(state["tz_offset"])*2)
+            mjd = (now.date() - date(1858, 11, 17)).days
+
+            # Calculate automatic timezone offset (including DST)
+            local_time = datetime.now().astimezone()
+            auto_offset = local_time.utcoffset().total_seconds() / 3600
+
+            # Add manual offset from UI for fine-tuning
+            total_offset = auto_offset + state["tz_offset"]
+
+            b4 = ((now.hour & 0x0F) << 12) | (now.minute << 6) | ((1 if total_offset<0 else 0) << 5) | int(abs(total_offset)*2)
             return RDSHelper.get_group_bits(4, 0, (mjd>>15)&3, ((mjd&0x7FFF)<<1)|((now.hour>>4)&1), b4)
 
         if state["scheduler_auto"]:
@@ -3724,20 +3915,23 @@ class RDSScheduler:
                         self.tdc_last_text_5a = text
                     else:
                         text = state.get("tdc_5a_text", "")
+                        # Support external sources (file/URL patterns) like RT/PS
+                        if "\\" in text:
+                            text = parse_text_source(text, self.tdc_last_text_5a) or text
                         # For custom text, only reset pointer if text actually changed
                         if text != self.tdc_last_text_5a:
                             self.tdc_last_text_5a = text
                             self.tdc_5a_ptr = 0
 
-                # Support up to 64 characters with CR terminator
-                text = text[:64]  # Truncate to 64 chars max
+                # Support up to 128 characters with CR terminator
+                text = text[:128]  # Truncate to 128 chars max
 
                 # Convert to RDS bytes and add CR (0x0D) terminator
                 text_bytes = text_to_rds_bytes(text)
                 actual_length = len(text_bytes)
 
                 # Add CR terminator if there's room
-                if actual_length < 64:
+                if actual_length < 128:
                     text_bytes = text_bytes + bytes([0x0D])  # Carriage Return
                     actual_length += 1
 
@@ -3780,21 +3974,24 @@ class RDSScheduler:
                         self.tdc_last_text_5b = text
                     else:
                         text = state.get("tdc_5b_text", "")
+                        # Support external sources (file/URL patterns) like RT/PS
+                        if "\\" in text:
+                            text = parse_text_source(text, self.tdc_last_text_5b) or text
                         # For custom text, only reset pointer if text actually changed
                         if text != self.tdc_last_text_5b:
                             self.tdc_last_text_5b = text
                             self.tdc_5b_ptr = 0
 
                 # Type 5B has PI in block 3, so only 2 bytes in block 4
-                # Support up to 64 characters with CR terminator
-                text = text[:64]  # Truncate to 64 chars max
+                # Support up to 128 characters with CR terminator
+                text = text[:128]  # Truncate to 128 chars max
 
                 # Convert to RDS bytes and add CR (0x0D) terminator
                 text_bytes = text_to_rds_bytes(text)
                 actual_length = len(text_bytes)
 
                 # Add CR terminator if there's room
-                if actual_length < 64:
+                if actual_length < 128:
                     text_bytes = text_bytes + bytes([0x0D])  # Carriage Return
                     actual_length += 1
 
@@ -3894,7 +4091,7 @@ class RDSScheduler:
 
             service = eon_services[self.eon_service_idx % len(eon_services)]
 
-            # Get PI(ON) for block 4
+            # Get PI(ON) for block 3 (14B) or block 4 (14A)
             try:
                 pi_on = int(service.get('pi_on', 'C000'), 16) & 0xFFFF
             except:
@@ -4135,6 +4332,7 @@ class RDSScheduler:
                 b2_tail = (tp_on << 4) | 0x0D  # Variant 13
                 pty_on = service.get('pty', 0) & 0x1F
                 ta_on = service.get('ta', 0) & 1
+
                 b3_val = (pty_on << 11) | (ta_on << 10)
 
                 # After PTY+TA, move to next service or back to PS
@@ -4153,7 +4351,9 @@ class RDSScheduler:
                 self.eon_variant = 0
                 self.eon_ps_seg = 0
 
-            return RDSHelper.get_group_bits(14, 0, b2_tail, b3_val, pi_on)
+            # Regular EON uses 14A format (variants 0-13)
+            # 14B is only used for TA burst
+            return RDSHelper.get_group_bits(14, 0, b2_tail, b3_val, pi_on)  # 14A format
 
         elif g_type == 15 and (not state["scheduler_auto"] or state["en_lps"]):
             raw = self.get_text("ps_long_32")
@@ -5971,10 +6171,13 @@ UI_HTML = r"""
                     <div class="section-header">Dynamic PS (8-Char)</div>
                     <div class="section-body">
                          <div class="flex justify-between mb-1">
-                             <label>Text Source (Supports \R, \w, 3s:)</label>
+                             <label>Text Source (Supports \R, \w, 3s:, \HR\, \MN\, \S\)</label>
                              <div class="flex gap-2 items-center"><label>Centre</label><input type="checkbox" class="toggle-checkbox" id="ps_centered" {% if state.ps_centered %}checked{% endif %} onchange="sync()"></div>
                          </div>
                          <input type="text" id="ps_dynamic" value="{{state.ps_dynamic}}" onchange="sync()">
+                         <div class="text-[9px] text-gray-400 mt-1">
+                             Time placeholders: \HR\ (hour 00-23), \MN\ (minute 00-59), \S\ (second 00-59)
+                         </div>
                          <div class="mt-2">
                              <label>PS Group Version</label>
                              <select id="ps_group_version" onchange="updatePSGroupWarning(); sync()">
@@ -6552,7 +6755,7 @@ UI_HTML = r"""
                      <div class="section-body grid-cols-2">
                          <div><label>ECC</label><input type="text" id="ecc" value="{{state.ecc}}" onchange="sync()"></div>
                          <div><label>LIC</label><input type="text" id="lic" value="{{state.lic}}" onchange="sync()"></div>
-                         <div><label>Clock Offset</label><input type="number" id="tz_offset" value="{{state.tz_offset}}" onchange="sync()"></div>
+                         <div><label>Clock Offset (Fine Tuning)</label><input type="number" id="tz_offset" value="{{state.tz_offset}}" onchange="sync()" step="0.5"></div>
                          <div class="flex items-center gap-2"><label class="flex-1">Enable CT</label><input type="checkbox" class="toggle-checkbox" id="en_ct" {% if state.en_ct %}checked{% endif %} onchange="sync()"></div>
                          <div class="flex items-center gap-2"><label class="flex-1">Enable ID (1A)</label><input type="checkbox" class="toggle-checkbox" id="en_id" {% if state.en_id %}checked{% endif %} onchange="sync()"></div>
                      </div>
@@ -6971,6 +7174,7 @@ UI_HTML = r"""
                     <div class="section-body">
                          <div class="text-[9px] text-gray-500 mb-3">
                              Send custom data or PC status info on Type 5A/5B groups. Channel numbers identify different data streams (0-31).
+                             Supports external sources: \w"url" for web content, \r"file" for files.
                          </div>
 
                          <!-- Type 5A Configuration -->
@@ -6978,7 +7182,7 @@ UI_HTML = r"""
                              <div class="flex items-start gap-2 mb-2">
                                  <div class="flex-1">
                                      <label class="font-semibold text-blue-300">Type 5A (Full Data)</label>
-                                     <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (16 segments × 4 bytes)</div>
+                                     <div class="text-[9px] text-gray-500">Up to 128 bytes with CR terminator (32 segments × 4 bytes)</div>
                                  </div>
                                  <input type="checkbox" class="toggle-checkbox" id="en_tdc_5a" {% if state.en_tdc_5a %}checked{% endif %} onchange="sync()">
                              </div>
@@ -6996,8 +7200,8 @@ UI_HTML = r"""
                                  </div>
                              </div>
                              <div id="tdc_5a_text_container" {% if state.tdc_5a_mode == 'pc_status' %}style="display:none"{% endif %}>
-                                 <label>Custom Text (up to 64 chars, CR-terminated)</label>
-                                 <input type="text" id="tdc_5a_text" maxlength="64" value="{{state.tdc_5a_text}}" onchange="sync()">
+                                 <label>Custom Text (up to 128 chars, CR-terminated, supports \w"url" and \r"file")</label>
+                                 <input type="text" id="tdc_5a_text" maxlength="128" value="{{state.tdc_5a_text}}" onchange="sync()">
                              </div>
                          </div>
 
@@ -7006,7 +7210,7 @@ UI_HTML = r"""
                              <div class="flex items-start gap-2 mb-2">
                                  <div class="flex-1">
                                      <label class="font-semibold text-blue-300">Type 5B (Full Data)</label>
-                                     <div class="text-[9px] text-gray-500">Up to 64 bytes with CR terminator (16 segments × 4 bytes)</div>
+                                     <div class="text-[9px] text-gray-500">Up to 128 bytes with CR terminator (32 segments × 4 bytes)</div>
                                  </div>
                                  <input type="checkbox" class="toggle-checkbox" id="en_tdc_5b" {% if state.en_tdc_5b %}checked{% endif %} onchange="sync()">
                              </div>
@@ -7024,8 +7228,8 @@ UI_HTML = r"""
                                  </div>
                              </div>
                              <div id="tdc_5b_text_container" {% if state.tdc_5b_mode == 'pc_status' %}style="display:none"{% endif %}>
-                                 <label>Custom Text (up to 64 chars, CR-terminated)</label>
-                                 <input type="text" id="tdc_5b_text" maxlength="64" value="{{state.tdc_5b_text}}" onchange="sync()">
+                                 <label>Custom Text (up to 128 chars, CR-terminated, supports \w"url" and \r"file")</label>
+                                 <input type="text" id="tdc_5b_text" maxlength="128" value="{{state.tdc_5b_text}}" onchange="sync()">
                              </div>
                          </div>
 
@@ -7232,12 +7436,12 @@ UI_HTML = r"""
                  </div>
 
                  <div class="section">
-                    <div class="section-header">Basic Dynamic Control</div>
+                    <div class="section-header">Text Conditions</div>
                     <div class="section-body">
                          <div class="flex items-start gap-2 mb-3">
                              <div class="flex-1">
-                                 <label>Dynamic RDS Parameter Control</label>
-                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters (PTY, MS, TP, TA, PI, PTYN, PIN, TDC) from JSON data</div>
+                                 <label>Dynamic Text-Based Control</label>
+                                 <div class="text-[9px] text-gray-500">Automatically control RDS parameters based on text patterns found in JSON data</div>
                                  <div class="text-[9px] text-amber-600 font-semibold">⚠️ Changes take effect immediately</div>
                              </div>
                              <input type="checkbox" class="toggle-checkbox" id="dynamic_control_enabled" {% if state.dynamic_control_enabled %}checked{% endif %} onchange="sync()">
@@ -7245,12 +7449,72 @@ UI_HTML = r"""
 
                          <input type="hidden" id="dynamic_control_rules" value="{{state.dynamic_control_rules}}">
 
-                         <div class="mb-3">
-                             <button onclick="openDynamicControlModal()" class="bg-cyan-600 hover:bg-cyan-500 text-white rounded px-3 py-2 text-sm w-full">Manage Control Rules</button>
+                         <!-- JSON Source Configuration -->
+                         <div class="bg-gray-900 border border-gray-700 rounded p-3 mb-3">
+                             <div class="text-xs font-bold text-gray-300 mb-2">📡 JSON Data Source</div>
+                             <div class="space-y-2">
+                                 <div>
+                                     <label class="text-[10px] text-gray-400">URL</label>
+                                     <div class="flex gap-2">
+                                         <input type="text" id="tc_url" class="flex-1 bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder="http://localhost:8080/metadata.json">
+                                         <button onclick="testTextConditionsURL()" class="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1 text-xs whitespace-nowrap">🔍 Test</button>
+                                     </div>
+                                 </div>
+                                 <div class="flex gap-2">
+                                     <div class="flex-1">
+                                         <label class="text-[10px] text-gray-400">Field Path</label>
+                                         <input type="text" id="tc_field_path" class="w-full bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder="e.g., data.program.name">
+                                     </div>
+                                     <div class="w-24">
+                                         <label class="text-[10px] text-gray-400">Poll (sec)</label>
+                                         <input type="number" id="tc_poll_interval" value="5" min="1" max="60" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs">
+                                     </div>
+                                 </div>
+                             </div>
+
+                             <!-- JSON Browser (appears after testing URL) -->
+                             <div id="tc_json_browser" style="display: none;" class="bg-gray-900 border border-gray-700 rounded p-3 mt-2 max-h-64 overflow-y-auto">
+                                 <div class="flex justify-between items-center mb-2">
+                                     <div class="text-xs text-green-400">✓ JSON fetched - Click a field to select it</div>
+                                     <button onclick="closeTextConditionsBrowser()" class="text-xs text-gray-400 hover:text-white">✕ Close</button>
+                                 </div>
+                                 <div id="tc_json_tree" class="text-xs font-mono"></div>
+                             </div>
                          </div>
 
-                         <div id="dynamic_control_rules_display" class="text-xs text-gray-400">
-                             No control rules configured
+                         <!-- Text Conditions Table -->
+                         <div class="mb-3">
+                             <div class="flex justify-between items-center mb-2">
+                                 <div class="text-xs font-bold text-gray-300">📋 Conditions</div>
+                                 <button onclick="addTextCondition()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-1 text-xs">+ Add Condition</button>
+                             </div>
+
+                             <div class="bg-gray-900 border border-gray-700 rounded overflow-hidden">
+                                 <div id="tc_table_container" class="overflow-x-auto">
+                                     <table class="w-full text-xs">
+                                         <thead class="bg-gray-800 border-b border-gray-700">
+                                             <tr>
+                                                 <th class="px-2 py-2 text-left text-gray-400 font-semibold w-8">#</th>
+                                                 <th class="px-2 py-2 text-left text-gray-400 font-semibold">If Text Contains</th>
+                                                 <th class="px-2 py-2 text-left text-gray-400 font-semibold">Then Execute</th>
+                                                 <th class="px-2 py-2 text-left text-gray-400 font-semibold">Else Execute</th>
+                                                 <th class="px-2 py-2 text-center text-gray-400 font-semibold w-16">Actions</th>
+                                             </tr>
+                                         </thead>
+                                         <tbody id="tc_conditions_tbody" class="divide-y divide-gray-800">
+                                             <tr>
+                                                 <td colspan="5" class="px-3 py-4 text-center text-gray-500 italic">
+                                                     No conditions yet. Click "+ Add Condition" to create one.
+                                                 </td>
+                                             </tr>
+                                         </tbody>
+                                     </table>
+                                 </div>
+                             </div>
+
+                             <div class="text-[10px] text-gray-500 mt-2 bg-blue-900/20 border border-blue-700/50 rounded p-2">
+                                 <strong>How it works:</strong> Conditions are checked top-to-bottom. The first matching pattern executes its "Then" actions. If no match is found, "Else" actions execute. Leave "Else" empty to do nothing when no match occurs.
+                             </div>
                          </div>
                     </div>
                  </div>
@@ -7994,22 +8258,127 @@ UI_HTML = r"""
         </div>
     </div>
 
+    <!-- Text Condition Action Modal -->
+    <div id="tc_action_modal" class="rtplus-modal-overlay" style="display: none;">
+        <div class="rtplus-modal-content" style="max-width: 500px;">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="tc_action_modal_title" class="text-lg font-bold">Add Action</h3>
+                <button onclick="closeTCActionModal()" class="text-2xl leading-none hover:text-pink-600">×</button>
+            </div>
+
+            <div class="space-y-3">
+                <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Parameter</label>
+                    <select id="tc_action_param" class="w-full bg-black border border-gray-600 rounded px-2 py-1" onchange="updateTCActionValueInput()">
+                        <option value="">Select parameter...</option>
+                        <option value="pty">PTY (Programme Type)</option>
+                        <option value="tp">TP (Traffic Programme)</option>
+                        <option value="ta">TA (Traffic Announcement)</option>
+                        <option value="ms">MS (Music/Speech)</option>
+                        <option value="pi">PI (Programme Identification)</option>
+                        <option value="ptyn">PTYN (Programme Type Name)</option>
+                        <option value="rt_text">RT (RadioText)</option>
+                        <option value="rt_a">RT Buffer A</option>
+                        <option value="rt_b">RT Buffer B</option>
+                        <option value="json_value">Use JSON Value</option>
+                    </select>
+                </div>
+
+                <div id="tc_action_value_container">
+                    <label class="text-xs text-gray-400 mb-1 block">Value</label>
+                    <input type="text" id="tc_action_value_text" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="Enter value">
+                    <select id="tc_action_value_select" class="w-full bg-black border border-gray-600 rounded px-2 py-1" style="display: none;"></select>
+                </div>
+            </div>
+
+            <div class="flex gap-2 mt-4">
+                <button onclick="saveTCAction()" class="flex-1 bg-pink-600 hover:bg-pink-500 text-white rounded px-4 py-2 text-sm font-bold">Save</button>
+                <button onclick="closeTCActionModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <div id="dynamic_control_modal" class="rtplus-modal-overlay" style="display: none;">
         <div class="rtplus-modal-content" style="max-width: 700px;">
             <div class="flex justify-between items-center mb-4">
-                <h3 id="dynamic_control_modal_title" class="text-lg font-bold">Basic Dynamic Control</h3>
+                <h3 id="dynamic_control_modal_title" class="text-lg font-bold">Dynamic Control</h3>
                 <button onclick="closeDynamicControlModal()" class="text-2xl leading-none hover:text-pink-600">×</button>
             </div>
 
-            <div class="mb-4 bg-blue-900 border border-blue-700 rounded p-3">
-                <div class="text-xs text-blue-200 mb-2">📡 Fetch JSON data and map fields to RDS parameters</div>
-                <div class="text-[10px] text-blue-300">Examples: Toggle speech/music based on MS field, change PTY by program type, pass through PTYN text</div>
+            <!-- Existing Rules List -->
+            <div class="mb-4 bg-gray-900 border border-gray-700 rounded p-3">
+                <div class="text-xs text-gray-400 mb-2 font-bold">📋 Configured Rules</div>
+                <div id="dynamic_control_rule_list" class="space-y-2 mb-0">
+                </div>
             </div>
 
-            <div class="mb-4">
-                <div id="dynamic_control_rule_list" class="space-y-2 mb-3">
+            <!-- Tabs -->
+            <div class="flex gap-2 mb-4 border-b border-gray-700">
+                <button id="dc_tab_smart" onclick="switchDCTab('smart')" class="px-4 py-2 text-sm font-bold border-b-2 border-pink-500 text-pink-400">✨ Smart Rules</button>
+                <button id="dc_tab_advanced" onclick="switchDCTab('advanced')" class="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">🔧 Advanced</button>
+            </div>
+
+            <!-- Smart Rules Tab -->
+            <div id="dc_smart_tab_content" class="space-y-4">
+                <div class="bg-blue-900 border border-blue-700 rounded p-3">
+                    <div class="text-xs text-blue-200 mb-1">🎯 Simple keyword detection with automatic parameter changes</div>
+                    <div class="text-[10px] text-blue-300">When keywords are found in a JSON field, automatically set multiple RDS parameters</div>
                 </div>
-                <button onclick="addDynamicControlRule()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm w-full">+ Add Control Rule</button>
+
+                <div>
+                    <label class="text-xs text-gray-400 mb-1 block">JSON URL</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="dc_smart_url" class="flex-1 bg-black border border-gray-600 rounded px-2 py-1 font-mono text-xs" placeholder="http://localhost:8080/metadata.json">
+                        <button onclick="testSmartRuleURL()" class="bg-blue-600 hover:bg-blue-500 text-white rounded px-3 py-1 text-xs whitespace-nowrap">🔍 Test & Browse</button>
+                    </div>
+                    <div class="text-[10px] text-gray-500 mt-1">Your JSON data source</div>
+                </div>
+
+                <div id="dc_smart_json_browser" style="display: none;" class="bg-gray-900 border border-gray-700 rounded p-3 max-h-64 overflow-y-auto">
+                    <div class="flex justify-between items-center mb-2">
+                        <div class="text-xs text-green-400">✓ JSON fetched - Click a field to select it</div>
+                        <button onclick="closeSmartRuleBrowser()" class="text-xs text-gray-400 hover:text-white">✕</button>
+                    </div>
+                    <div id="dc_smart_json_tree" class="text-xs font-mono"></div>
+                </div>
+
+                <div>
+                    <label class="text-xs text-gray-400 mb-1 block">JSON Field to Check</label>
+                    <input type="text" id="dc_smart_field" readonly class="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 font-mono text-xs text-cyan-400" placeholder="Click 'Test & Browse' to select a field">
+                    <div class="text-[10px] text-gray-500 mt-1">Which field should we look for keywords in?</div>
+                </div>
+
+                <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Keywords (comma-separated)</label>
+                    <input type="text" id="dc_smart_keywords" class="w-full bg-black border border-gray-600 rounded px-2 py-1" placeholder="e.g., news, weather, news, traffic">
+                    <div class="text-[10px] text-gray-500 mt-1">If ANY of these words are found, the actions below will trigger</div>
+                </div>
+
+                <div class="border border-gray-700 rounded p-3">
+                    <div class="flex justify-between items-center mb-2">
+                        <label class="text-xs text-gray-400 font-bold">Actions to Take</label>
+                        <button onclick="addSmartAction()" class="bg-green-600 hover:bg-green-500 text-white rounded px-2 py-1 text-xs">+ Add Action</button>
+                    </div>
+                    <div id="dc_smart_actions_list" class="space-y-2">
+                        <div class="text-xs text-gray-500 text-center py-2">No actions yet. Click "+ Add Action" to add one.</div>
+                    </div>
+                </div>
+
+                <div class="flex gap-2">
+                    <button onclick="saveSmartRule()" class="flex-1 bg-pink-600 hover:bg-pink-500 text-white rounded px-4 py-2 text-sm font-bold">💾 Save Smart Rule</button>
+                    <button onclick="cancelSmartRule()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Cancel</button>
+                </div>
+            </div>
+
+            <!-- Advanced Tab -->
+            <div id="dc_advanced_tab_content" style="display: none;">
+                <div class="mb-4 bg-blue-900 border border-blue-700 rounded p-3">
+                    <div class="text-xs text-blue-200 mb-2">📡 Fetch JSON data and map fields to RDS parameters</div>
+                    <div class="text-[10px] text-blue-300">Examples: Toggle speech/music based on MS field, change PTY by program type, pass through PTYN text</div>
+                </div>
+
+            <div class="mb-4">
+                <button onclick="addDynamicControlRule()" class="bg-green-600 hover:bg-green-500 text-white rounded px-3 py-2 text-sm w-full">+ Add Advanced Rule</button>
             </div>
 
             <div id="dynamic_control_edit_form" style="display: none;" class="border-t border-gray-700 pt-4 mt-4">
@@ -8056,6 +8425,9 @@ UI_HTML = r"""
                             <option value="ta">TA (Traffic Announcement)</option>
                             <option value="ari_announcement">ARI Announcement (DK)</option>
                             <option value="pi">PI (Programme Identification)</option>
+                            <option value="rt_text">RT Text (RadioText)</option>
+                            <option value="rt_a">RT Buffer A</option>
+                            <option value="rt_b">RT Buffer B</option>
                             <option value="en_pin">PIN Enable</option>
                             <option value="pin_day">PIN Day (1-31)</option>
                             <option value="pin_hour">PIN Hour (0-23)</option>
@@ -8082,6 +8454,7 @@ UI_HTML = r"""
                                 <option value="conditional">Conditional (If X then Y, else default)</option>
                                 <option value="list_match">List Match (any of a list → one output)</option>
                                 <option value="passthrough">Pass Through (JSON value → RDS value)</option>
+                                <option value="multi_action">🆕 Multi-Action (Keywords → Multiple RDS Params)</option>
                             </select>
                         </div>
 
@@ -8130,6 +8503,33 @@ UI_HTML = r"""
                                 <strong>How it works:</strong> If the JSON field value matches any entry in the list, apply the output value. Otherwise, the override is cleared (falls back to your RDS settings). Useful when many programme names should trigger the same RDS value.
                             </div>
                         </div>
+
+                        <div id="dc_multi_action_section" style="display: none;">
+                            <label class="text-xs text-gray-400 mb-1 block">Multi-Action Configuration</label>
+
+                            <div class="space-y-3 mb-3">
+                                <div>
+                                    <label class="text-[10px] text-gray-500">Keywords (comma-separated, checks if field contains any):</label>
+                                    <input type="text" id="dc_keywords" placeholder="e.g. news, weather, travel, forecast" class="w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono">
+                                    <div class="text-[9px] text-gray-500 mt-1">Will match if JSON field contains ANY of these keywords (case-insensitive)</div>
+                                </div>
+
+                                <div>
+                                    <div class="flex justify-between items-center mb-2">
+                                        <label class="text-[10px] text-gray-500">Actions to perform when matched:</label>
+                                        <button type="button" onclick="addMultiActionRow()" class="px-2 py-1 bg-green-800 hover:bg-green-700 rounded text-xs text-white font-bold">+ Add Action</button>
+                                    </div>
+                                    <div id="dc_multi_actions_list" class="space-y-2 mb-2"></div>
+                                </div>
+                            </div>
+
+                            <div class="text-[10px] text-gray-500 bg-cyan-900/20 border border-cyan-700/50 rounded p-2">
+                                <strong>How it works:</strong> If the JSON field contains ANY of the keywords, ALL actions are applied simultaneously. Use PIN with value "NOW" to automatically set current time. Set static RT text to override song titles. When no keywords match, all overrides are cleared.
+                                <div class="mt-2 font-mono text-[9px]">
+                                    Example: keywords="news, weather" → PTY=16, MS=0, PIN=NOW, RT_TEXT="Weather Forecast"
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div>
@@ -8155,6 +8555,9 @@ UI_HTML = r"""
             <div class="flex justify-end mt-4">
                 <button onclick="closeDynamicControlModal()" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">Close</button>
             </div>
+            </div>
+            <!-- End Advanced Tab -->
+
         </div>
     </div>
 
@@ -11313,10 +11716,22 @@ UI_HTML = r"""
             var name = prompt('Enter dataset name:', 'Dataset ' + nextNum);
             if (!name) return;
 
+            // Copy RDS volume and soundcard from current dataset
+            var newState = {};
+            if (datasets[currentDataset] && datasets[currentDataset].state) {
+                var currentState = datasets[currentDataset].state;
+                if (currentState.rds_level !== undefined) {
+                    newState.rds_level = currentState.rds_level;
+                }
+                if (currentState.device_out_idx !== undefined) {
+                    newState.device_out_idx = currentState.device_out_idx;
+                }
+            }
+
             fetch('/datasets/' + nextNum, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name, state: {} })
+                body: JSON.stringify({ name: name, state: newState })
             })
                 .then(function(res) {
                     if (res.ok) {
@@ -11327,7 +11742,13 @@ UI_HTML = r"""
         }
 
         function renameCurrentDataset() {
-            var currentName = datasets[currentDataset] ? datasets[currentDataset].name : 'Dataset ' + currentDataset;
+            // Ensure dataset exists before renaming
+            if (!datasets[currentDataset]) {
+                alert('Dataset not loaded. Please refresh the page.');
+                return;
+            }
+
+            var currentName = datasets[currentDataset].name || 'Dataset ' + currentDataset;
             var newName = prompt('Enter new name:', currentName);
             if (!newName) return;
 
@@ -11490,7 +11911,9 @@ UI_HTML = r"""
                 }
                 var afDisplay = afParts.length > 0 ? afParts.join(' | ') : 'No AFs';
                 
-                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + '</div>' +
+                var tpBadge = svc.tp ? '<span class="text-[10px] bg-green-600 text-white px-1 rounded ml-2">TP</span>' : '';
+
+                info.innerHTML = '<div class="font-mono text-sm text-pink-400">' + (svc.pi_on || 'C000') + tpBadge + '</div>' +
                                 '<div class="text-sm">' + (svc.ps || 'UNKNOWN') + '</div>' +
                                 '<div class="text-xs text-gray-400 break-words">' + afDisplay + '</div>';
 
@@ -11576,7 +11999,7 @@ UI_HTML = r"""
                 }).join('\n');
             }
             document.getElementById('eon_mapped').value = mappedText;
-            
+
             document.getElementById('eon_tp').checked = svc.tp || false;
             document.getElementById('eon_uecp_psn').value = svc.uecp_psn || 0;
             document.getElementById('eon_modal_title').textContent = 'Edit EON Service';
@@ -11671,11 +12094,369 @@ UI_HTML = r"""
             renderDynamicControlRuleList();
             document.getElementById('dynamic_control_modal').style.display = 'flex';
             document.getElementById('dynamic_control_edit_form').style.display = 'none';
+            switchDCTab('smart');  // Default to Smart Rules tab
         }
 
         function closeDynamicControlModal() {
             document.getElementById('dynamic_control_modal').style.display = 'none';
             document.getElementById('dynamic_control_edit_form').style.display = 'none';
+        }
+
+        function switchDCTab(tab) {
+            var smartTab = document.getElementById('dc_tab_smart');
+            var advancedTab = document.getElementById('dc_tab_advanced');
+            var smartContent = document.getElementById('dc_smart_tab_content');
+            var advancedContent = document.getElementById('dc_advanced_tab_content');
+
+            if (tab === 'smart') {
+                // Style active smart tab
+                smartTab.className = 'px-4 py-2 text-sm font-bold border-b-2 border-pink-500 text-pink-400';
+                advancedTab.className = 'px-4 py-2 text-sm text-gray-400 hover:text-gray-200';
+                smartContent.style.display = 'block';
+                advancedContent.style.display = 'none';
+            } else {
+                // Style active advanced tab
+                smartTab.className = 'px-4 py-2 text-sm text-gray-400 hover:text-gray-200';
+                advancedTab.className = 'px-4 py-2 text-sm font-bold border-b-2 border-pink-500 text-pink-400';
+                smartContent.style.display = 'none';
+                advancedContent.style.display = 'block';
+            }
+        }
+
+        var smartActions = [];
+
+        function addSmartAction() {
+            var actionDiv = document.createElement('div');
+            actionDiv.className = 'bg-gray-900 border border-gray-700 rounded p-2 space-y-2';
+
+            // Row 1: Parameter and source type
+            var row1 = document.createElement('div');
+            row1.className = 'flex gap-2 items-center';
+
+            var paramSelect = document.createElement('select');
+            paramSelect.className = 'flex-1 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+            paramSelect.innerHTML = `
+                <option value="">Select RDS Parameter...</option>
+                <option value="ms">MS (Music/Speech)</option>
+                <option value="pty">PTY (Programme Type)</option>
+                <option value="ptyn">PTYN (Programme Type Name)</option>
+                <option value="tp">TP (Traffic Programme)</option>
+                <option value="ta">TA (Traffic Announcement)</option>
+                <option value="ari_announcement">ARI Announcement (DK)</option>
+                <option value="pi">PI (Programme Identification)</option>
+                <option value="rt_text">RT Text (RadioText)</option>
+                <option value="rt_a">RT Buffer A</option>
+                <option value="rt_b">RT Buffer B</option>
+                <option value="en_pin">PIN Enable</option>
+                <option value="pin_day">PIN Day</option>
+                <option value="pin_hour">PIN Hour</option>
+                <option value="pin_minute">PIN Minute</option>
+                <option value="tdc_5a_text">TDC 5A Text</option>
+                <option value="tdc_5b_text">TDC 5B Text</option>
+                <option value="en_tdc_5a">TDC 5A Enable</option>
+                <option value="en_tdc_5b">TDC 5B Enable</option>
+            `;
+
+            var sourceToggle = document.createElement('div');
+            sourceToggle.className = 'flex gap-2 text-xs';
+            sourceToggle.innerHTML = `
+                <label class="flex items-center gap-1 cursor-pointer">
+                    <input type="radio" name="source_${Date.now()}" value="json" checked class="accent-pink-500">
+                    <span>JSON Field</span>
+                </label>
+                <label class="flex items-center gap-1 cursor-pointer">
+                    <input type="radio" name="source_${Date.now()}" value="static" class="accent-pink-500">
+                    <span>Static</span>
+                </label>
+            `;
+
+            var deleteBtn = document.createElement('button');
+            deleteBtn.className = 'bg-red-600 hover:bg-red-500 text-white rounded px-2 py-1 text-xs';
+            deleteBtn.textContent = '✕';
+            deleteBtn.onclick = function() {
+                actionDiv.remove();
+                if (document.getElementById('dc_smart_actions_list').children.length === 0) {
+                    document.getElementById('dc_smart_actions_list').innerHTML = '<div class="text-xs text-gray-500 text-center py-2">No actions yet. Click "+ Add Action" to add one.</div>';
+                }
+            };
+
+            row1.appendChild(paramSelect);
+            row1.appendChild(sourceToggle);
+            row1.appendChild(deleteBtn);
+
+            // Row 2: Value input (dynamic)
+            var valueContainer = document.createElement('div');
+            valueContainer.className = 'value-container';
+
+            // Initial JSON field input
+            var jsonInput = document.createElement('input');
+            jsonInput.type = 'text';
+            jsonInput.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono text-cyan-400';
+            jsonInput.placeholder = 'JSON field path (e.g., data.pty)';
+            valueContainer.appendChild(jsonInput);
+
+            // Function to update value input based on source and parameter
+            function updateValueInput() {
+                var param = paramSelect.value;
+                var isJson = sourceToggle.querySelector('input[value="json"]').checked;
+                valueContainer.innerHTML = '';
+
+                if (isJson) {
+                    // JSON field input
+                    var input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs font-mono text-cyan-400';
+                    input.placeholder = 'JSON field path (e.g., data.pty, event.start_hour)';
+                    valueContainer.appendChild(input);
+                } else {
+                    // Static value input - type depends on parameter
+                    if (param === 'ms') {
+                        var select = document.createElement('select');
+                        select.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        select.innerHTML = '<option value="0">Speech</option><option value="1">Music</option>';
+                        valueContainer.appendChild(select);
+                    } else if (param === 'pty') {
+                        var select = document.createElement('select');
+                        select.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        select.innerHTML = `
+                            <option value="0">None</option><option value="1">News</option><option value="2">Current Affairs</option>
+                            <option value="3">Information</option><option value="4">Sport</option><option value="5">Education</option>
+                            <option value="6">Drama</option><option value="7">Culture</option><option value="8">Science</option>
+                            <option value="9">Varied</option><option value="10">Pop Music</option><option value="11">Rock Music</option>
+                            <option value="12">Easy Listening</option><option value="13">Light Classical</option><option value="14">Serious Classical</option>
+                            <option value="15">Other Music</option><option value="16">Weather</option><option value="17">Finance</option>
+                            <option value="18">Children's</option><option value="19">Social Affairs</option><option value="20">Religion</option>
+                            <option value="21">Phone-In</option><option value="22">Travel</option><option value="23">Leisure</option>
+                            <option value="24">Jazz Music</option><option value="25">Country Music</option><option value="26">National Music</option>
+                            <option value="27">Oldies Music</option><option value="28">Folk Music</option><option value="29">Documentary</option>
+                            <option value="30">Alarm Test</option><option value="31">Alarm</option>
+                        `;
+                        valueContainer.appendChild(select);
+                    } else if (param === 'tp' || param === 'ta' || param === 'en_pin' || param === 'en_tdc_5a' || param === 'en_tdc_5b') {
+                        var select = document.createElement('select');
+                        select.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        select.innerHTML = '<option value="0">Off (0)</option><option value="1">On (1)</option>';
+                        valueContainer.appendChild(select);
+                    } else if (param === 'pin_hour') {
+                        var input = document.createElement('input');
+                        input.type = 'number';
+                        input.min = '0';
+                        input.max = '23';
+                        input.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        input.placeholder = 'Hour (0-23)';
+                        valueContainer.appendChild(input);
+                    } else if (param === 'pin_minute') {
+                        var input = document.createElement('input');
+                        input.type = 'number';
+                        input.min = '0';
+                        input.max = '59';
+                        input.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        input.placeholder = 'Minute (0-59)';
+                        valueContainer.appendChild(input);
+                    } else if (param === 'pin_day') {
+                        var input = document.createElement('input');
+                        input.type = 'number';
+                        input.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        input.placeholder = 'MJD Day';
+                        valueContainer.appendChild(input);
+                    } else if (param === 'ari_announcement') {
+                        var select = document.createElement('select');
+                        select.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        select.innerHTML = `
+                            <option value="0">None</option><option value="1">Regional traffic</option>
+                            <option value="2">Local traffic</option><option value="3">Stop+go</option>
+                            <option value="4">Accident</option><option value="5">Weather</option>
+                        `;
+                        valueContainer.appendChild(select);
+                    } else {
+                        var input = document.createElement('input');
+                        input.type = 'text';
+                        input.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                        input.placeholder = 'Value';
+                        valueContainer.appendChild(input);
+                    }
+                }
+            }
+
+            // Update value input when parameter or source changes
+            paramSelect.onchange = updateValueInput;
+            sourceToggle.querySelectorAll('input[type="radio"]').forEach(function(radio) {
+                radio.onchange = updateValueInput;
+            });
+
+            actionDiv.appendChild(row1);
+            actionDiv.appendChild(valueContainer);
+
+            var list = document.getElementById('dc_smart_actions_list');
+            if (list.children.length === 1 && list.children[0].textContent.includes('No actions yet')) {
+                list.innerHTML = '';
+            }
+            list.appendChild(actionDiv);
+        }
+
+        function saveSmartRule() {
+            var url = document.getElementById('dc_smart_url').value.trim();
+            var field = document.getElementById('dc_smart_field').value.trim();
+            var keywords = document.getElementById('dc_smart_keywords').value.trim();
+
+            if (!url) {
+                alert('Please enter a JSON URL');
+                return;
+            }
+            if (!field) {
+                alert('Please enter a JSON field to check');
+                return;
+            }
+            if (!keywords) {
+                alert('Please enter keywords to detect');
+                return;
+            }
+
+            var actionsList = document.getElementById('dc_smart_actions_list');
+            var actions = [];
+
+            for (var i = 0; i < actionsList.children.length; i++) {
+                var actionDiv = actionsList.children[i];
+                if (actionDiv.children.length < 2) continue;
+
+                var param = actionDiv.children[0].value;
+                var value = actionDiv.children[1].value.trim();
+
+                if (param && value !== '') {
+                    actions.push({param: param, value: value});
+                }
+            }
+
+            if (actions.length === 0) {
+                alert('Please add at least one action');
+                return;
+            }
+
+            // Create a multi_action rule
+            var rule = {
+                name: 'Smart: ' + keywords.split(',')[0].trim(),
+                enabled: true,
+                url: url,
+                poll_interval: 2,  // Default 2 second polling
+                field_path: field,
+                rds_param: actions[0].param,  // Use first action as primary param for display
+                mapping_type: 'multi_action',
+                keywords: keywords,
+                actions: actions
+            };
+
+            dynamicControlRules.push(rule);
+            updateDataset('dynamic_control_rules', dynamicControlRules);
+            renderDynamicControlRuleList();
+
+            // Clear form
+            document.getElementById('dc_smart_url').value = '';
+            document.getElementById('dc_smart_field').value = '';
+            document.getElementById('dc_smart_keywords').value = '';
+            document.getElementById('dc_smart_actions_list').innerHTML = '<div class="text-xs text-gray-500 text-center py-2">No actions yet. Click "+ Add Action" to add one.</div>';
+
+            alert('✓ Smart Rule saved successfully!');
+        }
+
+        function cancelSmartRule() {
+            document.getElementById('dc_smart_url').value = '';
+            document.getElementById('dc_smart_field').value = '';
+            document.getElementById('dc_smart_keywords').value = '';
+            document.getElementById('dc_smart_actions_list').innerHTML = '<div class="text-xs text-gray-500 text-center py-2">No actions yet. Click "+ Add Action" to add one.</div>';
+        }
+
+        function testSmartRuleURL() {
+            var url = document.getElementById('dc_smart_url').value.trim();
+            if (!url) {
+                alert('Please enter a JSON URL first');
+                return;
+            }
+
+            var browser = document.getElementById('dc_smart_json_browser');
+            var tree = document.getElementById('dc_smart_json_tree');
+            tree.innerHTML = '<div class="text-gray-400">🔄 Fetching JSON...</div>';
+            browser.style.display = 'block';
+
+            // Use backend proxy to avoid CORS issues
+            fetch('/dynamic_control/fetch_json', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: url})
+            })
+                .then(function(response) {
+                    return response.json().then(function(data) {
+                        if (!response.ok) {
+                            throw new Error(data.error || 'HTTP ' + response.status);
+                        }
+                        return data;
+                    });
+                })
+                .then(function(result) {
+                    if (result.success && result.data) {
+                        renderSmartRuleJSONTree(result.data, tree);
+                    } else {
+                        throw new Error(result.error || 'Unknown error');
+                    }
+                })
+                .catch(function(error) {
+                    tree.innerHTML = '<div class="text-red-400">✗ ' + error.message + '</div>' +
+                                    '<div class="text-[10px] text-gray-500 mt-2">Tips: Check URL is correct and accessible</div>';
+                });
+        }
+
+        function renderSmartRuleJSONTree(obj, container) {
+            container.innerHTML = '';
+
+            function renderNode(value, key, currentPath, parentDiv) {
+                var fullPath = currentPath ? currentPath + '.' + key : key;
+                var div = document.createElement('div');
+                div.className = 'py-0.5';
+
+                if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                    // Object node
+                    div.innerHTML = '<span class="text-blue-400 cursor-pointer hover:underline" onclick="selectSmartRuleField(\'' + fullPath + '\')">' +
+                                   key + '</span> <span class="text-gray-500">{...}</span>';
+                    parentDiv.appendChild(div);
+
+                    var nested = document.createElement('div');
+                    nested.className = 'ml-4';
+                    for (var k in value) {
+                        renderNode(value[k], k, fullPath, nested);
+                    }
+                    parentDiv.appendChild(nested);
+                } else if (Array.isArray(value)) {
+                    // Array node
+                    div.innerHTML = '<span class="text-purple-400 cursor-pointer hover:underline" onclick="selectSmartRuleField(\'' + fullPath + '\')">' +
+                                   key + '</span> <span class="text-gray-500">[' + value.length + ']</span>';
+                    parentDiv.appendChild(div);
+                    if (value.length > 0 && typeof value[0] === 'object') {
+                        var nested = document.createElement('div');
+                        nested.className = 'ml-4';
+                        renderNode(value[0], '[0]', fullPath, nested);
+                        parentDiv.appendChild(nested);
+                    }
+                } else {
+                    // Leaf node (clickable)
+                    var valueStr = String(value);
+                    if (valueStr.length > 40) valueStr = valueStr.substring(0, 40) + '...';
+                    div.innerHTML = '<span class="text-cyan-400 cursor-pointer hover:underline hover:text-cyan-300" onclick="selectSmartRuleField(\'' +
+                                   fullPath + '\')">' + key + '</span> <span class="text-gray-500">= ' +
+                                   '<span class="text-yellow-300">' + valueStr + '</span></span>';
+                    parentDiv.appendChild(div);
+                }
+            }
+
+            for (var key in obj) {
+                renderNode(obj[key], key, '', container);
+            }
+        }
+
+        function selectSmartRuleField(path) {
+            document.getElementById('dc_smart_field').value = path;
+        }
+
+        function closeSmartRuleBrowser() {
+            document.getElementById('dc_smart_json_browser').style.display = 'none';
         }
 
         function renderDynamicControlRuleList() {
@@ -11712,7 +12493,13 @@ UI_HTML = r"""
                 }[rule.rds_param] || rule.rds_param;
                 
                 var mappingInfo = rule.mapping_type;
-                if (rule.mapping_type === 'conditional') {
+                if (rule.mapping_type === 'multi_action') {
+                    var keywords = rule.keywords || '';
+                    var keywordsList = keywords.split(',').slice(0, 2).map(k => k.trim()).join(', ');
+                    if (keywords.split(',').length > 2) keywordsList += '...';
+                    var actionCount = (rule.actions || []).length;
+                    mappingInfo = '✨ Smart Rule: "' + keywordsList + '" → ' + actionCount + ' action' + (actionCount !== 1 ? 's' : '');
+                } else if (rule.mapping_type === 'conditional') {
                     var conds = rule.conditions || [];
                     if (!conds.length && rule.condition_value) conds = [{match: rule.condition_value, output: rule.output_value || ''}];
                     if (conds.length === 1) {
@@ -11729,7 +12516,7 @@ UI_HTML = r"""
                 info.innerHTML = statusBadge +
                                 '<div class="font-semibold text-sm text-pink-400">' + (rule.name || 'Unnamed Rule') + '</div>' +
                                 '<div class="text-xs text-gray-400 mt-1">' + rule.field_path + ' → ' + rdsParamDisplay + '</div>' +
-                                '<div class="text-[10px] text-gray-500 mt-1">Poll: ' + rule.poll_interval + 's | ' + mappingInfo + '</div>';
+                                '<div class="text-[10px] text-gray-500 mt-1">Poll: ' + (rule.poll_interval || 2) + 's | ' + mappingInfo + '</div>';
 
                 var actions = document.createElement('div');
                 actions.className = 'flex gap-2';
@@ -11819,6 +12606,64 @@ UI_HTML = r"""
             renderConditionalRows();
         }
 
+        var multiActionRows = [];
+
+        function renderMultiActionRows() {
+            var container = document.getElementById('dc_multi_actions_list');
+            if (!container) return;
+            container.innerHTML = '';
+
+            multiActionRows.forEach(function(row, idx) {
+                var div = document.createElement('div');
+                div.className = 'flex gap-2 items-center';
+
+                var paramSelect = document.createElement('select');
+                paramSelect.className = 'flex-1 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                paramSelect.innerHTML = '<option value="">Select param...</option>' +
+                    '<option value="pty">PTY</option>' +
+                    '<option value="ms">MS</option>' +
+                    '<option value="tp">TP</option>' +
+                    '<option value="ta">TA</option>' +
+                    '<option value="pi">PI</option>' +
+                    '<option value="ptyn">PTYN</option>' +
+                    '<option value="rt_text">RT Text (static RadioText)</option>' +
+                    '<option value="rt_a">RT Buffer A</option>' +
+                    '<option value="rt_b">RT Buffer B</option>' +
+                    '<option value="pin">PIN (use value=NOW for current time)</option>' +
+                    '<option value="en_pin">PIN Enable</option>';
+                paramSelect.value = row.param || '';
+                paramSelect.onchange = (function(i) { return function() { multiActionRows[i].param = this.value; }; })(idx);
+
+                var arrow = document.createElement('span');
+                arrow.textContent = '→';
+                arrow.className = 'text-gray-500 flex-shrink-0';
+
+                var valueInput = document.createElement('input');
+                valueInput.type = 'text';
+                valueInput.value = row.value || '';
+                valueInput.placeholder = 'Value (or NOW for PIN)';
+                valueInput.className = 'flex-1 bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                valueInput.oninput = (function(i) { return function() { multiActionRows[i].value = this.value; }; })(idx);
+
+                var delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.textContent = '✕';
+                delBtn.className = 'px-2 py-1 bg-red-900 hover:bg-red-700 rounded text-xs flex-shrink-0';
+                delBtn.onclick = (function(i) { return function() { multiActionRows.splice(i, 1); renderMultiActionRows(); }; })(idx);
+
+                div.appendChild(paramSelect);
+                div.appendChild(arrow);
+                div.appendChild(valueInput);
+                div.appendChild(delBtn);
+                container.appendChild(div);
+            });
+        }
+
+        function addMultiActionRow() {
+            multiActionRows.push({ param: '', value: '' });
+            renderMultiActionRows();
+        }
+
         function addDynamicControlRule() {
             document.getElementById('dc_edit_idx').value = '';
             document.getElementById('dc_name').value = '';
@@ -11830,8 +12675,10 @@ UI_HTML = r"""
             document.getElementById('dc_enabled').checked = true;
             document.getElementById('dc_value_mappings').innerHTML = '';
             conditionRows = [];
+            multiActionRows = [];
             var dcMatchList = document.getElementById('dc_match_list'); if (dcMatchList) dcMatchList.value = '';
             var dcListOutput = document.getElementById('dc_list_output'); if (dcListOutput) dcListOutput.value = '';
+            var dcKeywords = document.getElementById('dc_keywords'); if (dcKeywords) dcKeywords.value = '';
             ptyMappings = {};
             currentDynamicControlFieldValue = null;
             currentDynamicControlFieldType = null;
@@ -11856,8 +12703,10 @@ UI_HTML = r"""
             // Clear existing mappings
             document.getElementById('dc_value_mappings').innerHTML = '';
             conditionRows = [];
+            multiActionRows = [];
             var lmEl = document.getElementById('dc_match_list'); if (lmEl) lmEl.value = '';
             var loEl = document.getElementById('dc_list_output'); if (loEl) loEl.value = '';
+            var kwEl = document.getElementById('dc_keywords'); if (kwEl) kwEl.value = '';
             ptyMappings = {};
             currentDynamicControlFieldValue = null;
             currentDynamicControlFieldType = null;
@@ -11897,7 +12746,16 @@ UI_HTML = r"""
                 if (matchListEl) matchListEl.value = (rule.match_list || []).join('\n');
                 if (listOutputEl) listOutputEl.value = rule.list_output || '';
             }
-            
+
+            // Load multi_action fields
+            if (rule.mapping_type === 'multi_action') {
+                var keywordsEl = document.getElementById('dc_keywords');
+                if (keywordsEl) keywordsEl.value = rule.keywords || '';
+                multiActionRows = (rule.actions || []).map(function(a) {
+                    return { param: a.param || '', value: a.value || '' };
+                });
+            }
+
             updateDynamicControlParamUI();
             
             document.getElementById('dynamic_control_modal_title').textContent = 'Edit Control Rule';
@@ -11981,7 +12839,7 @@ UI_HTML = r"""
                 var listText = matchListEl ? matchListEl.value.trim() : '';
                 rule.match_list = listText ? listText.split('\n').map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; }) : [];
                 rule.list_output = listOutputEl ? listOutputEl.value.trim() : '';
-                
+
                 if (!rule.match_list.length) {
                     alert('At least one match value is required for list match');
                     return;
@@ -11990,6 +12848,26 @@ UI_HTML = r"""
                     alert('Output value is required for list match');
                     return;
                 }
+            }
+
+            // Add multi_action fields if applicable
+            if (mappingType === 'multi_action') {
+                var keywordsEl = document.getElementById('dc_keywords');
+                rule.keywords = keywordsEl ? keywordsEl.value.trim() : '';
+                rule.actions = multiActionRows.map(function(row) {
+                    return { param: row.param, value: row.value };
+                }).filter(function(action) { return action.param && action.value; });
+
+                if (!rule.keywords) {
+                    alert('Keywords are required for multi-action mapping');
+                    return;
+                }
+                if (!rule.actions.length) {
+                    alert('At least one action is required for multi-action mapping');
+                    return;
+                }
+                // For multi_action, rds_param is not used (set to empty to avoid confusion)
+                rule.rds_param = '';
             }
 
             // Validation
@@ -12001,7 +12879,7 @@ UI_HTML = r"""
                 alert('Please select a JSON field (click "Test & Browse")');
                 return;
             }
-            if (!rule.rds_param) {
+            if (mappingType !== 'multi_action' && !rule.rds_param) {
                 alert('RDS Parameter is required');
                 return;
             }
@@ -12274,21 +13152,23 @@ UI_HTML = r"""
             var customMapping = document.getElementById('dc_custom_mapping_section');
             var conditionalMapping = document.getElementById('dc_conditional_section');
             var listMatchSection = document.getElementById('dc_list_match_section');
+            var multiActionSection = document.getElementById('dc_multi_action_section');
             var mappingTypeElement = document.getElementById('dc_mapping_type');
-            
+
             if (!mappingTypeElement) {
                 console.error('[DEBUG] dc_mapping_type element not found!');
                 return;
             }
-            
+
             var mappingType = mappingTypeElement.value;
-            
+
             // Hide all
             autoMapping.style.display = 'none';
             ptyMapping.style.display = 'none';
             customMapping.style.display = 'none';
             conditionalMapping.style.display = 'none';
             if (listMatchSection) listMatchSection.style.display = 'none';
+            if (multiActionSection) multiActionSection.style.display = 'none';
             
             // Reset conditional inputs visibility
             document.getElementById('dc_output_value').style.display = 'block';
@@ -12331,8 +13211,8 @@ UI_HTML = r"""
                 if (currentDynamicControlFieldValue !== null) {
                     showDynamicControlQuickSetup();
                 }
-            } else if (param === 'ptyn' || param === 'pi') {
-                // Allow all mapping types for PTYN and PI
+            } else if (param === 'ptyn' || param === 'pi' || param === 'rt_text' || param === 'rt_a' || param === 'rt_b') {
+                // Allow all mapping types for PTYN, PI, and RT text parameters
                 autoMapping.style.display = 'block';
                 if (mappingType === 'text_match' || document.getElementById('dc_value_mappings').children.length > 0) {
                     customMapping.style.display = 'block';
@@ -12363,6 +13243,15 @@ UI_HTML = r"""
                     if (listMatchSection) listMatchSection.style.display = 'block';
                 }
             }
+            // Handle multi_action mapping type
+            if (mappingType === 'multi_action') {
+                autoMapping.style.display = 'block';
+                if (multiActionSection) {
+                    multiActionSection.style.display = 'block';
+                    renderMultiActionRows();
+                }
+            }
+
             // Re-render condition rows whenever param/mapping type changes
             if (mappingType === 'conditional') renderConditionalRows();
         }
@@ -12495,6 +13384,544 @@ UI_HTML = r"""
             jsonInput.focus();
             updateCurrentMappingsDisplay();
         }
+
+        // ============================================================================
+        // TEXT CONDITIONS TABLE - Simplified Dynamic Control Interface
+        // ============================================================================
+
+        var textConditionsData = {
+            url: "",
+            field_path: "",
+            poll_interval: 5,
+            conditions: []
+        };
+
+        // Action parameter options
+        var tcActionParams = [
+            {value: "pty", label: "PTY (Programme Type)", type: "select", options: [
+                "0: None", "1: News", "2: Current Affairs", "3: Information", "4: Sport",
+                "5: Education", "6: Drama", "7: Culture", "8: Science", "9: Varied",
+                "10: Pop Music", "11: Rock Music", "12: Easy Listening", "13: Light Classical",
+                "14: Serious Classical", "15: Other Music", "16: Weather", "17: Finance",
+                "18: Children's", "19: Social Affairs", "20: Religion", "21: Phone-In",
+                "22: Travel", "23: Leisure", "24: Jazz", "25: Country", "26: National Music",
+                "27: Oldies", "28: Folk Music", "29: Documentary", "30: Alarm Test", "31: Alarm"
+            ]},
+            {value: "tp", label: "TP (Traffic Programme)", type: "select", options: ["0: Off", "1: On"]},
+            {value: "ta", label: "TA (Traffic Announcement)", type: "select", options: ["0: Off", "1: On"]},
+            {value: "ms", label: "MS (Music/Speech)", type: "select", options: ["0: Speech", "1: Music"]},
+            {value: "pi", label: "PI (Programme ID)", type: "text"},
+            {value: "ptyn", label: "PTYN (Programme Type Name)", type: "text"},
+            {value: "rt_text", label: "RT (RadioText)", type: "text"},
+            {value: "rt_a", label: "RT Buffer A", type: "text"},
+            {value: "rt_b", label: "RT Buffer B", type: "text"},
+            {value: "json_value", label: "Use JSON Value", type: "json"}
+        ];
+
+        var originalDynamicRules = [];  // Preserve original rules
+
+        function loadTextConditions() {
+            try {
+                var rulesInput = document.getElementById('dynamic_control_rules');
+                if (!rulesInput || !rulesInput.value || rulesInput.value === '[]') {
+                    textConditionsData = {url: "", field_path: "", poll_interval: 5, conditions: []};
+                    originalDynamicRules = [];
+                    renderTextConditionsTable();
+                    return;
+                }
+
+                var rules = JSON.parse(rulesInput.value);
+                originalDynamicRules = rules;  // PRESERVE ORIGINAL
+
+                // ONLY load if it's the new format with _tc_config marker
+                if (rules.length > 0 && rules[0]._tc_config) {
+                    // New text conditions format
+                    textConditionsData = rules[0]._tc_config;
+                } else {
+                    // Old format rules exist - DON'T TOUCH THEM
+                    // Start with empty text conditions
+                    textConditionsData = {url: "", field_path: "", poll_interval: 5, conditions: []};
+                }
+            } catch (e) {
+                console.error("Error loading text conditions:", e);
+                textConditionsData = {url: "", field_path: "", poll_interval: 5, conditions: []};
+                originalDynamicRules = [];
+            }
+
+            // Update UI fields
+            var urlEl = document.getElementById('tc_url');
+            var fieldEl = document.getElementById('tc_field_path');
+            var pollEl = document.getElementById('tc_poll_interval');
+
+            if (urlEl) urlEl.value = textConditionsData.url || "";
+            if (fieldEl) fieldEl.value = textConditionsData.field_path || "";
+            if (pollEl) pollEl.value = textConditionsData.poll_interval || 5;
+
+            renderTextConditionsTable();
+        }
+
+        function saveTextConditions() {
+            // Read values from UI
+            textConditionsData.url = document.getElementById('tc_url').value.trim();
+            textConditionsData.field_path = document.getElementById('tc_field_path').value.trim();
+            textConditionsData.poll_interval = parseInt(document.getElementById('tc_poll_interval').value) || 5;
+
+            // Check if we're using text conditions or preserving old rules
+            var backendRules = [];
+
+            if (textConditionsData.conditions.length > 0 || textConditionsData.url || textConditionsData.field_path) {
+                // User is using new text conditions - save in new format
+                if (textConditionsData.url && textConditionsData.field_path && textConditionsData.conditions.length > 0) {
+                    backendRules = [{
+                        _tc_config: textConditionsData,  // Store full config for reload
+                        enabled: true,
+                        url: textConditionsData.url,
+                        field_path: textConditionsData.field_path,
+                        poll_interval: textConditionsData.poll_interval,
+                        mapping_type: "text_conditions",
+                        text_conditions: textConditionsData.conditions
+                    }];
+                }
+            } else {
+                // No text conditions defined - preserve original rules
+                backendRules = originalDynamicRules;
+            }
+
+            // Save to hidden input and sync
+            var rulesInput = document.getElementById('dynamic_control_rules');
+            rulesInput.value = JSON.stringify(backendRules);
+            socket.emit('update', { dynamic_control_rules: JSON.stringify(backendRules) });
+        }
+
+        function renderTextConditionsTable() {
+            var tbody = document.getElementById('tc_conditions_tbody');
+            if (!tbody) return;
+
+            tbody.innerHTML = '';
+
+            if (textConditionsData.conditions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="px-3 py-4 text-center text-gray-500 italic">No conditions yet. Click "+ Add Condition" to create one.</td></tr>';
+                return;
+            }
+
+            for (var i = 0; i < textConditionsData.conditions.length; i++) {
+                var cond = textConditionsData.conditions[i];
+                var row = document.createElement('tr');
+                row.className = 'hover:bg-gray-800';
+
+                // Row number
+                var numCell = document.createElement('td');
+                numCell.className = 'px-2 py-2 text-gray-400';
+                numCell.textContent = (i + 1);
+                row.appendChild(numCell);
+
+                // Match pattern
+                var matchCell = document.createElement('td');
+                matchCell.className = 'px-2 py-2';
+                var matchInput = document.createElement('input');
+                matchInput.type = 'text';
+                matchInput.value = cond.match || '';
+                matchInput.placeholder = 'e.g., News, Notturno, Jazz';
+                matchInput.className = 'w-full bg-black border border-gray-600 rounded px-2 py-1 text-xs';
+                matchInput.onchange = (function(idx) {
+                    return function() {
+                        textConditionsData.conditions[idx].match = this.value;
+                        saveTextConditions();
+                    };
+                })(i);
+                matchCell.appendChild(matchInput);
+                row.appendChild(matchCell);
+
+                // Then actions
+                var thenCell = document.createElement('td');
+                thenCell.className = 'px-2 py-2';
+                thenCell.appendChild(renderActionEditor(cond.then_actions || [], i, 'then'));
+                row.appendChild(thenCell);
+
+                // Else actions
+                var elseCell = document.createElement('td');
+                elseCell.className = 'px-2 py-2';
+                elseCell.appendChild(renderActionEditor(cond.else_actions || [], i, 'else'));
+                row.appendChild(elseCell);
+
+                // Action buttons
+                var actionsCell = document.createElement('td');
+                actionsCell.className = 'px-2 py-2 text-center';
+
+                var deleteBtn = document.createElement('button');
+                deleteBtn.textContent = '✕';
+                deleteBtn.className = 'px-2 py-1 bg-red-600 hover:bg-red-500 rounded text-xs';
+                deleteBtn.onclick = (function(idx) {
+                    return function() {
+                        if (confirm('Delete this condition?')) {
+                            textConditionsData.conditions.splice(idx, 1);
+                            saveTextConditions();
+                            renderTextConditionsTable();
+                        }
+                    };
+                })(i);
+                actionsCell.appendChild(deleteBtn);
+                row.appendChild(actionsCell);
+
+                tbody.appendChild(row);
+            }
+        }
+
+        function renderActionEditor(actions, condIdx, actionType) {
+            var container = document.createElement('div');
+            container.className = 'space-y-1';
+
+            if (actions.length === 0) {
+                var emptyMsg = document.createElement('div');
+                emptyMsg.className = 'text-gray-500 italic text-xs';
+                emptyMsg.textContent = '(none)';
+                container.appendChild(emptyMsg);
+            } else {
+                for (var i = 0; i < actions.length; i++) {
+                    (function(actionIdx) {
+                        var action = actions[actionIdx];
+                        var actionDiv = document.createElement('div');
+                        actionDiv.className = 'flex gap-1 items-center bg-gray-800 rounded px-2 py-1 hover:bg-gray-700';
+
+                        var paramInfo = tcActionParams.find(function(p) { return p.value === action.param; });
+                        var paramLabel = paramInfo ? paramInfo.label.split('(')[0].trim() : action.param;
+
+                        var content = document.createElement('div');
+                        content.className = 'flex-1 flex gap-1 items-center cursor-pointer';
+                        content.onclick = function() {
+                            editTCAction(condIdx, actionType, actionIdx);
+                        };
+
+                        var label = document.createElement('span');
+                        label.className = 'text-gray-400 text-[10px]';
+                        label.textContent = paramLabel + ':';
+                        content.appendChild(label);
+
+                        var valueSpan = document.createElement('span');
+                        valueSpan.className = 'text-white text-xs font-semibold';
+                        valueSpan.textContent = formatActionValue(action.param, action.value);
+                        content.appendChild(valueSpan);
+
+                        actionDiv.appendChild(content);
+
+                        // Delete button
+                        var delBtn = document.createElement('button');
+                        delBtn.textContent = '✕';
+                        delBtn.className = 'text-xs text-red-400 hover:text-red-300 px-1';
+                        delBtn.onclick = function(e) {
+                            e.stopPropagation();
+                            deleteTCAction(condIdx, actionType, actionIdx);
+                        };
+                        actionDiv.appendChild(delBtn);
+
+                        container.appendChild(actionDiv);
+                    })(i);
+                }
+            }
+
+            var addBtn = document.createElement('button');
+            addBtn.textContent = '+ Add';
+            addBtn.className = 'text-xs text-blue-400 hover:text-blue-300';
+            addBtn.onclick = (function(idx, type) {
+                return function() {
+                    openTCActionModal(idx, type, -1);
+                };
+            })(condIdx, actionType);
+            container.appendChild(addBtn);
+
+            return container;
+        }
+
+        function formatActionValue(param, value) {
+            if (param === 'pty') {
+                var ptyNames = ['None','News','Current Affairs','Info','Sport','Education','Drama','Culture','Science','Varied','Pop','Rock','Easy Listening','Light Classical','Serious Classical','Other Music','Weather','Finance',"Children's",'Social','Religion','Phone-In','Travel','Leisure','Jazz','Country','National','Oldies','Folk','Documentary','Alarm Test','Alarm'];
+                var ptyNum = parseInt(value);
+                return ptyNum + ': ' + (ptyNames[ptyNum] || value);
+            } else if (param === 'tp' || param === 'ta') {
+                return value == 1 ? 'On' : 'Off';
+            } else if (param === 'ms') {
+                return value == 1 ? 'Music' : 'Speech';
+            } else if (param === 'json_value') {
+                return '(use JSON value)';
+            }
+            return value;
+        }
+
+        function addTextCondition() {
+            textConditionsData.conditions.push({
+                match: "",
+                then_actions: [],
+                else_actions: []
+            });
+            saveTextConditions();
+            renderTextConditionsTable();
+        }
+
+        var currentActionModal = {condIdx: -1, actionType: "", actionIdx: -1};
+
+        function openTCActionModal(condIdx, actionType, actionIdx) {
+            currentActionModal = {condIdx: condIdx, actionType: actionType, actionIdx: actionIdx};
+
+            var modal = document.getElementById('tc_action_modal');
+            var title = document.getElementById('tc_action_modal_title');
+            var paramSelect = document.getElementById('tc_action_param');
+            var valueText = document.getElementById('tc_action_value_text');
+            var valueSelect = document.getElementById('tc_action_value_select');
+
+            // Reset form
+            paramSelect.value = '';
+            valueText.value = '';
+            valueText.style.display = 'block';
+            valueSelect.style.display = 'none';
+
+            // If editing existing action
+            if (actionIdx >= 0) {
+                title.textContent = 'Edit Action';
+                var actions = actionType === 'then'
+                    ? textConditionsData.conditions[condIdx].then_actions
+                    : textConditionsData.conditions[condIdx].else_actions;
+                var action = actions[actionIdx];
+
+                paramSelect.value = action.param;
+                updateTCActionValueInput();
+
+                // Set the value
+                var paramInfo = tcActionParams.find(function(p) { return p.value === action.param; });
+                if (paramInfo && paramInfo.type === 'select') {
+                    valueSelect.value = action.value;
+                } else {
+                    valueText.value = action.value === 'JSON_VALUE' ? '' : action.value;
+                }
+            } else {
+                title.textContent = 'Add Action';
+            }
+
+            modal.style.display = 'flex';
+        }
+
+        function closeTCActionModal() {
+            document.getElementById('tc_action_modal').style.display = 'none';
+        }
+
+        function updateTCActionValueInput() {
+            var param = document.getElementById('tc_action_param').value;
+            var valueText = document.getElementById('tc_action_value_text');
+            var valueSelect = document.getElementById('tc_action_value_select');
+
+            var paramInfo = tcActionParams.find(function(p) { return p.value === param; });
+
+            if (!paramInfo) {
+                valueText.style.display = 'block';
+                valueSelect.style.display = 'none';
+                return;
+            }
+
+            if (paramInfo.type === 'select') {
+                // Show dropdown
+                valueText.style.display = 'none';
+                valueSelect.style.display = 'block';
+                valueSelect.innerHTML = '';
+
+                paramInfo.options.forEach(function(opt, idx) {
+                    var option = document.createElement('option');
+                    option.value = idx;
+                    option.textContent = opt;
+                    valueSelect.appendChild(option);
+                });
+            } else if (paramInfo.type === 'json') {
+                // JSON value passthrough
+                valueText.style.display = 'none';
+                valueSelect.style.display = 'none';
+            } else {
+                // Show text input
+                valueText.style.display = 'block';
+                valueSelect.style.display = 'none';
+                valueText.placeholder = 'Enter ' + paramInfo.label;
+            }
+        }
+
+        function saveTCAction() {
+            var param = document.getElementById('tc_action_param').value;
+            var valueText = document.getElementById('tc_action_value_text');
+            var valueSelect = document.getElementById('tc_action_value_select');
+
+            if (!param) {
+                alert('Please select a parameter');
+                return;
+            }
+
+            var paramInfo = tcActionParams.find(function(p) { return p.value === param; });
+            var value;
+
+            if (paramInfo.type === 'select') {
+                value = valueSelect.value;
+            } else if (paramInfo.type === 'json') {
+                value = 'JSON_VALUE';
+            } else {
+                value = valueText.value.trim();
+                if (!value) {
+                    alert('Please enter a value');
+                    return;
+                }
+            }
+
+            var actions = currentActionModal.actionType === 'then'
+                ? textConditionsData.conditions[currentActionModal.condIdx].then_actions
+                : textConditionsData.conditions[currentActionModal.condIdx].else_actions;
+
+            if (currentActionModal.actionIdx >= 0) {
+                // Edit existing
+                actions[currentActionModal.actionIdx] = {param: param, value: value};
+            } else {
+                // Add new
+                actions.push({param: param, value: value});
+            }
+
+            saveTextConditions();
+            renderTextConditionsTable();
+            closeTCActionModal();
+        }
+
+        function editTCAction(condIdx, actionType, actionIdx) {
+            openTCActionModal(condIdx, actionType, actionIdx);
+        }
+
+        function deleteTCAction(condIdx, actionType, actionIdx) {
+            var actions = actionType === 'then'
+                ? textConditionsData.conditions[condIdx].then_actions
+                : textConditionsData.conditions[condIdx].else_actions;
+
+            actions.splice(actionIdx, 1);
+            saveTextConditions();
+            renderTextConditionsTable();
+        }
+
+        var currentTextConditionsJSON = null;
+
+        function testTextConditionsURL() {
+            var url = document.getElementById('tc_url').value.trim();
+            if (!url) {
+                alert('Please enter a JSON URL first');
+                return;
+            }
+
+            var browser = document.getElementById('tc_json_browser');
+            var tree = document.getElementById('tc_json_tree');
+
+            tree.innerHTML = '<div class="text-gray-400">🔄 Fetching JSON...</div>';
+            browser.style.display = 'block';
+
+            fetch('/dynamic_control/fetch_json', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: url})
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(result) {
+                if (result.error) {
+                    tree.innerHTML = '<div class="text-red-400">✗ ' + result.error + '</div>';
+                } else if (result.success && result.data) {
+                    currentTextConditionsJSON = result.data;
+                    renderTextConditionsJSONTree(result.data, tree, '');
+                } else {
+                    tree.innerHTML = '<div class="text-red-400">✗ Unexpected response format</div>';
+                }
+            })
+            .catch(function(err) {
+                tree.innerHTML = '<div class="text-red-400">✗ Failed to fetch: ' + (err.message || err) + '</div>';
+            });
+        }
+
+        function closeTextConditionsBrowser() {
+            document.getElementById('tc_json_browser').style.display = 'none';
+        }
+
+        function renderTextConditionsJSONTree(obj, container, path) {
+            container.innerHTML = '';
+
+            function renderNode(value, key, currentPath) {
+                var fullPath = currentPath ? currentPath + '.' + key : key;
+                var div = document.createElement('div');
+                div.className = 'py-0.5';
+
+                if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                    // Object node (expandable)
+                    var header = document.createElement('div');
+                    header.className = 'text-gray-400 cursor-pointer hover:text-white';
+                    header.innerHTML = '▶ ' + key + ' <span class="text-gray-600">{...}</span>';
+
+                    var children = document.createElement('div');
+                    children.className = 'pl-4 border-l border-gray-700 ml-2';
+                    children.style.display = 'none';
+
+                    header.onclick = function(e) {
+                        e.stopPropagation();
+                        if (children.style.display === 'none') {
+                            children.style.display = 'block';
+                            header.innerHTML = '▼ ' + key + ' <span class="text-gray-600">{...}</span>';
+                            if (!children.hasChildNodes()) {
+                                Object.keys(value).forEach(function(childKey) {
+                                    children.appendChild(renderNode(value[childKey], childKey, fullPath));
+                                });
+                            }
+                        } else {
+                            children.style.display = 'none';
+                            header.innerHTML = '▶ ' + key + ' <span class="text-gray-600">{...}</span>';
+                        }
+                    };
+
+                    div.appendChild(header);
+                    div.appendChild(children);
+                } else if (Array.isArray(value)) {
+                    // Array node
+                    var header = document.createElement('div');
+                    header.className = 'text-gray-400';
+                    header.innerHTML = '▶ ' + key + ' <span class="text-gray-600">[' + value.length + ']</span>';
+                    div.appendChild(header);
+                } else {
+                    // Leaf node (clickable)
+                    var leaf = document.createElement('div');
+                    leaf.className = 'cursor-pointer hover:bg-blue-900 px-1 rounded';
+                    leaf.innerHTML = '<span class="text-cyan-400">' + key + '</span>: <span class="text-yellow-400">' + JSON.stringify(value) + '</span>';
+                    leaf.onclick = function(e) {
+                        e.stopPropagation();
+                        document.getElementById('tc_field_path').value = fullPath;
+                        document.getElementById('tc_field_path').classList.add('border-green-500');
+                        setTimeout(function() {
+                            document.getElementById('tc_field_path').classList.remove('border-green-500');
+                        }, 1000);
+                    };
+                    div.appendChild(leaf);
+                }
+
+                return div;
+            }
+
+            // Render top-level keys
+            Object.keys(obj).forEach(function(key) {
+                container.appendChild(renderNode(obj[key], key, ''));
+            });
+        }
+
+        // Load text conditions on page load
+        setTimeout(function() {
+            loadTextConditions();
+        }, 500);
+
+        // Auto-save when URL/field/poll changes
+        document.addEventListener('DOMContentLoaded', function() {
+            var tcUrlEl = document.getElementById('tc_url');
+            var tcFieldEl = document.getElementById('tc_field_path');
+            var tcPollEl = document.getElementById('tc_poll_interval');
+
+            if (tcUrlEl) tcUrlEl.onchange = saveTextConditions;
+            if (tcFieldEl) tcFieldEl.onchange = saveTextConditions;
+            if (tcPollEl) tcPollEl.onchange = saveTextConditions;
+        });
+
+        // ============================================================================
+        // END TEXT CONDITIONS TABLE
+        // ============================================================================
 
         // Custom ODA Management
         var customODAList = [];
