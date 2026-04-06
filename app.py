@@ -9478,10 +9478,17 @@ UI_HTML = r"""
             // Show/hide RT+ options based on enabled state (for all modes)
             if (opts) opts.style.display = enabled ? 'block' : 'none';
 
-            // For manual mode: ALWAYS show simple text input (don't switch to sample text)
+            // For manual mode: show simple text when RT+ disabled, sample text when RT+ enabled
             if (sourceType === 'manual') {
-                if (manualSimple) manualSimple.style.display = 'block';
-                if (manualBuilder) manualBuilder.style.display = 'none';
+                if (!enabled) {
+                    // RT+ disabled: show simple text input
+                    if (manualSimple) manualSimple.style.display = 'block';
+                    if (manualBuilder) manualBuilder.style.display = 'none';
+                } else {
+                    // RT+ enabled: show sample text builder
+                    if (manualSimple) manualSimple.style.display = 'none';
+                    if (manualBuilder) manualBuilder.style.display = 'block';
+                }
             } else {
                 // Hide manual builders for non-manual modes
                 if (manualSimple) manualSimple.style.display = 'none';
